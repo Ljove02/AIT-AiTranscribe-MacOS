@@ -1,3 +1,5 @@
+![Banner](git-banner.png)
+
 # AiTranscribe
 
 A powerful macOS menu bar application for local speech-to-text transcription. Runs completely offline using state-of-the-art AI models.
