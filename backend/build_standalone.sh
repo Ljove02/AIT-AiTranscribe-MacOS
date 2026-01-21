@@ -109,6 +109,10 @@ if [ -f "dist/aitranscribe-server" ]; then
     echo "Copying to Xcode project..."
     cp "dist/aitranscribe-server" "$RESOURCES_DIR/"
 
+    # Also copy the setup script for NeMo installation
+    echo "Copying NeMo setup script..."
+    cp "setup_nemo_venv.py" "$RESOURCES_DIR/"
+
     echo ""
     echo "========================================"
     echo "SUCCESS!"
@@ -116,11 +120,12 @@ if [ -f "dist/aitranscribe-server" ]; then
     echo ""
     echo "The standalone backend has been built and copied to:"
     echo "  $RESOURCES_DIR/aitranscribe-server"
+    echo "  $RESOURCES_DIR/setup_nemo_venv.py"
     echo ""
     echo "Next steps:"
     echo "1. Open the Xcode project"
-    echo "2. Add 'Resources/aitranscribe-server' to the target"
-    echo "3. Ensure it's copied to the app bundle (Build Phases > Copy Bundle Resources)"
+    echo "2. Add 'Resources/aitranscribe-server' and 'Resources/setup_nemo_venv.py' to the target"
+    echo "3. Ensure they're copied to the app bundle (Build Phases > Copy Bundle Resources)"
     echo "4. Build and archive the app for distribution"
     echo ""
 else
