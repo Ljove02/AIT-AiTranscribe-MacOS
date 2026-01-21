@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+Entitlements - App Permissions
+==============================
+
+Entitlements tell macOS what your app is allowed to do.
+This is part of Apple's security model (sandboxing).
+
+For our app we need:
+- Audio input (microphone recording)
+- Network client (to talk to Python backend)
+
+If you try to use a feature without the entitlement, it will fail silently
+or show a permission error.
+-->
+<plist version="1.0">
+<dict>
+    <!--
+    App Sandbox
+    Sandboxing restricts what the app can do for security.
+    For development, we can disable it. For App Store, it's required.
+    -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!-- Audio Input (Microphone) -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- Network Access (to talk to Python backend) -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

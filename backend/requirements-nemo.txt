@@ -1,0 +1,37 @@
+# NeMo-specific dependencies for AiTranscribe
+# ============================================
+#
+# These packages are required for NVIDIA Parakeet/Nemotron models.
+# They are installed separately due to their large size (~3GB total).
+#
+# Install via: pip install -r requirements-nemo.txt
+
+# ---- Base server dependencies (same as requirements.txt) ----
+# Web framework
+fastapi>=0.104.0
+uvicorn>=0.24.0
+python-multipart
+
+# Faster Whisper (for OpenAI Whisper models)
+faster-whisper
+
+# Audio handling
+sounddevice
+scipy
+
+# Utilities
+numpy
+psutil
+requests
+huggingface_hub
+
+# ---- NeMo-specific dependencies ----
+# PyTorch (required for NeMo)
+torch
+torchaudio
+
+# NVIDIA NeMo ASR framework
+nemo_toolkit[asr]
+
+# Configuration management (NeMo dependency)
+omegaconf

@@ -1,0 +1,654 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXFileReference section */
+		1E1390D42F1FF2900070C41D /* backend */ = {isa = PBXFileReference; lastKnownFileType = text; name = backend; path = ../backend; sourceTree = "<group>"; };
+		1E1390D52F1FF2900070C41D /* settings.local.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = settings.local.json; sourceTree = "<group>"; };
+		1E1390D72F1FF2900070C41D /* Icon-iOS-Default-16x16@1x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-16x16@1x.png"; sourceTree = "<group>"; };
+		1E1390D82F1FF2900070C41D /* Icon-iOS-Default-16x16@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-16x16@2x.png"; sourceTree = "<group>"; };
+		1E1390D92F1FF2900070C41D /* Icon-iOS-Default-20x20@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-20x20@2x.png"; sourceTree = "<group>"; };
+		1E1390DA2F1FF2900070C41D /* Icon-iOS-Default-20x20@3x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-20x20@3x.png"; sourceTree = "<group>"; };
+		1E1390DB2F1FF2900070C41D /* Icon-iOS-Default-29x29@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-29x29@2x.png"; sourceTree = "<group>"; };
+		1E1390DC2F1FF2900070C41D /* Icon-iOS-Default-29x29@3x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-29x29@3x.png"; sourceTree = "<group>"; };
+		1E1390DD2F1FF2900070C41D /* Icon-iOS-Default-32x32@1x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-32x32@1x.png"; sourceTree = "<group>"; };
+		1E1390DE2F1FF2900070C41D /* Icon-iOS-Default-32x32@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-32x32@2x.png"; sourceTree = "<group>"; };
+		1E1390DF2F1FF2900070C41D /* Icon-iOS-Default-38x38@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-38x38@2x.png"; sourceTree = "<group>"; };
+		1E1390E02F1FF2900070C41D /* Icon-iOS-Default-38x38@3x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-38x38@3x.png"; sourceTree = "<group>"; };
+		1E1390E12F1FF2900070C41D /* Icon-iOS-Default-40x40@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-40x40@2x.png"; sourceTree = "<group>"; };
+		1E1390E22F1FF2900070C41D /* Icon-iOS-Default-40x40@3x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-40x40@3x.png"; sourceTree = "<group>"; };
+		1E1390E32F1FF2900070C41D /* Icon-iOS-Default-60x60@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-60x60@2x.png"; sourceTree = "<group>"; };
+		1E1390E42F1FF2900070C41D /* Icon-iOS-Default-60x60@3x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-60x60@3x.png"; sourceTree = "<group>"; };
+		1E1390E52F1FF2900070C41D /* Icon-iOS-Default-64x64@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-64x64@2x.png"; sourceTree = "<group>"; };
+		1E1390E62F1FF2900070C41D /* Icon-iOS-Default-64x64@3x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-64x64@3x.png"; sourceTree = "<group>"; };
+		1E1390E72F1FF2900070C41D /* Icon-iOS-Default-68x68@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-68x68@2x.png"; sourceTree = "<group>"; };
+		1E1390E82F1FF2900070C41D /* Icon-iOS-Default-76x76@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-76x76@2x.png"; sourceTree = "<group>"; };
+		1E1390E92F1FF2900070C41D /* Icon-iOS-Default-83.5x83.5@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-83.5x83.5@2x.png"; sourceTree = "<group>"; };
+		1E1390EA2F1FF2900070C41D /* Icon-iOS-Default-128x128@1x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-128x128@1x.png"; sourceTree = "<group>"; };
+		1E1390EB2F1FF2900070C41D /* Icon-iOS-Default-128x128@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-128x128@2x.png"; sourceTree = "<group>"; };
+		1E1390EC2F1FF2900070C41D /* Icon-iOS-Default-256x256@1x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-256x256@1x.png"; sourceTree = "<group>"; };
+		1E1390ED2F1FF2900070C41D /* Icon-iOS-Default-256x256@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-256x256@2x.png"; sourceTree = "<group>"; };
+		1E1390EE2F1FF2900070C41D /* Icon-iOS-Default-512x512@1x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-512x512@1x.png"; sourceTree = "<group>"; };
+		1E1390EF2F1FF2900070C41D /* Icon-iOS-Default-1024x1024@1x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-1024x1024@1x.png"; sourceTree = "<group>"; };
+		1E1390F12F1FF2900070C41D /* Untitled.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = Untitled.icon; sourceTree = "<group>"; };
+		1E1390F32F1FF2900070C41D /* AiTranscribe.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AiTranscribe.entitlements; sourceTree = "<group>"; };
+		1E1390F42F1FF2900070C41D /* AiTranscribeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AiTranscribeApp.swift; sourceTree = "<group>"; };
+		1E1390F52F1FF2900070C41D /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		1E1390F62F1FF2900070C41D /* APP_ICON_INTEGRATION_GUIDE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = APP_ICON_INTEGRATION_GUIDE.md; sourceTree = "<group>"; };
+		1E1390F72F1FF2900070C41D /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
+		1E1390F82F1FF2900070C41D /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		1E1390F92F1FF2900070C41D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		1E1390FA2F1FF2900070C41D /* AudioManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioManager.swift; sourceTree = "<group>"; };
+		1E1390FB2F1FF2900070C41D /* AudioRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRecorder.swift; sourceTree = "<group>"; };
+		1E1390FC2F1FF2900070C41D /* BACKEND_MODEL_UPDATES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BACKEND_MODEL_UPDATES.md; sourceTree = "<group>"; };
+		1E1390FD2F1FF2900070C41D /* BackendManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendManager.swift; sourceTree = "<group>"; };
+		1E1390FE2F1FF2900070C41D /* BUGFIXES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BUGFIXES.md; sourceTree = "<group>"; };
+		1E1390FF2F1FF2900070C41D /* COMPLETE_UPDATE_SUMMARY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = COMPLETE_UPDATE_SUMMARY.md; sourceTree = "<group>"; };
+		1E1391002F1FF2900070C41D /* DEBUG_FEATURES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = DEBUG_FEATURES.md; sourceTree = "<group>"; };
+		1E1391012F1FF2900070C41D /* DebugConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugConsoleView.swift; sourceTree = "<group>"; };
+		1E1391022F1FF2900070C41D /* DELETE_DUPLICATES_INSTRUCTIONS.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = DELETE_DUPLICATES_INSTRUCTIONS.md; sourceTree = "<group>"; };
+		1E1391032F1FF2900070C41D /* FINAL_POLISH.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = FINAL_POLISH.md; sourceTree = "<group>"; };
+		1E1391042F1FF2900070C41D /* FIXES_SUMMARY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = FIXES_SUMMARY.md; sourceTree = "<group>"; };
+		1E1391052F1FF2900070C41D /* HistoryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryManager.swift; sourceTree = "<group>"; };
+		1E1391062F1FF2900070C41D /* HotkeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotkeyManager.swift; sourceTree = "<group>"; };
+		1E1391072F1FF2900070C41D /* Icon-iOS-Default-256x256@1x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-256x256@1x.png"; sourceTree = "<group>"; };
+		1E1391082F1FF2900070C41D /* IMPLEMENTATION_CHECKLIST.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = IMPLEMENTATION_CHECKLIST.md; sourceTree = "<group>"; };
+		1E1391092F1FF2900070C41D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		1E13910A2F1FF2900070C41D /* KeyboardSimulator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardSimulator.swift; sourceTree = "<group>"; };
+		1E13910B2F1FF2900070C41D /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
+		1E13910C2F1FF2900070C41D /* MicrophoneOnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicrophoneOnboardingView.swift; sourceTree = "<group>"; };
+		1E13910D2F1FF2900070C41D /* ModelsOnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelsOnboardingView.swift; sourceTree = "<group>"; };
+		1E13910E2F1FF2900070C41D /* NemoSetupManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NemoSetupManager.swift; sourceTree = "<group>"; };
+		1E13910F2F1FF2900070C41D /* NemoSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NemoSetupView.swift; sourceTree = "<group>"; };
+		1E1391102F1FF2900070C41D /* off.mp3 */ = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = off.mp3; sourceTree = "<group>"; };
+		1E1391112F1FF2900070C41D /* on.mp3 */ = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = on.mp3; sourceTree = "<group>"; };
+		1E1391122F1FF2900070C41D /* ONBOARDING.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = ONBOARDING.md; sourceTree = "<group>"; };
+		1E1391132F1FF2900070C41D /* ONBOARDING_ARCHITECTURE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = ONBOARDING_ARCHITECTURE.md; sourceTree = "<group>"; };
+		1E1391142F1FF2900070C41D /* ONBOARDING_FIXES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = ONBOARDING_FIXES.md; sourceTree = "<group>"; };
+		1E1391152F1FF2900070C41D /* ONBOARDING_IMPLEMENTATION.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = ONBOARDING_IMPLEMENTATION.md; sourceTree = "<group>"; };
+		1E1391162F1FF2900070C41D /* ONBOARDING_QUICK_START.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = ONBOARDING_QUICK_START.md; sourceTree = "<group>"; };
+		1E1391172F1FF2900070C41D /* ONBOARDING_TROUBLESHOOTING.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = ONBOARDING_TROUBLESHOOTING.md; sourceTree = "<group>"; };
+		1E1391182F1FF2900070C41D /* OnboardingContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingContainerView.swift; sourceTree = "<group>"; };
+		1E1391192F1FF2900070C41D /* PERFORMANCE_CHANGES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = PERFORMANCE_CHANGES.md; sourceTree = "<group>"; };
+		1E13911A2F1FF2900070C41D /* PRODUCTION_READY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = PRODUCTION_READY.md; sourceTree = "<group>"; };
+		1E13911B2F1FF2900070C41D /* ReadyOnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadyOnboardingView.swift; sourceTree = "<group>"; };
+		1E13911C2F1FF2900070C41D /* RecordingIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingIndicator.swift; sourceTree = "<group>"; };
+		1E13911D2F1FF2900070C41D /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		1E13911E2F1FF2900070C41D /* ShortcutsOnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutsOnboardingView.swift; sourceTree = "<group>"; };
+		1E13911F2F1FF2900070C41D /* ShortcutsOnboardingView 2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ShortcutsOnboardingView 2.swift"; sourceTree = "<group>"; };
+		1E1391202F1FF2900070C41D /* SoundManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoundManager.swift; sourceTree = "<group>"; };
+		1E1391212F1FF2900070C41D /* SWIFT_UI_CHANGES_SUMMARY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = SWIFT_UI_CHANGES_SUMMARY.md; sourceTree = "<group>"; };
+		1E1391222F1FF2900070C41D /* TestTranscriptionOnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestTranscriptionOnboardingView.swift; sourceTree = "<group>"; };
+		1E1391232F1FF2900070C41D /* UI_UX_POLISH.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = UI_UX_POLISH.md; sourceTree = "<group>"; };
+		1E1391242F1FF2900070C41D /* UPDATED_PERFORMANCE_METRICS.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = UPDATED_PERFORMANCE_METRICS.md; sourceTree = "<group>"; };
+		1E1391252F1FF2900070C41D /* VISUAL_COMPARISON.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = VISUAL_COMPARISON.md; sourceTree = "<group>"; };
+		1E1391262F1FF2900070C41D /* WelcomeOnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeOnboardingView.swift; sourceTree = "<group>"; };
+		1E1391272F1FF2900070C41D /* WINDOW_SIZE_UPDATE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = WINDOW_SIZE_UPDATE.md; sourceTree = "<group>"; };
+		1E1391292F1FF2900070C41D /* model_manager.cpython-312.pyc */ = {isa = PBXFileReference; lastKnownFileType = file; path = "model_manager.cpython-312.pyc"; sourceTree = "<group>"; };
+		1E13912A2F1FF2900070C41D /* model_manager.cpython-313.pyc */ = {isa = PBXFileReference; lastKnownFileType = file; path = "model_manager.cpython-313.pyc"; sourceTree = "<group>"; };
+		1E13912B2F1FF2900070C41D /* recorder.cpython-312.pyc */ = {isa = PBXFileReference; lastKnownFileType = file; path = "recorder.cpython-312.pyc"; sourceTree = "<group>"; };
+		1E13912C2F1FF2900070C41D /* recorder.cpython-313.pyc */ = {isa = PBXFileReference; lastKnownFileType = file; path = "recorder.cpython-313.pyc"; sourceTree = "<group>"; };
+		1E13912D2F1FF2900070C41D /* server.cpython-312.pyc */ = {isa = PBXFileReference; lastKnownFileType = file; path = "server.cpython-312.pyc"; sourceTree = "<group>"; };
+		1E13912E2F1FF2900070C41D /* server.cpython-313.pyc */ = {isa = PBXFileReference; lastKnownFileType = file; path = "server.cpython-313.pyc"; sourceTree = "<group>"; };
+		1E1391332F1FF2900070C41D /* aitranscribe-server.spec */ = {isa = PBXFileReference; lastKnownFileType = text; path = "aitranscribe-server.spec"; sourceTree = "<group>"; };
+		1E1391342F1FF2900070C41D /* build_standalone.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = build_standalone.sh; sourceTree = "<group>"; };
+		1E1391352F1FF2900070C41D /* model_manager.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = model_manager.py; sourceTree = "<group>"; };
+		1E1391362F1FF2900070C41D /* recorder.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = recorder.py; sourceTree = "<group>"; };
+		1E1391372F1FF2900070C41D /* requirements.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = requirements.txt; sourceTree = "<group>"; };
+		1E1391382F1FF2900070C41D /* requirements-nemo.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "requirements-nemo.txt"; sourceTree = "<group>"; };
+		1E1391392F1FF2900070C41D /* server.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = server.py; sourceTree = "<group>"; };
+		1E13913A2F1FF2900070C41D /* setup_nemo_venv.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = setup_nemo_venv.py; sourceTree = "<group>"; };
+		1E13913C2F1FF2900070C41D /* AiTranscribe.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = AiTranscribe.xcodeproj; sourceTree = "<group>"; };
+		1E1391432F1FF8480070C41D /* aitranscribe-server */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = "aitranscribe-server"; path = "AiTranscribe/Resources/aitranscribe-server"; sourceTree = "<group>"; };
+		1E2647C52F17FEBC00C1C862 /* AiTranscribe.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AiTranscribe.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		1E2647C72F17FEBC00C1C862 /* AiTranscribe */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = AiTranscribe;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		1E2647C22F17FEBC00C1C862 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		1E1390D62F1FF2900070C41D /* .claude */ = {
+			isa = PBXGroup;
+			children = (
+				1E1390D52F1FF2900070C41D /* settings.local.json */,
+			);
+			path = .claude;
+			sourceTree = "<group>";
+		};
+		1E1390F02F1FF2900070C41D /* Icon Exports */ = {
+			isa = PBXGroup;
+			children = (
+				1E1390D72F1FF2900070C41D /* Icon-iOS-Default-16x16@1x.png */,
+				1E1390D82F1FF2900070C41D /* Icon-iOS-Default-16x16@2x.png */,
+				1E1390D92F1FF2900070C41D /* Icon-iOS-Default-20x20@2x.png */,
+				1E1390DA2F1FF2900070C41D /* Icon-iOS-Default-20x20@3x.png */,
+				1E1390DB2F1FF2900070C41D /* Icon-iOS-Default-29x29@2x.png */,
+				1E1390DC2F1FF2900070C41D /* Icon-iOS-Default-29x29@3x.png */,
+				1E1390DD2F1FF2900070C41D /* Icon-iOS-Default-32x32@1x.png */,
+				1E1390DE2F1FF2900070C41D /* Icon-iOS-Default-32x32@2x.png */,
+				1E1390DF2F1FF2900070C41D /* Icon-iOS-Default-38x38@2x.png */,
+				1E1390E02F1FF2900070C41D /* Icon-iOS-Default-38x38@3x.png */,
+				1E1390E12F1FF2900070C41D /* Icon-iOS-Default-40x40@2x.png */,
+				1E1390E22F1FF2900070C41D /* Icon-iOS-Default-40x40@3x.png */,
+				1E1390E32F1FF2900070C41D /* Icon-iOS-Default-60x60@2x.png */,
+				1E1390E42F1FF2900070C41D /* Icon-iOS-Default-60x60@3x.png */,
+				1E1390E52F1FF2900070C41D /* Icon-iOS-Default-64x64@2x.png */,
+				1E1390E62F1FF2900070C41D /* Icon-iOS-Default-64x64@3x.png */,
+				1E1390E72F1FF2900070C41D /* Icon-iOS-Default-68x68@2x.png */,
+				1E1390E82F1FF2900070C41D /* Icon-iOS-Default-76x76@2x.png */,
+				1E1390E92F1FF2900070C41D /* Icon-iOS-Default-83.5x83.5@2x.png */,
+				1E1390EA2F1FF2900070C41D /* Icon-iOS-Default-128x128@1x.png */,
+				1E1390EB2F1FF2900070C41D /* Icon-iOS-Default-128x128@2x.png */,
+				1E1390EC2F1FF2900070C41D /* Icon-iOS-Default-256x256@1x.png */,
+				1E1390ED2F1FF2900070C41D /* Icon-iOS-Default-256x256@2x.png */,
+				1E1390EE2F1FF2900070C41D /* Icon-iOS-Default-512x512@1x.png */,
+				1E1390EF2F1FF2900070C41D /* Icon-iOS-Default-1024x1024@1x.png */,
+			);
+			path = "Icon Exports";
+			sourceTree = "<group>";
+		};
+		1E1390F22F1FF2900070C41D /* Icons */ = {
+			isa = PBXGroup;
+			children = (
+				1E1390F02F1FF2900070C41D /* Icon Exports */,
+				1E1390F12F1FF2900070C41D /* Untitled.icon */,
+			);
+			path = Icons;
+			sourceTree = "<group>";
+		};
+		1E1391282F1FF2900070C41D /* AiTranscribe */ = {
+			isa = PBXGroup;
+			children = (
+				1E1390F22F1FF2900070C41D /* Icons */,
+				1E1390F32F1FF2900070C41D /* AiTranscribe.entitlements */,
+				1E1390F42F1FF2900070C41D /* AiTranscribeApp.swift */,
+				1E1390F52F1FF2900070C41D /* APIClient.swift */,
+				1E1390F62F1FF2900070C41D /* APP_ICON_INTEGRATION_GUIDE.md */,
+				1E1390F72F1FF2900070C41D /* AppIcon.icns */,
+				1E1390F82F1FF2900070C41D /* AppState.swift */,
+				1E1390F92F1FF2900070C41D /* Assets.xcassets */,
+				1E1390FA2F1FF2900070C41D /* AudioManager.swift */,
+				1E1390FB2F1FF2900070C41D /* AudioRecorder.swift */,
+				1E1390FC2F1FF2900070C41D /* BACKEND_MODEL_UPDATES.md */,
+				1E1390FD2F1FF2900070C41D /* BackendManager.swift */,
+				1E1390FE2F1FF2900070C41D /* BUGFIXES.md */,
+				1E1390FF2F1FF2900070C41D /* COMPLETE_UPDATE_SUMMARY.md */,
+				1E1391002F1FF2900070C41D /* DEBUG_FEATURES.md */,
+				1E1391012F1FF2900070C41D /* DebugConsoleView.swift */,
+				1E1391022F1FF2900070C41D /* DELETE_DUPLICATES_INSTRUCTIONS.md */,
+				1E1391032F1FF2900070C41D /* FINAL_POLISH.md */,
+				1E1391042F1FF2900070C41D /* FIXES_SUMMARY.md */,
+				1E1391052F1FF2900070C41D /* HistoryManager.swift */,
+				1E1391062F1FF2900070C41D /* HotkeyManager.swift */,
+				1E1391072F1FF2900070C41D /* Icon-iOS-Default-256x256@1x.png */,
+				1E1391082F1FF2900070C41D /* IMPLEMENTATION_CHECKLIST.md */,
+				1E1391092F1FF2900070C41D /* Info.plist */,
+				1E13910A2F1FF2900070C41D /* KeyboardSimulator.swift */,
+				1E13910B2F1FF2900070C41D /* MenuBarView.swift */,
+				1E13910C2F1FF2900070C41D /* MicrophoneOnboardingView.swift */,
+				1E13910D2F1FF2900070C41D /* ModelsOnboardingView.swift */,
+				1E13910E2F1FF2900070C41D /* NemoSetupManager.swift */,
+				1E13910F2F1FF2900070C41D /* NemoSetupView.swift */,
+				1E1391102F1FF2900070C41D /* off.mp3 */,
+				1E1391112F1FF2900070C41D /* on.mp3 */,
+				1E1391122F1FF2900070C41D /* ONBOARDING.md */,
+				1E1391132F1FF2900070C41D /* ONBOARDING_ARCHITECTURE.md */,
+				1E1391142F1FF2900070C41D /* ONBOARDING_FIXES.md */,
+				1E1391152F1FF2900070C41D /* ONBOARDING_IMPLEMENTATION.md */,
+				1E1391162F1FF2900070C41D /* ONBOARDING_QUICK_START.md */,
+				1E1391172F1FF2900070C41D /* ONBOARDING_TROUBLESHOOTING.md */,
+				1E1391182F1FF2900070C41D /* OnboardingContainerView.swift */,
+				1E1391192F1FF2900070C41D /* PERFORMANCE_CHANGES.md */,
+				1E13911A2F1FF2900070C41D /* PRODUCTION_READY.md */,
+				1E13911B2F1FF2900070C41D /* ReadyOnboardingView.swift */,
+				1E13911C2F1FF2900070C41D /* RecordingIndicator.swift */,
+				1E13911D2F1FF2900070C41D /* SettingsView.swift */,
+				1E13911E2F1FF2900070C41D /* ShortcutsOnboardingView.swift */,
+				1E13911F2F1FF2900070C41D /* ShortcutsOnboardingView 2.swift */,
+				1E1391202F1FF2900070C41D /* SoundManager.swift */,
+				1E1391212F1FF2900070C41D /* SWIFT_UI_CHANGES_SUMMARY.md */,
+				1E1391222F1FF2900070C41D /* TestTranscriptionOnboardingView.swift */,
+				1E1391232F1FF2900070C41D /* UI_UX_POLISH.md */,
+				1E1391242F1FF2900070C41D /* UPDATED_PERFORMANCE_METRICS.md */,
+				1E1391252F1FF2900070C41D /* VISUAL_COMPARISON.md */,
+				1E1391262F1FF2900070C41D /* WelcomeOnboardingView.swift */,
+				1E1391272F1FF2900070C41D /* WINDOW_SIZE_UPDATE.md */,
+			);
+			path = AiTranscribe;
+			sourceTree = "<group>";
+		};
+		1E13912F2F1FF2900070C41D /* __pycache__ */ = {
+			isa = PBXGroup;
+			children = (
+				1E1391292F1FF2900070C41D /* model_manager.cpython-312.pyc */,
+				1E13912A2F1FF2900070C41D /* model_manager.cpython-313.pyc */,
+				1E13912B2F1FF2900070C41D /* recorder.cpython-312.pyc */,
+				1E13912C2F1FF2900070C41D /* recorder.cpython-313.pyc */,
+				1E13912D2F1FF2900070C41D /* server.cpython-312.pyc */,
+				1E13912E2F1FF2900070C41D /* server.cpython-313.pyc */,
+			);
+			path = __pycache__;
+			sourceTree = "<group>";
+		};
+		1E1391302F1FF2900070C41D /* aitranscribe-server */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = "aitranscribe-server";
+			sourceTree = "<group>";
+		};
+		1E1391312F1FF2900070C41D /* build */ = {
+			isa = PBXGroup;
+			children = (
+				1E1391302F1FF2900070C41D /* aitranscribe-server */,
+			);
+			path = build;
+			sourceTree = "<group>";
+		};
+		1E1391322F1FF2900070C41D /* dist */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = dist;
+			sourceTree = "<group>";
+		};
+		1E13913B2F1FF2900070C41D /* backend */ = {
+			isa = PBXGroup;
+			children = (
+				1E13912F2F1FF2900070C41D /* __pycache__ */,
+				1E1391312F1FF2900070C41D /* build */,
+				1E1391322F1FF2900070C41D /* dist */,
+				1E1391332F1FF2900070C41D /* aitranscribe-server.spec */,
+				1E1391342F1FF2900070C41D /* build_standalone.sh */,
+				1E1391352F1FF2900070C41D /* model_manager.py */,
+				1E1391362F1FF2900070C41D /* recorder.py */,
+				1E1391372F1FF2900070C41D /* requirements.txt */,
+				1E1391382F1FF2900070C41D /* requirements-nemo.txt */,
+				1E1391392F1FF2900070C41D /* server.py */,
+				1E13913A2F1FF2900070C41D /* setup_nemo_venv.py */,
+			);
+			path = backend;
+			sourceTree = "<group>";
+		};
+		1E13913D2F1FF2900070C41D /* AiTranscribe */ = {
+			isa = PBXGroup;
+			children = (
+				1E1390D62F1FF2900070C41D /* .claude */,
+				1E1391282F1FF2900070C41D /* AiTranscribe */,
+				1E13913B2F1FF2900070C41D /* backend */,
+				1E13913C2F1FF2900070C41D /* AiTranscribe.xcodeproj */,
+			);
+			name = AiTranscribe;
+			sourceTree = "<group>";
+		};
+		1E13913E2F1FF2900070C41D /* Products */ = {
+			isa = PBXGroup;
+			name = Products;
+			sourceTree = "<group>";
+		};
+		1E2647BC2F17FEBC00C1C862 = {
+			isa = PBXGroup;
+			children = (
+				1E1391432F1FF8480070C41D /* aitranscribe-server */,
+				1E2647C72F17FEBC00C1C862 /* AiTranscribe */,
+				1E13913D2F1FF2900070C41D /* AiTranscribe */,
+				1E1390D42F1FF2900070C41D /* backend */,
+				1E2647C62F17FEBC00C1C862 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		1E2647C62F17FEBC00C1C862 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				1E2647C52F17FEBC00C1C862 /* AiTranscribe.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1E2647C42F17FEBC00C1C862 /* AiTranscribe */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1E2647D02F17FEBC00C1C862 /* Build configuration list for PBXNativeTarget "AiTranscribe" */;
+			buildPhases = (
+				1E2647C12F17FEBC00C1C862 /* Sources */,
+				1E2647C22F17FEBC00C1C862 /* Frameworks */,
+				1E2647C32F17FEBC00C1C862 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				1E2647C72F17FEBC00C1C862 /* AiTranscribe */,
+			);
+			name = AiTranscribe;
+			packageProductDependencies = (
+			);
+			productName = AiTranscribe;
+			productReference = 1E2647C52F17FEBC00C1C862 /* AiTranscribe.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		1E2647BD2F17FEBC00C1C862 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2620;
+				LastUpgradeCheck = 2620;
+				TargetAttributes = {
+					1E2647C42F17FEBC00C1C862 = {
+						CreatedOnToolsVersion = 26.2;
+						LastSwiftMigration = 2620;
+					};
+				};
+			};
+			buildConfigurationList = 1E2647C02F17FEBC00C1C862 /* Build configuration list for PBXProject "AiTranscribe" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 1E2647BC2F17FEBC00C1C862;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 1E2647C62F17FEBC00C1C862 /* Products */;
+			projectDirPath = "";
+			projectReferences = (
+				{
+					ProductGroup = 1E13913E2F1FF2900070C41D /* Products */;
+					ProjectRef = 1E13913C2F1FF2900070C41D /* AiTranscribe.xcodeproj */;
+				},
+			);
+			projectRoot = "";
+			targets = (
+				1E2647C42F17FEBC00C1C862 /* AiTranscribe */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		1E2647C32F17FEBC00C1C862 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		1E2647C12F17FEBC00C1C862 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		1E2647CE2F17FEBC00C1C862 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 2DB57NTCXK;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.2;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		1E2647CF2F17FEBC00C1C862 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 2DB57NTCXK;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.2;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		1E2647D12F17FEBC00C1C862 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				AUTOMATION_APPLE_EVENTS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2DB57NTCXK;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "AiTranscribe needs microphone access to record audio for AI transcription.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.aitranscribe.AiTranscribe;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
+				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
+				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;
+				RUNTIME_EXCEPTION_DEBUGGING_TOOL = NO;
+				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
+				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = NO;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		1E2647D22F17FEBC00C1C862 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				AUTOMATION_APPLE_EVENTS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2DB57NTCXK;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "AiTranscribe needs microphone access to record audio for AI transcription.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.aitranscribe.AiTranscribe;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
+				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
+				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;
+				RUNTIME_EXCEPTION_DEBUGGING_TOOL = NO;
+				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
+				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = NO;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1E2647C02F17FEBC00C1C862 /* Build configuration list for PBXProject "AiTranscribe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1E2647CE2F17FEBC00C1C862 /* Debug */,
+				1E2647CF2F17FEBC00C1C862 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1E2647D02F17FEBC00C1C862 /* Build configuration list for PBXNativeTarget "AiTranscribe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1E2647D12F17FEBC00C1C862 /* Debug */,
+				1E2647D22F17FEBC00C1C862 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 1E2647BD2F17FEBC00C1C862 /* Project object */;
+}

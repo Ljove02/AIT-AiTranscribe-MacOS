@@ -1,0 +1,27 @@
+# Backend Dependencies for AiTranscribe
+# ======================================
+
+# Web framework
+fastapi>=0.104.0
+uvicorn>=0.24.0       # ASGI server to run FastAPI
+
+# PyTorch (for NeMo models)
+torch
+torchaudio
+
+# NVIDIA NeMo (ASR framework for Parakeet models)
+nemo_toolkit[asr]
+
+# Faster Whisper (for OpenAI Whisper models)
+faster-whisper        # CTranslate2-based Whisper, fast and efficient
+
+# Audio handling
+sounddevice           # Record from microphone
+scipy                 # WAV file I/O
+
+# Utilities
+numpy
+psutil                # Memory monitoring
+omegaconf             # Config management (NeMo dependency)
+requests              # HTTP downloads for models
+huggingface_hub       # Model cache management
