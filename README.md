@@ -28,22 +28,25 @@ A powerful macOS menu bar application for local speech-to-text transcription. Ru
 
 ### Option 1: Download Pre-built App (Easiest)
 
-1. **Download** the latest DMG from [Releases](https://github.com/Ljove02/AiTranscribe/releases)
+1. **Download** the latest DMG from [Releases](https://github.com/Ljove02/AIT-AiTranscribe-MacOS/releases)
 
 2. **Open the DMG** and drag AiTranscribe to Applications
 
 3. **First launch** - Since the app is not signed with an Apple Developer certificate:
 
    **Method A: Right-click to open**
+
    - Right-click (or Control-click) on AiTranscribe in Applications
    - Select "Open" from the menu
    - Click "Open" in the dialog that appears
    - You only need to do this once
 
    **Method B: Terminal command**
+
    ```bash
    xattr -cr /Applications/AiTranscribe.app
    ```
+
    Then double-click to open normally.
 
 4. **Grant permissions** when prompted:
@@ -58,11 +61,11 @@ Building locally avoids all Gatekeeper warnings since the app is built on your m
 
 #### Prerequisites
 
-| Requirement | How to Install |
-|-------------|----------------|
-| **Xcode 15+** | [App Store](https://apps.apple.com/app/xcode/id497799835) |
-| **Python 3.10+** | `brew install python@3.11` or [python.org](https://www.python.org/downloads/) |
-| **Command Line Tools** | `xcode-select --install` |
+| Requirement            | How to Install                                                                |
+| ---------------------- | ----------------------------------------------------------------------------- |
+| **Xcode 15+**          | [App Store](https://apps.apple.com/app/xcode/id497799835)                     |
+| **Python 3.10+**       | `brew install python@3.11` or [python.org](https://www.python.org/downloads/) |
+| **Command Line Tools** | `xcode-select --install`                                                      |
 
 #### Quick Build (One Command)
 
@@ -79,12 +82,14 @@ The built app will be in `dist/AiTranscribe.app`.
 #### Step-by-Step Build
 
 **Step 1: Clone the repository**
+
 ```bash
 git clone https://github.com/Ljove02/AiTranscribe.git
 cd AiTranscribe
 ```
 
 **Step 2: Set up Python environment**
+
 ```bash
 # Create virtual environment
 python3 -m venv venv
@@ -97,14 +102,17 @@ pip install -r backend/requirements.txt
 ```
 
 **Step 3: Build the backend executable**
+
 ```bash
 cd backend
 ./build_standalone.sh
 cd ..
 ```
+
 This creates `backend/dist/aitranscribe-server`.
 
 **Step 4: Build the Swift app**
+
 ```bash
 cd AiTranscribe
 xcodebuild -scheme AiTranscribe -configuration Release -derivedDataPath build
@@ -112,12 +120,14 @@ cd ..
 ```
 
 **Step 5: Create final app bundle**
+
 ```bash
 # The build_production.sh script does steps 3-4 automatically and creates a DMG
 ./build_production.sh
 ```
 
 **Step 6: Install**
+
 ```bash
 # Copy to Applications
 cp -R dist/AiTranscribe.app /Applications/
@@ -133,12 +143,14 @@ open dist/AiTranscribe.app
 For contributors and developers who want to run the app with hot-reload:
 
 **Terminal 1: Start the backend**
+
 ```bash
 source venv/bin/activate
 ./run_backend.sh --dev
 ```
 
 **Terminal 2: Run the frontend**
+
 ```bash
 open AiTranscribe/AiTranscribe.xcodeproj
 # In Xcode: Press Cmd+R to run
@@ -183,6 +195,7 @@ AiTranscribe/
 1. **Click the menu bar icon** (microphone icon in the top-right of your screen)
 
 2. **Download a model** - Go to Settings → Models and download your preferred model:
+
    - **Parakeet TDT 0.6B** (Recommended) - Best balance of speed and accuracy
    - **Whisper Small** - Good for older Macs
    - **Whisper Large** - Highest accuracy, requires more RAM
@@ -197,13 +210,13 @@ AiTranscribe/
 
 ## Models
 
-| Model | Download Size | Speed | Accuracy | RAM Required |
-|-------|---------------|-------|----------|--------------|
-| Parakeet TDT 0.6B | ~1.2GB | Fast | Excellent | ~3GB |
-| Whisper Tiny | ~150MB | Fastest | Good | ~1GB |
-| Whisper Small | ~500MB | Fast | Very Good | ~2GB |
-| Whisper Medium | ~1.5GB | Medium | Excellent | ~4GB |
-| Whisper Large | ~3GB | Slow | Best | ~6GB |
+| Model             | Download Size | Speed   | Accuracy  | RAM Required |
+| ----------------- | ------------- | ------- | --------- | ------------ |
+| Parakeet TDT 0.6B | ~1.2GB        | Fast    | Excellent | ~3GB         |
+| Whisper Tiny      | ~150MB        | Fastest | Good      | ~1GB         |
+| Whisper Small     | ~500MB        | Fast    | Very Good | ~2GB         |
+| Whisper Medium    | ~1.5GB        | Medium  | Excellent | ~4GB         |
+| Whisper Large     | ~3GB          | Slow    | Best      | ~6GB         |
 
 Models are downloaded on-demand and stored in `~/.cache/huggingface/hub/`.
 
@@ -238,6 +251,7 @@ lsof -ti:8765 | xargs kill -9
 ### Build fails with "pip not found"
 
 Make sure you activated the virtual environment:
+
 ```bash
 source venv/bin/activate
 ```
