@@ -129,6 +129,25 @@ else
 
     BACKEND_SIZE=$(du -h "$BACKEND_PATH" | cut -f1)
     print_success "Backend built successfully (${BACKEND_SIZE})"
+
+    # Copy NeMo setup script and requirements to Resources
+    NEMO_SCRIPT="backend/setup_nemo_venv.py"
+    NEMO_REQS="backend/requirements-nemo.txt"
+    RESOURCES_DIR="AiTranscribe/AiTranscribe/Resources"
+
+    if [ -f "$NEMO_SCRIPT" ]; then
+        cp "$NEMO_SCRIPT" "$RESOURCES_DIR/"
+        print_success "NeMo setup script copied to Resources"
+    else
+        print_warning "NeMo setup script not found at $NEMO_SCRIPT"
+    fi
+
+    if [ -f "$NEMO_REQS" ]; then
+        cp "$NEMO_REQS" "$RESOURCES_DIR/"
+        print_success "NeMo requirements copied to Resources"
+    else
+        print_warning "NeMo requirements not found at $NEMO_REQS"
+    fi
 fi
 
 # =============================================================================
@@ -182,12 +201,24 @@ if [ -f "$BUNDLED_BACKEND" ]; then
 else
     print_warning "Backend executable NOT found in app bundle!"
     echo "You may need to add it to Xcode's 'Copy Bundle Resources' phase"
-    echo ""
-    echo "To add manually:"
-    echo "  1. Open Xcode project"
-    echo "  2. Select AiTranscribe target"
-    echo "  3. Go to Build Phases"
-    echo "  4. Add aitranscribe-server to 'Copy Bundle Resources'"
+fi
+
+# Verify NeMo setup script is in bundle
+BUNDLED_NEMO="dist/${APP_NAME}.app/Contents/Resources/setup_nemo_venv.py"
+if [ -f "$BUNDLED_NEMO" ]; then
+    print_success "NeMo setup script is bundled in app"
+else
+    print_warning "NeMo setup script NOT found in app bundle!"
+    echo "NeMo model installation may not work without this script."
+fi
+
+# Verify NeMo requirements is in bundle
+BUNDLED_NEMO_REQS="dist/${APP_NAME}.app/Contents/Resources/requirements-nemo.txt"
+if [ -f "$BUNDLED_NEMO_REQS" ]; then
+    print_success "NeMo requirements is bundled in app"
+else
+    print_warning "NeMo requirements NOT found in app bundle!"
+    echo "NeMo model installation may not work without this file."
 fi
 
 print_success "App copied to: dist/${APP_NAME}.app"
