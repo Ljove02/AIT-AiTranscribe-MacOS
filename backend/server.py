@@ -324,7 +324,19 @@ def unload_asr_model():
     """
     global asr_model, whisper_model, model_device, current_model_id, current_model_type
 
+    # Import gc early for multiple collection passes
+    import gc
+
+    # Store device type before clearing
+    was_using_mps = model_device == "mps"
+    was_using_cuda = model_device == "cuda"
+
     if asr_model is not None:
+        # Move model to CPU first to release GPU/MPS memory
+        try:
+            asr_model.cpu()
+        except Exception:
+            pass
         del asr_model
         asr_model = None
 
@@ -336,19 +348,38 @@ def unload_asr_model():
     current_model_id = None
     current_model_type = None
 
-    # Clear any cached memory
+    # Force garbage collection multiple times
+    # (sometimes needed for circular references)
+    for _ in range(3):
+        gc.collect()
+
+    # Clear PyTorch cached memory
     try:
         import torch
+
+        # Clear CUDA cache
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        # Clear MPS cache (Apple Silicon)
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            # MPS doesn't have empty_cache in older PyTorch versions
+            if hasattr(torch.mps, 'empty_cache'):
+                torch.mps.empty_cache()
+            # Synchronize to ensure all operations complete
+            if hasattr(torch.mps, 'synchronize'):
+                torch.mps.synchronize()
+
     except ImportError:
         pass
+    except Exception as e:
+        print(f"Warning: Could not clear GPU cache: {e}")
 
-    # Force garbage collection
-    import gc
+    # Final garbage collection pass
     gc.collect()
 
-    print("Model unloaded")
+    print("Model unloaded and memory freed")
 
 
 def transcribe_audio(audio_path: str) -> tuple[str, float]:
@@ -381,23 +412,181 @@ def _transcribe_nemo(audio_path: str) -> tuple[str, float]:
         raise RuntimeError("NeMo model not loaded")
 
     import torch
+    import numpy as np
+    from scipy.io.wavfile import read as wav_read
 
     start_time = time.time()
 
-    # torch.no_grad() tells PyTorch we're not training
-    # This saves memory and speeds up inference
-    with torch.no_grad():
-        result = asr_model.transcribe([audio_path])[0]
+    try:
+        print(f"DEBUG: Transcribing with NeMo: {audio_path}")
 
-    processing_time = time.time() - start_time
+        # Load audio directly to bypass Lhotse dataloader compatibility issues
+        sample_rate, audio_data = wav_read(audio_path)
 
-    # Extract text from result
-    if hasattr(result, 'text'):
-        text = result.text
-    else:
-        text = str(result)
+        # Convert to float32 and normalize
+        if audio_data.dtype == np.int16:
+            audio_data = audio_data.astype(np.float32) / 32768.0
+        elif audio_data.dtype == np.int32:
+            audio_data = audio_data.astype(np.float32) / 2147483648.0
+        elif audio_data.dtype != np.float32:
+            audio_data = audio_data.astype(np.float32)
 
-    return text, processing_time
+        # Ensure mono
+        if len(audio_data.shape) > 1:
+            audio_data = audio_data.mean(axis=1)
+
+        # Resample to 16kHz if needed (NeMo expects 16kHz)
+        if sample_rate != 16000:
+            from scipy import signal
+            num_samples = int(len(audio_data) * 16000 / sample_rate)
+            audio_data = signal.resample(audio_data, num_samples)
+            sample_rate = 16000
+
+        # Convert to tensor
+        audio_tensor = torch.tensor(audio_data, dtype=torch.float32).unsqueeze(0)
+        audio_length = torch.tensor([audio_tensor.shape[1]], dtype=torch.long)
+
+        # Move to same device as model
+        device = next(asr_model.parameters()).device
+        audio_tensor = audio_tensor.to(device)
+        audio_length = audio_length.to(device)
+
+        print(f"DEBUG: Audio tensor shape: {audio_tensor.shape}, length: {audio_length}")
+
+        # Transcribe using direct forward pass to avoid Lhotse compatibility issues
+        with torch.no_grad():
+            text = None
+
+            # Method 1: Direct forward pass with preprocessor
+            # This bypasses the lhotse dataloader entirely
+            try:
+                print("DEBUG: Trying direct forward pass with preprocessor...")
+
+                # Step 1: Use model's preprocessor to get mel spectrogram features
+                if hasattr(asr_model, 'preprocessor') and asr_model.preprocessor is not None:
+                    processed_signal, processed_signal_length = asr_model.preprocessor(
+                        input_signal=audio_tensor,
+                        length=audio_length
+                    )
+                    print(f"DEBUG: Preprocessed signal shape: {processed_signal.shape}")
+                else:
+                    raise RuntimeError("Model has no preprocessor")
+
+                # Step 2: Get encoder output
+                encoded, encoded_len = asr_model.encoder(
+                    audio_signal=processed_signal,
+                    length=processed_signal_length
+                )
+                print(f"DEBUG: Encoded shape: {encoded.shape}")
+
+                # Step 3: Decode based on model type
+                if hasattr(asr_model, 'joint') and hasattr(asr_model, 'decoding'):
+                    # RNNT/Transducer model (Parakeet uses this)
+                    print("DEBUG: Using RNNT decoding...")
+
+                    # Use greedy decoding - handle different return value formats
+                    decode_result = asr_model.decoding.rnnt_decoder_predictions_tensor(
+                        encoder_output=encoded,
+                        encoded_lengths=encoded_len,
+                        return_hypotheses=False
+                    )
+
+                    # Handle different return formats from NeMo versions
+                    if isinstance(decode_result, tuple):
+                        best_hyp = decode_result[0]
+                        print(f"DEBUG: Decode returned tuple with {len(decode_result)} elements")
+                    else:
+                        best_hyp = decode_result
+                        print(f"DEBUG: Decode returned single value of type {type(best_hyp)}")
+
+                    print(f"DEBUG: best_hyp type: {type(best_hyp)}, value: {best_hyp}")
+
+                    if best_hyp is not None and len(best_hyp) > 0:
+                        # Decode token IDs to text
+                        if hasattr(asr_model, 'tokenizer') and asr_model.tokenizer is not None:
+                            # Get the first (and only) hypothesis
+                            hyp = best_hyp[0]
+                            print(f"DEBUG: hyp type: {type(hyp)}, value: {hyp}")
+
+                            if isinstance(hyp, torch.Tensor):
+                                token_ids = hyp.cpu().tolist()
+                            elif hasattr(hyp, 'y_sequence'):
+                                # NeMo Hypothesis object
+                                token_ids = hyp.y_sequence if isinstance(hyp.y_sequence, list) else hyp.y_sequence.cpu().tolist()
+                            elif isinstance(hyp, list):
+                                token_ids = hyp
+                            else:
+                                token_ids = list(hyp) if hasattr(hyp, '__iter__') else [hyp]
+
+                            print(f"DEBUG: token_ids: {token_ids}")
+                            text = asr_model.tokenizer.ids_to_text(token_ids)
+                        else:
+                            text = str(best_hyp[0])
+
+                elif hasattr(asr_model, 'decoder'):
+                    # CTC-based model
+                    print("DEBUG: Using CTC decoding...")
+                    log_probs = asr_model.decoder(encoder_output=encoded)
+                    greedy_predictions = log_probs.argmax(dim=-1, keepdim=False)
+
+                    if hasattr(asr_model, 'tokenizer') and asr_model.tokenizer is not None:
+                        # Remove CTC blanks and duplicates
+                        pred_ids = greedy_predictions[0].cpu().tolist()
+                        # Simple CTC decode (remove blanks and consecutive duplicates)
+                        decoded_ids = []
+                        prev_id = -1
+                        blank_id = asr_model.tokenizer.blank_id if hasattr(asr_model.tokenizer, 'blank_id') else 0
+                        for idx in pred_ids:
+                            if idx != blank_id and idx != prev_id:
+                                decoded_ids.append(idx)
+                            prev_id = idx
+                        text = asr_model.tokenizer.ids_to_text(decoded_ids)
+                    else:
+                        text = str(greedy_predictions[0].tolist())
+
+                if text:
+                    print(f"DEBUG: Method 1 (direct) succeeded: '{text}'")
+
+            except Exception as e1:
+                print(f"DEBUG: Method 1 (direct) failed: {e1}")
+                import traceback
+                traceback.print_exc()
+
+                # Method 2: Try standard transcribe (will fail with lhotse bug, but try anyway)
+                try:
+                    print("DEBUG: Trying standard transcribe method...")
+                    result = asr_model.transcribe(
+                        audio=[audio_path],
+                        batch_size=1,
+                        verbose=False
+                    )
+                    if result and len(result) > 0:
+                        if hasattr(result[0], 'text'):
+                            text = result[0].text
+                        elif isinstance(result[0], str):
+                            text = result[0]
+                        else:
+                            text = str(result[0])
+                    print(f"DEBUG: Method 2 succeeded: '{text}'")
+                except Exception as e2:
+                    print(f"DEBUG: Method 2 failed: {e2}")
+                    # Re-raise the original error if all methods fail
+                    raise e1
+
+        processing_time = time.time() - start_time
+
+        if text is None:
+            text = ""
+
+        print(f"DEBUG: Final transcription: '{text}' in {processing_time:.2f}s")
+
+        return text, processing_time
+
+    except Exception as e:
+        print(f"ERROR: NeMo transcription failed: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 def _transcribe_whisper(audio_path: str) -> tuple[str, float]:
@@ -445,6 +634,13 @@ async def lifespan(app: FastAPI):
     - Code after 'yield' runs on shutdown
     """
     # STARTUP
+    # Set process name so it shows as "AiTranscribe Server" in Activity Monitor
+    try:
+        import setproctitle
+        setproctitle.setproctitle("AiTranscribe Server")
+    except ImportError:
+        pass  # setproctitle not installed, process will show as "python"
+
     print("="*50)
     print("AiTranscribe Server Starting")
     print("="*50)

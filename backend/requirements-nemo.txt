@@ -24,6 +24,7 @@ numpy
 psutil
 requests
 huggingface_hub
+setproctitle
 
 # ---- NeMo-specific dependencies ----
 # PyTorch (required for NeMo)

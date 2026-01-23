@@ -25,3 +25,4 @@ psutil                # Memory monitoring
 omegaconf             # Config management (NeMo dependency)
 requests              # HTTP downloads for models
 huggingface_hub       # Model cache management
+setproctitle          # Set process name in Activity Monitor

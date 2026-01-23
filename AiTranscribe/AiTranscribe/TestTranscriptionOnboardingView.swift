@@ -31,6 +31,7 @@ struct TestTranscriptionOnboardingView: View {
     @State private var recordingTimer: Timer?
     @State private var audioData: Data?
     @State private var silenceStartTime: Date?
+    @State private var isLoadingModel = false
     
     // API client for transcription
     private let apiClient = APIClient()
@@ -83,30 +84,48 @@ struct TestTranscriptionOnboardingView: View {
                             Text("Select Model:")
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
-                            
-                            Picker("", selection: Binding(
-                                get: { appState.loadedModelId ?? "" },
-                                set: { modelId in
-                                    if !modelId.isEmpty {
-                                        // Save as preferred model
-                                        appState.setPreferredModel(modelId)
-                                        
-                                        Task {
-                                            // Load the model if not already loaded
-                                            if appState.loadedModelId != modelId {
-                                                await appState.loadModel(modelId: modelId)
+
+                            HStack(spacing: 12) {
+                                Picker("", selection: Binding(
+                                    get: { appState.loadedModelId ?? "" },
+                                    set: { modelId in
+                                        if !modelId.isEmpty && !isLoadingModel {
+                                            // Save as preferred model
+                                            appState.setPreferredModel(modelId)
+
+                                            Task {
+                                                // Load the model if not already loaded
+                                                if appState.loadedModelId != modelId {
+                                                    isLoadingModel = true
+                                                    await appState.loadModel(modelId: modelId)
+                                                    isLoadingModel = false
+                                                }
                                             }
                                         }
                                     }
+                                )) {
+                                    Text("Select a model").tag("")
+                                    ForEach(appState.availableModels.filter { $0.downloaded }) { model in
+                                        Text(model.displayName).tag(model.id)
+                                    }
                                 }
-                            )) {
-                                Text("Select a model").tag("")
-                                ForEach(appState.availableModels.filter { $0.downloaded }) { model in
-                                    Text(model.displayName).tag(model.id)
+                                .pickerStyle(.menu)
+                                .frame(width: 300)
+                                .disabled(isLoadingModel)
+
+                                // Loading indicator
+                                if isLoadingModel {
+                                    ProgressView()
+                                        .controlSize(.small)
                                 }
                             }
-                            .pickerStyle(.menu)
-                            .frame(width: 350)
+
+                            // Loading message
+                            if isLoadingModel {
+                                Text("Loading model...")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.horizontal, 40)
@@ -204,13 +223,17 @@ struct TestTranscriptionOnboardingView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.large)
-                            .disabled(appState.loadedModelId == nil)
+                            .disabled(appState.loadedModelId == nil || isLoadingModel)
                             .padding(.horizontal, 60)
-                            
+
                             if appState.loadedModelId == nil {
                                 Text("Please select a model first")
                                     .font(.caption)
                                     .foregroundColor(.red)
+                            } else if isLoadingModel {
+                                Text("Please wait for model to load...")
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
                             }
                             
                             // Back and Skip in one row

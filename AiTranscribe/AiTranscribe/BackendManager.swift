@@ -240,7 +240,13 @@ class BackendManager: ObservableObject {
     private func findDevelopmentBackendPath() -> String? {
         // Try multiple possible locations
 
-        // 1. Check if AITRANSCRIBE_BACKEND_PATH environment variable is set
+        // 1. Check bundled Resources first (for production builds with NeMo support)
+        if let bundledPath = Bundle.main.path(forResource: "server", ofType: "py") {
+            addLog("Found bundled server.py at: \(bundledPath)", level: .debug)
+            return bundledPath
+        }
+
+        // 2. Check if AITRANSCRIBE_BACKEND_PATH environment variable is set
         if let envPath = ProcessInfo.processInfo.environment["AITRANSCRIBE_BACKEND_PATH"] {
             let serverPath = (envPath as NSString).appendingPathComponent("server.py")
             if FileManager.default.fileExists(atPath: serverPath) {
@@ -248,13 +254,12 @@ class BackendManager: ObservableObject {
             }
         }
 
-        // 2. Common development paths
+        // 3. Common development paths
         let possiblePaths = [
             // Relative to the app bundle (when running from Xcode)
             Bundle.main.bundlePath + "/../../../../backend/server.py",
             // Home directory based
             NSHomeDirectory() + "/Projects/AiTranscribe/backend/server.py",
-            NSHomeDirectory() + "/Developer/AiTranscribe/backend/server.py",
         ]
 
         for path in possiblePaths {

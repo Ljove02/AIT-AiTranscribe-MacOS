@@ -148,6 +148,16 @@ else
     else
         print_warning "NeMo requirements not found at $NEMO_REQS"
     fi
+
+    # Copy backend Python files for NeMo mode (runs server.py with NeMo venv)
+    for pyfile in server.py model_manager.py recorder.py; do
+        if [ -f "backend/$pyfile" ]; then
+            cp "backend/$pyfile" "$RESOURCES_DIR/"
+            print_success "Copied $pyfile to Resources"
+        else
+            print_warning "$pyfile not found in backend/"
+        fi
+    done
 fi
 
 # =============================================================================
