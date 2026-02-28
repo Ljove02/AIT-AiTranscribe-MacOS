@@ -271,7 +271,7 @@ struct MenuBarView: View {
                 .padding(.vertical, 4)
 
             // Version
-            Text("AiTranscribe v0.1.0")
+            Text("AiTranscribe v0.1.2")
                 .font(.caption)
                 .foregroundColor(.secondary)
 

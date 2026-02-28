@@ -88,13 +88,10 @@ struct AiTranscribeApp: App {
             appDelegate.showOnboarding(appState: appState, backendManager: backendManager)
         }
 
-        // Wait for server ready and load model
+        // Wait for server ready and fetch status (model loads on-demand when recording starts)
         await backendManager.waitForServerReady()
         if backendManager.isServerReady {
             await appState.checkServerStatus()
-            if appState.isServerConnected {
-                await appState.loadPreferredModel()
-            }
         }
 
         print("AiTranscribeApp: Initialization complete")

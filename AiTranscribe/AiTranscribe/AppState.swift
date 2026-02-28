@@ -182,6 +182,13 @@ class AppState: ObservableObject {
     /// Timer for polling recording status
     private var statusTimer: Timer?
 
+    /// Timer for auto-unloading model after idle period
+    private var idleUnloadTimer: Timer?
+    /// Idle timeout before model is auto-unloaded (2 minutes)
+    private let idleTimeoutSeconds: TimeInterval = 120
+    /// Tracks whether we triggered an auto-load for the current recording session
+    private var isAutoLoadingModel: Bool = false
+
     /// Floating recording indicator
     let recordingIndicator = RecordingIndicatorController()
 
@@ -727,11 +734,26 @@ class AppState: ObservableObject {
 
     /// Start recording audio
     func startRecording() async {
-        guard isModelLoaded else {
-            statusMessage = "Load model first"
-            return
+        // Cancel idle unload timer — user is active
+        idleUnloadTimer?.invalidate()
+        idleUnloadTimer = nil
+
+        // Smart auto-load: if model isn't loaded, try to load preferred model in background
+        if !isModelLoaded && !isModelLoading {
+            if let preferredModelId = UserDefaults.standard.string(forKey: "preferredModelId") {
+                // Auto-load preferred model in background while recording starts
+                isAutoLoadingModel = true
+                Task {
+                    await loadModel(modelId: preferredModelId)
+                    isAutoLoadingModel = false
+                }
+            } else {
+                // No preferred model — first-time user needs to pick one
+                statusMessage = "Load model first"
+                return
+            }
         }
-        
+
         // Duck audio if setting is enabled - use session-based API
         if mutePlaybackDuringRecording {
             // Mute mode = 99.99% reduction (effectively mute)
@@ -883,6 +905,23 @@ class AppState: ObservableObject {
         // Show transcribing state on indicator (dots rotate)
         recordingIndicator.setTranscribing(true)
 
+        // If model was auto-loading when recording started, wait for it to finish
+        if isAutoLoadingModel || isModelLoading {
+            statusMessage = "Loading model..."
+            // Poll until model is loaded or timeout (60 seconds)
+            let deadline = Date().addingTimeInterval(60)
+            while (isAutoLoadingModel || isModelLoading) && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
+            }
+            if !isModelLoaded {
+                isRecording = false
+                statusMessage = "Model failed to load"
+                recordingIndicator.hide()
+                if mutePlaybackDuringRecording { audioManager.endDuckingSession() }
+                return
+            }
+        }
+
         statusMessage = "Transcribing..."
 
         // Reset incremental typer for next session
@@ -946,6 +985,9 @@ class AppState: ObservableObject {
                     KeyboardSimulator.shared.pasteAsync()
                 }
             }
+
+            // Start idle unload timer — unloads model after 2 minutes of inactivity
+            startIdleUnloadTimer()
 
         } catch {
             isRecording = false
@@ -1054,6 +1096,35 @@ class AppState: ObservableObject {
     // =========================================================================
     // CLIPBOARD
     // =========================================================================
+
+    // =========================================================================
+    // SMART IDLE UNLOADING
+    // =========================================================================
+
+    /// Start the idle unload timer — fires after 2 minutes of inactivity
+    private func startIdleUnloadTimer() {
+        idleUnloadTimer?.invalidate()
+        idleUnloadTimer = Timer.scheduledTimer(withTimeInterval: idleTimeoutSeconds, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            Task { @MainActor in
+                await self.idleUnloadIfNeeded()
+            }
+        }
+    }
+
+    /// Unload model if it's not a streaming-native model
+    private func idleUnloadIfNeeded() async {
+        // Don't unload streaming models (nemotron) — they need to stay ready
+        if let modelId = loadedModelId,
+           let model = availableModels.first(where: { $0.id == modelId }),
+           model.streamingNative {
+            return
+        }
+
+        guard isModelLoaded else { return }
+        print("Idle timeout reached — auto-unloading model to free RAM")
+        await unloadModel()
+    }
 
     /// Copy text to the system clipboard
     func copyToClipboard(_ text: String) {

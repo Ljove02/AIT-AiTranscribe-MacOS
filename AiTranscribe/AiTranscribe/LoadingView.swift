@@ -59,7 +59,7 @@ struct LoadingView: View {
             Spacer()
 
             // Version info at bottom
-            Text("Version 0.1.0")
+            Text("Version 0.1.2")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .padding(.bottom, 20)

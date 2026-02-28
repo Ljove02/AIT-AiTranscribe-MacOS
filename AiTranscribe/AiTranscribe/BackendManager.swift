@@ -13,7 +13,7 @@
  DEVELOPMENT vs PRODUCTION:
  --------------------------
  - Development: Runs `python server.py` from the backend directory
- - Production: Runs bundled `aitranscribe-server` executable from app bundle
+ - Production: Runs bundled `AiTranscribeServer` executable from app bundle
 
  PROCESS MANAGEMENT:
  -------------------
@@ -221,14 +221,14 @@ class BackendManager: ObservableObject {
 
     /// Check if this is a production build (bundled executable exists)
     var isProductionBuild: Bool {
-        Bundle.main.url(forResource: "aitranscribe-server", withExtension: nil) != nil
+        Bundle.main.url(forResource: "AiTranscribeServer", withExtension: nil) != nil
     }
 
     /// Get the path to the backend executable or script
     var backendExecutablePath: String? {
         if isProductionBuild {
             // Production: use bundled executable
-            return Bundle.main.path(forResource: "aitranscribe-server", ofType: nil)
+            return Bundle.main.path(forResource: "AiTranscribeServer", ofType: nil)
         } else {
             // Development: find the backend directory
             // The backend is typically at ../backend relative to the .app or project
@@ -403,7 +403,7 @@ class BackendManager: ObservableObject {
         switch currentBackendMode {
         case .pyinstaller:
             // Production: run the bundled executable directly
-            guard let executablePath = Bundle.main.path(forResource: "aitranscribe-server", ofType: nil) else {
+            guard let executablePath = Bundle.main.path(forResource: "AiTranscribeServer", ofType: nil) else {
                 addLog("Bundled executable not found", level: .error)
                 statusMessage = "Backend not found"
                 return

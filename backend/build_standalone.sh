@@ -14,7 +14,7 @@
 #   - All backend dependencies installed
 #
 # Output:
-#   - dist/aitranscribe-server (standalone executable)
+#   - dist/AiTranscribeServer (standalone executable)
 #
 
 set -e  # Exit on error
@@ -50,9 +50,11 @@ rm -rf build dist *.spec 2>/dev/null || true
 # Note: This creates a single-file executable which is slower to start
 # but easier to distribute. For faster startup, remove --onefile.
 python3 -m PyInstaller \
-    --name aitranscribe-server \
+    --name AiTranscribeServer \
     --onefile \
     --console \
+    --icon AiTranscribe.icns \
+    --osx-bundle-identifier com.aitranscribe.server \
     --noconfirm \
     --clean \
     --hidden-import uvicorn.logging \
@@ -93,9 +95,9 @@ echo "Build complete!"
 echo ""
 
 # Check if build succeeded
-if [ -f "dist/aitranscribe-server" ]; then
-    SIZE=$(du -h "dist/aitranscribe-server" | cut -f1)
-    echo "Output: dist/aitranscribe-server ($SIZE)"
+if [ -f "dist/AiTranscribeServer" ]; then
+    SIZE=$(du -h "dist/AiTranscribeServer" | cut -f1)
+    echo "Output: dist/AiTranscribeServer ($SIZE)"
     echo ""
 
     # Create Resources directory in Xcode project if needed
@@ -107,7 +109,7 @@ if [ -f "dist/aitranscribe-server" ]; then
 
     # Copy to Xcode project
     echo "Copying to Xcode project..."
-    cp "dist/aitranscribe-server" "$RESOURCES_DIR/"
+    cp "dist/AiTranscribeServer" "$RESOURCES_DIR/"
 
     # Also copy the setup script for NeMo installation
     echo "Copying NeMo setup script..."
@@ -119,12 +121,12 @@ if [ -f "dist/aitranscribe-server" ]; then
     echo "========================================"
     echo ""
     echo "The standalone backend has been built and copied to:"
-    echo "  $RESOURCES_DIR/aitranscribe-server"
+    echo "  $RESOURCES_DIR/AiTranscribe"
     echo "  $RESOURCES_DIR/setup_nemo_venv.py"
     echo ""
     echo "Next steps:"
     echo "1. Open the Xcode project"
-    echo "2. Add 'Resources/aitranscribe-server' and 'Resources/setup_nemo_venv.py' to the target"
+    echo "2. Add 'Resources/AiTranscribe' and 'Resources/setup_nemo_venv.py' to the target"
     echo "3. Ensure they're copied to the app bundle (Build Phases > Copy Bundle Resources)"
     echo "4. Build and archive the app for distribution"
     echo ""

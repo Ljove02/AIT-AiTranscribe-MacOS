@@ -684,7 +684,7 @@ async def lifespan(app: FastAPI):
     # Set process name so it shows as "AiTranscribe Server" in Activity Monitor
     try:
         import setproctitle
-        setproctitle.setproctitle("AiTranscribe Server")
+        setproctitle.setproctitle("AiTranscribeServer")
     except ImportError:
         pass  # setproctitle not installed, process will show as "python"
 

@@ -21,7 +21,7 @@ set -e  # Exit on error
 # Get the directory where this script is located (works even when called from different directory)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$SCRIPT_DIR"
-VERSION="0.1.0"
+VERSION="0.1.2"
 APP_NAME="AiTranscribe"
 SKIP_BACKEND=false
 
@@ -118,7 +118,7 @@ else
     cd "$PROJECT_ROOT"
 
     # Verify backend was built
-    BACKEND_PATH="AiTranscribe/AiTranscribe/Resources/aitranscribe-server"
+    BACKEND_PATH="AiTranscribe/AiTranscribe/Resources/AiTranscribeServer"
     if [ ! -f "$BACKEND_PATH" ]; then
         print_error "Backend executable not found at $BACKEND_PATH"
         exit 1
@@ -210,7 +210,7 @@ echo "Copying app to dist folder..."
 cp -R "$APP_PATH" "dist/"
 
 # Verify backend is in bundle
-BUNDLED_BACKEND="dist/${APP_NAME}.app/Contents/Resources/aitranscribe-server"
+BUNDLED_BACKEND="dist/${APP_NAME}.app/Contents/Resources/AiTranscribeServer"
 if [ -f "$BUNDLED_BACKEND" ]; then
     print_success "Backend executable is bundled in app"
 else

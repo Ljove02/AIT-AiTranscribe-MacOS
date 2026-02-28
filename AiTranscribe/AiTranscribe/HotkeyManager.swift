@@ -232,7 +232,8 @@ class HotkeyManager {
         Task { @MainActor in
             if appState.isRecording {
                 await appState.stopRecording()
-            } else if appState.isModelLoaded {
+            } else {
+                // startRecording() handles auto-loading the model if needed
                 await appState.startRecording()
             }
         }
