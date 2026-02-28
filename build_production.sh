@@ -168,18 +168,23 @@ print_header "Step 2: Building Xcode Project (Release)"
 
 cd AiTranscribe
 
+# Use a local build directory to avoid DerivedData cross-contamination
+BUILD_DIR="$PROJECT_ROOT/build/xcode"
+
 # Clean and build
 echo "Cleaning previous build..."
-xcodebuild -scheme AiTranscribe -configuration Release clean 2>/dev/null || true
+xcodebuild -project AiTranscribe.xcodeproj -scheme AiTranscribe -configuration Release \
+    -derivedDataPath "$BUILD_DIR" clean 2>/dev/null || true
 
 echo "Building Release configuration..."
-xcodebuild -scheme AiTranscribe -configuration Release build
+xcodebuild -project AiTranscribe.xcodeproj -scheme AiTranscribe -configuration Release \
+    -derivedDataPath "$BUILD_DIR" build
 
-# Find the built app
-APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "AiTranscribe.app" -path "*/Release/*" -type d 2>/dev/null | head -1)
+# Find the built app in our dedicated build directory
+APP_PATH=$(find "$BUILD_DIR" -name "AiTranscribe.app" -path "*/Release/*" -type d 2>/dev/null | head -1)
 
 if [ -z "$APP_PATH" ]; then
-    print_error "Built app not found in DerivedData!"
+    print_error "Built app not found in build directory!"
     echo "Try building manually in Xcode: Product → Build"
     exit 1
 fi

@@ -8,6 +8,7 @@
 xcuserdata/
 *.xcuserdatad
 DerivedData/
+AiTranscribe/AiTranscribe/Resources/
 *.xccheckout
 *.moved-aside
 *.hmap
@@ -21,7 +22,7 @@ Packages/
 Package.resolved
 
 # Python
-venv/
+venv
 env/
 .venv/
 __pycache__/

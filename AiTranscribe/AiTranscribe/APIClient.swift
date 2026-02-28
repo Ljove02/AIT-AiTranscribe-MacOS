@@ -324,6 +324,7 @@ class APIClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = 600  // 10 minutes safety net for long transcriptions
 
         // Create multipart form data for file upload
         let boundary = UUID().uuidString
@@ -351,6 +352,80 @@ class APIClient {
         } catch {
             throw APIError.decodingError(error)
         }
+    }
+
+
+    /// Transcribe audio data with SSE progress updates
+    /// Sends audio to /transcribe-stream and reads heartbeat events until completion
+    func transcribeAudioDataWithProgress(
+        _ wavData: Data,
+        onProgress: @escaping (Double, Double) -> Void  // (progress, elapsed)
+    ) async throws -> TranscriptionResponse {
+        let url = baseURL.appendingPathComponent("/transcribe-stream")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 600  // 10 minutes safety net
+
+        // Build multipart body (same format as transcribeAudioData)
+        let boundary = UUID().uuidString
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
+        body.append(wavData)
+        body.append("\r\n".data(using: .utf8)!)
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+
+        request.httpBody = body
+
+        let (asyncBytes, response) = try await session.bytes(for: request)
+        try checkResponse(response)
+
+        // Process SSE stream (same pattern as downloadModel and startStreamingRecording)
+        for try await line in asyncBytes.lines {
+            if line.hasPrefix("data: ") {
+                let jsonString = String(line.dropFirst(6))
+                if let data = jsonString.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let type = json["type"] as? String {
+
+                    switch type {
+                    case "heartbeat":
+                        let progress = json["progress"] as? Double ?? 0.0
+                        let elapsed = json["elapsed"] as? Double ?? 0.0
+                        await MainActor.run {
+                            onProgress(progress, elapsed)
+                        }
+
+                    case "complete":
+                        let text = json["text"] as? String ?? ""
+                        let duration = json["duration_seconds"] as? Double ?? 0.0
+                        let processingTime = json["processing_time"] as? Double ?? 0.0
+                        let realtimeFactor = json["realtime_factor"] as? Double ?? 0.0
+                        return TranscriptionResponse(
+                            text: text,
+                            durationSeconds: duration,
+                            processingTime: processingTime,
+                            realtimeFactor: realtimeFactor
+                        )
+
+                    case "error":
+                        let message = json["message"] as? String ?? "Unknown error"
+                        throw APIError.serverError(message)
+
+                    default:
+                        break
+                    }
+                }
+            }
+        }
+
+        // If stream ends without a complete event
+        throw APIError.serverError("Transcription stream ended unexpectedly")
     }
 
 

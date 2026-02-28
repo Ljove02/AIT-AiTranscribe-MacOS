@@ -147,7 +147,7 @@ struct MenuBarView: View {
             return .red
         } else if appState.isRecording {
             return .orange
-        } else if appState.statusMessage == "Transcribing..." {
+        } else if appState.statusMessage.hasPrefix("Transcribing") {
             return .blue
         } else if appState.isModelLoaded {
             return .green

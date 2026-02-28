@@ -254,10 +254,13 @@ class BackendManager: ObservableObject {
             }
         }
 
-        // 3. Common development paths
+        // 3. Common development paths (relative to app bundle — works regardless of where the project lives)
         let possiblePaths = [
             // Relative to the app bundle (when running from Xcode)
             Bundle.main.bundlePath + "/../../../../backend/server.py",
+            // Relative to the Xcode project source root (when built via xcodebuild with local derivedDataPath)
+            Bundle.main.bundlePath + "/../../../../../backend/server.py",
+            Bundle.main.bundlePath + "/../../../../../../backend/server.py",
             // Home directory based
             NSHomeDirectory() + "/Projects/AiTranscribe/backend/server.py",
         ]

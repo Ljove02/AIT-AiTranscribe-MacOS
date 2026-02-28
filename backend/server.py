@@ -58,6 +58,7 @@ import os
 import sys
 import tempfile
 import time
+import threading
 
 # Force unbuffered stdout so logs appear immediately in Swift's debug console
 # This is important because Python buffers stdout by default when not connected to a TTY
@@ -615,6 +616,52 @@ def _transcribe_whisper(audio_path: str) -> tuple[str, float]:
     return text.strip(), processing_time
 
 
+# ============================================================================
+# TRANSCRIPTION PROGRESS TRACKING (for SSE streaming endpoint)
+# ============================================================================
+
+_transcription_progress = {"progress": 0.0, "estimated": True}
+_transcription_progress_lock = threading.Lock()
+
+
+def _set_progress(progress: float, estimated: bool = True):
+    """Thread-safe progress update for streaming transcription."""
+    with _transcription_progress_lock:
+        _transcription_progress["progress"] = progress
+        _transcription_progress["estimated"] = estimated
+
+
+def _get_progress() -> dict:
+    """Thread-safe progress read for streaming transcription."""
+    with _transcription_progress_lock:
+        return dict(_transcription_progress)
+
+
+def _transcribe_whisper_with_progress(audio_path: str, audio_duration: float) -> tuple[str, float]:
+    """Transcribe using faster-whisper with real segment-level progress reporting."""
+    global whisper_model
+
+    if whisper_model is None:
+        raise RuntimeError("Whisper model not loaded")
+
+    start_time = time.time()
+
+    segments, info = whisper_model.transcribe(audio_path, beam_size=5)
+
+    text_parts = []
+    for segment in segments:
+        text_parts.append(segment.text)
+        # Report real progress based on segment timestamp vs total duration
+        if audio_duration > 0:
+            progress = min(segment.end / audio_duration, 0.99)
+            _set_progress(progress, estimated=False)
+
+    processing_time = time.time() - start_time
+    text = " ".join(text_parts)
+
+    return text.strip(), processing_time
+
+
 def is_model_loaded() -> bool:
     """Check if any model is currently loaded."""
     return asr_model is not None or whisper_model is not None
@@ -1026,6 +1073,111 @@ async def transcribe(file: UploadFile = File(...)) -> TranscriptionResponse:
         # Always clean up temp file
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+@app.post("/transcribe-stream")
+async def transcribe_stream(file: UploadFile = File(...)):
+    """
+    Transcribe an uploaded audio file with SSE progress updates.
+
+    Runs transcription in a background thread and sends heartbeat events
+    every 2 seconds to keep the connection alive and report progress.
+
+    Events:
+    - {"type": "heartbeat", "elapsed": 12.5, "progress": 0.45, "estimated": true}
+    - {"type": "complete", "text": "...", "duration_seconds": ..., "processing_time": ..., "realtime_factor": ...}
+    - {"type": "error", "message": "..."}
+    """
+    if not is_model_loaded():
+        raise HTTPException(status_code=503, detail="Model not loaded. Call POST /load first.")
+
+    # Save uploaded file to temp location (same as /transcribe)
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+            content = await file.read()
+            tmp.write(content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to save audio: {e}")
+
+    # Read audio duration
+    from scipy.io.wavfile import read as wav_read
+    sample_rate_val, audio_data_arr = wav_read(tmp_path)
+    audio_duration = len(audio_data_arr) / sample_rate_val
+
+    async def event_generator():
+        result_holder = {"text": None, "processing_time": None, "error": None}
+        _set_progress(0.0, estimated=True)
+
+        def run_transcription():
+            try:
+                if current_model_type == "whisper":
+                    text, proc_time = _transcribe_whisper_with_progress(tmp_path, audio_duration)
+                else:
+                    text, proc_time = transcribe_audio(tmp_path)
+                result_holder["text"] = text
+                result_holder["processing_time"] = proc_time
+            except Exception as e:
+                result_holder["error"] = str(e)
+
+        # Start transcription in background thread
+        thread = threading.Thread(target=run_transcription)
+        thread.start()
+
+        start_time = time.time()
+
+        try:
+            # Send heartbeats while transcription runs
+            while thread.is_alive():
+                await asyncio.sleep(2.0)
+                elapsed = time.time() - start_time
+                prog = _get_progress()
+
+                # For NeMo, estimate progress based on typical realtime factor (~3.5x)
+                if current_model_type == "nemo":
+                    estimated_total = audio_duration / 3.5
+                    progress = min(elapsed / estimated_total, 0.95) if estimated_total > 0 else 0.0
+                    prog = {"progress": progress, "estimated": True}
+
+                event = {
+                    "type": "heartbeat",
+                    "elapsed": round(elapsed, 1),
+                    "progress": round(prog["progress"], 2),
+                    "estimated": prog["estimated"]
+                }
+                yield f"data: {json.dumps(event)}\n\n"
+
+            thread.join()
+
+            # Send final result or error
+            if result_holder["error"]:
+                event = {"type": "error", "message": result_holder["error"]}
+                yield f"data: {json.dumps(event)}\n\n"
+            else:
+                processing_time = result_holder["processing_time"]
+                realtime_factor = audio_duration / processing_time if processing_time > 0 else 0
+                event = {
+                    "type": "complete",
+                    "text": result_holder["text"].strip() if result_holder["text"] else "",
+                    "duration_seconds": audio_duration,
+                    "processing_time": processing_time,
+                    "realtime_factor": realtime_factor
+                }
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            # Always clean up temp file
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 
 @app.post("/transcribe-bytes")

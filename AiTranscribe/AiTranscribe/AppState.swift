@@ -845,15 +845,22 @@ class AppState: ObservableObject {
         }
 
         do {
-            // Send audio data to backend for transcription
-            let result = try await apiClient.transcribeAudioData(audioData)
+            // Send audio data to backend for transcription with progress updates
+            let result = try await apiClient.transcribeAudioDataWithProgress(audioData) { progress, elapsed in
+                let percent = Int(progress * 100)
+                if percent > 0 {
+                    self.statusMessage = "Transcribing... \(percent)%"
+                } else {
+                    self.statusMessage = "Transcribing... (\(Int(elapsed))s)"
+                }
+            }
             isRecording = false
             lastTranscription = result.text
             statusMessage = "Ready"
 
             // Hide indicator after transcription completes
             recordingIndicator.hide()
-            
+
             // Save to history
             let entry = TranscriptionEntry(
                 text: result.text,
@@ -878,7 +885,11 @@ class AppState: ObservableObject {
 
         } catch {
             isRecording = false
-            statusMessage = "Transcription failed"
+            if "\(error)".contains("timed out") || "\(error)".contains("timeout") {
+                statusMessage = "Transcription timed out - try shorter audio"
+            } else {
+                statusMessage = "Transcription failed"
+            }
             recordingIndicator.hide()
             print("Stop recording error: \(error)")
         }
