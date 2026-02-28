@@ -58,6 +58,9 @@ struct RecordingIndicatorView: View {
     /// Start time for smooth dots animation
     @State private var dotsAnimationStartTime: Date = Date()
 
+    /// Detect light/dark mode
+    @Environment(\.colorScheme) private var colorScheme
+
     /// Core circle color (#0C0D10)
     private let coreColor = Color(red: 12/255, green: 13/255, blue: 16/255)
 
@@ -85,13 +88,28 @@ struct RecordingIndicatorView: View {
                 }
             }
 
-            // Core circle with clear glass effect and white border
+            // Core circle — simulated glass look without .glassEffect() to avoid
+            // rectangular behind-window blur sampling artifact in borderless windows
             Circle()
+                .fill(
+                    RadialGradient(
+                        colors: colorScheme == .dark
+                            ? [Color(white: 0.40, opacity: 0.85), Color(white: 0.18, opacity: 0.9)]
+                            : [Color(white: 0.75, opacity: 0.9), Color(white: 0.55, opacity: 0.85)],
+                        center: .topLeading,
+                        startRadius: 0,
+                        endRadius: coreSize
+                    )
+                )
                 .frame(width: coreSize, height: coreSize)
-                .glassEffect()
                 .overlay(
                     Circle()
-                        .stroke(Color.white.opacity(0.3), lineWidth: 0.5)
+                        .stroke(
+                            colorScheme == .dark
+                                ? Color.white.opacity(0.3)
+                                : Color.black.opacity(0.15),
+                            lineWidth: 0.5
+                        )
                 )
 
             // Transcription dots animation
@@ -115,31 +133,19 @@ struct RecordingIndicatorView: View {
         }
         .frame(width: 64, height: 36)
         .background(
-            ZStack {
-                // Glass background - more transparent for better see-through effect
-                Capsule()
-                    .fill(.ultraThinMaterial.opacity(0.6))
-
-                // Subtle inner glow/highlight at top
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.white.opacity(0.12), Color.clear],
-                            startPoint: .top,
-                            endPoint: .center
-                        )
-                    )
-            }
-            .shadow(color: .black.opacity(0.15), radius: 10, x: 0, y: 3)
+            Capsule()
+                .fill(
+                    colorScheme == .dark
+                        ? Color(white: 0.15, opacity: 0.65)
+                        : Color(white: 0.92, opacity: 0.85)
+                )
         )
         .overlay(
             Capsule()
                 .stroke(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.25), Color.white.opacity(0.08)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
+                    colorScheme == .dark
+                        ? Color.white.opacity(0.15)
+                        : Color.black.opacity(0.1),
                     lineWidth: 0.5
                 )
         )
@@ -784,6 +790,10 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
         let hostingView = NSHostingView(rootView: contentView)
         hostingView.frame = CGRect(x: 0, y: 0, width: 70, height: 42)
 
+        // Ensure the hosting view layer is fully transparent — prevents rectangular box artifact
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = .clear
+
         let window = NSWindow(
             contentRect: hostingView.frame,
             styleMask: [.borderless],
@@ -794,9 +804,18 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
         window.contentView = hostingView
         window.isOpaque = false
         window.backgroundColor = .clear
+        window.hasShadow = false  // Disable window-level rectangular shadow
         window.level = .floating  // Always on top
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isMovableByWindowBackground = true  // Can drag to reposition
+        window.ignoresMouseEvents = false
+
+        // Force the window's content view to be fully transparent at the AppKit level
+        if let contentView = window.contentView {
+            contentView.wantsLayer = true
+            contentView.layer?.backgroundColor = .clear
+            contentView.layer?.isOpaque = false
+        }
 
         self.window = window
     }
