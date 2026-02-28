@@ -33,6 +33,7 @@
  */
 
 import SwiftUI
+import CoreAudio
 
 struct MenuBarView: View {
     /*
@@ -223,8 +224,8 @@ struct MenuBarView: View {
         // Picker with .menu style - click once to see dropdown options
         Picker(selection: $appState.selectedDeviceId) {
             ForEach(appState.audioDevices) { device in
-                Text(device.name + (device.isDefault ? " (Default)" : ""))
-                    .tag(device.id as Int?)
+                Text(device.displayName)
+                    .tag(device.id as AudioDeviceID?)
             }
         } label: {
             Label("Microphone", systemImage: "mic")

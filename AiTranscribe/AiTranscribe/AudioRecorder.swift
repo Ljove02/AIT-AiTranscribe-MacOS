@@ -24,6 +24,8 @@
 
 import Foundation
 import AVFoundation
+import CoreAudio
+import AudioToolbox
 import Combine
 
 /// Records audio from the microphone using AVFoundation
@@ -78,9 +80,10 @@ class AudioRecorder: NSObject, ObservableObject {
 
     // MARK: - Recording Control
 
-    /// Start recording audio
+    /// Start recording audio with an optional specific device
+    /// - Parameter deviceId: CoreAudio AudioDeviceID to record from. If nil, uses system default.
     /// - Returns: True if recording started successfully
-    func startRecording() -> Bool {
+    func startRecording(deviceId: AudioDeviceID? = nil) -> Bool {
         guard !isRecording else { return false }
 
         // Clear previous recording
@@ -88,9 +91,28 @@ class AudioRecorder: NSObject, ObservableObject {
         currentVolume = 0.0
         duration = 0.0
 
-        // Create audio engine
+        // If a specific device is requested, temporarily set it as the system default
+        // This is the most reliable way to make AVAudioEngine use a specific device,
+        // as setting the device directly on the audio unit can fail when switching
+        // between devices with different formats (e.g., Bluetooth AirPods ↔ built-in mic)
+        var previousDefaultDevice: AudioDeviceID?
+        if let deviceId = deviceId {
+            let currentDefault = AudioRecorder.getDefaultInputDeviceId()
+            if currentDefault != deviceId {
+                previousDefaultDevice = currentDefault
+                AudioRecorder.setDefaultInputDevice(deviceId)
+                // Small delay to let CoreAudio settle after device switch
+                usleep(50_000) // 50ms
+            }
+        }
+
+        // Create audio engine (will use the current system default input)
         audioEngine = AVAudioEngine()
-        guard let audioEngine = audioEngine else { return false }
+        guard let audioEngine = audioEngine else {
+            // Restore previous default if we changed it
+            if let prev = previousDefaultDevice { AudioRecorder.setDefaultInputDevice(prev) }
+            return false
+        }
 
         let inputNode = audioEngine.inputNode
 
@@ -322,5 +344,174 @@ class AudioRecorder: NSObject, ObservableObject {
     /// Get current authorization status
     static var authorizationStatus: AVAuthorizationStatus {
         AVCaptureDevice.authorizationStatus(for: .audio)
+    }
+
+    // MARK: - CoreAudio Device Management
+
+    /// List all available audio input devices using CoreAudio
+    static func listInputDevices() -> [InputDevice] {
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        // Get size of device list
+        var dataSize: UInt32 = 0
+        var status = AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress, 0, nil, &dataSize
+        )
+        guard status == noErr else { return [] }
+
+        // Get device IDs
+        let deviceCount = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+        var deviceIDs = [AudioDeviceID](repeating: 0, count: deviceCount)
+        status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress, 0, nil, &dataSize, &deviceIDs
+        )
+        guard status == noErr else { return [] }
+
+        // Get default input device
+        let defaultDeviceId = getDefaultInputDeviceId()
+
+        // Filter to input devices and get their names
+        var inputDevices: [InputDevice] = []
+        for deviceID in deviceIDs {
+            // Check if device has input channels
+            var streamAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreamConfiguration,
+                mScope: kAudioDevicePropertyScopeInput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var streamSize: UInt32 = 0
+            status = AudioObjectGetPropertyDataSize(deviceID, &streamAddress, 0, nil, &streamSize)
+            guard status == noErr, streamSize > 0 else { continue }
+
+            let bufferListPointer = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
+            defer { bufferListPointer.deallocate() }
+            status = AudioObjectGetPropertyData(deviceID, &streamAddress, 0, nil, &streamSize, bufferListPointer)
+            guard status == noErr else { continue }
+
+            let bufferList = UnsafeMutableAudioBufferListPointer(bufferListPointer)
+            let inputChannels = bufferList.reduce(0) { $0 + Int($1.mNumberChannels) }
+            guard inputChannels > 0 else { continue }
+
+            // Get device name
+            var nameAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyDeviceNameCFString,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var name: CFString = "" as CFString
+            var nameSize = UInt32(MemoryLayout<CFString>.size)
+            status = AudioObjectGetPropertyData(deviceID, &nameAddress, 0, nil, &nameSize, &name)
+            let deviceName = status == noErr ? name as String : "Unknown Device"
+
+            // Skip virtual aggregate devices created by CoreAudio (not real microphones)
+            if deviceName.localizedCaseInsensitiveContains("aggregate")
+                || deviceName.contains("CADefaultDevice") {
+                continue
+            }
+
+            inputDevices.append(InputDevice(
+                id: deviceID,
+                name: deviceName,
+                isDefault: deviceID == defaultDeviceId
+            ))
+        }
+
+        return inputDevices
+    }
+
+    /// Set the system default input device
+    @discardableResult
+    static func setDefaultInputDevice(_ deviceId: AudioDeviceID) -> Bool {
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var devId = deviceId
+        let status = AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress, 0, nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size),
+            &devId
+        )
+        if status != noErr {
+            print("Failed to set default input device \(deviceId): OSStatus \(status)")
+        }
+        return status == noErr
+    }
+
+    /// Get the default input device ID
+    static func getDefaultInputDeviceId() -> AudioDeviceID {
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var deviceId: AudioDeviceID = 0
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress, 0, nil, &size, &deviceId
+        )
+        return deviceId
+    }
+
+    /// Register a listener for audio device changes (device added/removed, default changed)
+    /// Returns a closure that removes the listener when called
+    static func onDeviceChange(callback: @escaping () -> Void) -> (() -> Void) {
+        let systemObject = AudioObjectID(kAudioObjectSystemObject)
+
+        // Listen for device list changes
+        var devicesAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        // Listen for default input device changes
+        var defaultAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let queue = DispatchQueue.main
+
+        let devicesBlock: AudioObjectPropertyListenerBlock = { _, _ in
+            callback()
+        }
+        let defaultBlock: AudioObjectPropertyListenerBlock = { _, _ in
+            callback()
+        }
+
+        AudioObjectAddPropertyListenerBlock(systemObject, &devicesAddress, queue, devicesBlock)
+        AudioObjectAddPropertyListenerBlock(systemObject, &defaultAddress, queue, defaultBlock)
+
+        // Return cleanup closure
+        return {
+            var da = devicesAddress
+            var dfa = defaultAddress
+            AudioObjectRemovePropertyListenerBlock(systemObject, &da, queue, devicesBlock)
+            AudioObjectRemovePropertyListenerBlock(systemObject, &dfa, queue, defaultBlock)
+        }
+    }
+}
+
+// MARK: - Input Device Model
+
+/// Represents an audio input device from CoreAudio
+struct InputDevice: Identifiable, Equatable, Hashable {
+    let id: AudioDeviceID       // CoreAudio UInt32 device ID
+    let name: String
+    let isDefault: Bool
+
+    var displayName: String {
+        name + (isDefault ? " (Default)" : "")
     }
 }

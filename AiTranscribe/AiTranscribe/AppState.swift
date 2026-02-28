@@ -25,6 +25,7 @@
 
 import Foundation
 import SwiftUI
+import CoreAudio
 import Combine  // Apple's framework for reactive programming
 
 /*
@@ -80,11 +81,14 @@ class AppState: ObservableObject {
     /// Status message to show user
     @Published var statusMessage: String = "Checking server..."
 
-    /// Available microphones
-    @Published var audioDevices: [AudioDevice] = []
+    /// Available microphones (from CoreAudio)
+    @Published var audioDevices: [InputDevice] = []
 
-    /// Selected microphone ID
-    @Published var selectedDeviceId: Int? = nil
+    /// Selected microphone device ID (CoreAudio AudioDeviceID)
+    @Published var selectedDeviceId: AudioDeviceID? = nil
+
+    /// Cleanup closure for device change listener
+    private var removeDeviceListener: (() -> Void)?
 
     /// Transcription history (stored locally in JSON)
     @Published var transcriptionHistory: [TranscriptionEntry] = []
@@ -215,6 +219,20 @@ class AppState: ObservableObject {
     func bindToBackendManager(_ manager: BackendManager) {
         print("AppState.bindToBackendManager() - START")
         self.backendManager = manager
+
+        // Start listening for audio device changes (AirPods connect/disconnect)
+        startDeviceChangeListener()
+
+        // Persist device selection when user changes it via picker
+        $selectedDeviceId
+            .dropFirst() // Skip initial value
+            .sink { [weak self] newId in
+                guard let self = self, let newId = newId else { return }
+                if let device = self.audioDevices.first(where: { $0.id == newId }) {
+                    UserDefaults.standard.set(device.name, forKey: "preferredMicDeviceName")
+                }
+            }
+            .store(in: &cancellables)
 
         // Sync isServerReady -> isServerConnected
         manager.$isServerReady
@@ -489,17 +507,63 @@ class AppState: ObservableObject {
         }
     }
 
-    /// Fetch available audio input devices
+    /// Fetch available audio input devices using CoreAudio
     func fetchAudioDevices() async {
-        do {
-            audioDevices = try await apiClient.getDevices()
-            // Select default device if none selected
-            if selectedDeviceId == nil {
-                selectedDeviceId = audioDevices.first(where: { $0.isDefault })?.id
-            }
-        } catch {
-            print("Failed to fetch devices: \(error)")
+        audioDevices = AudioRecorder.listInputDevices()
+
+        // Restore persisted device by name, or fall back to default
+        let preferredName = UserDefaults.standard.string(forKey: "preferredMicDeviceName")
+        if let preferredName = preferredName,
+           let match = audioDevices.first(where: { $0.name == preferredName }) {
+            selectedDeviceId = match.id
+        } else if selectedDeviceId == nil {
+            selectedDeviceId = audioDevices.first(where: { $0.isDefault })?.id
         }
+    }
+
+    /// Start listening for audio device changes (AirPods connect/disconnect, etc.)
+    func startDeviceChangeListener() {
+        removeDeviceListener = AudioRecorder.onDeviceChange { [weak self] in
+            guard let self = self else { return }
+            self.handleDeviceChange()
+        }
+    }
+
+    /// Handle audio device change (device added/removed or default changed)
+    private func handleDeviceChange() {
+        let oldDefault = audioDevices.first(where: { $0.isDefault })?.name
+        audioDevices = AudioRecorder.listInputDevices()
+        let newDefault = audioDevices.first(where: { $0.isDefault })?.name
+
+        // If our selected device disappeared, fall back to new default
+        if let selectedId = selectedDeviceId,
+           !audioDevices.contains(where: { $0.id == selectedId }) {
+            selectedDeviceId = audioDevices.first(where: { $0.isDefault })?.id
+            print("Selected device disconnected, switched to default: \(newDefault ?? "unknown")")
+        }
+
+        // Notify user if default changed and they have a preferred device
+        let preferredName = UserDefaults.standard.string(forKey: "preferredMicDeviceName")
+        if let oldDefault = oldDefault, let newDefault = newDefault,
+           oldDefault != newDefault, preferredName != nil {
+            let selectedName = audioDevices.first(where: { $0.id == selectedDeviceId })?.name ?? "default"
+            sendDeviceChangeNotification(newDefault: newDefault, usingDevice: selectedName)
+        }
+    }
+
+    /// Send a macOS notification about device change
+    private func sendDeviceChangeNotification(newDefault: String, usingDevice: String) {
+        let notification = NSUserNotification()
+        notification.title = "Microphone Changed"
+        notification.informativeText = "System switched to \(newDefault). AiTranscribe is using \(usingDevice)."
+        notification.soundName = nil
+        NSUserNotificationCenter.default.deliver(notification)
+    }
+
+    /// Persist device selection when user picks a mic
+    func selectMicrophone(_ device: InputDevice) {
+        selectedDeviceId = device.id
+        UserDefaults.standard.set(device.name, forKey: "preferredMicDeviceName")
     }
 
     /// Load a specific ASR model
@@ -704,8 +768,8 @@ class AppState: ObservableObject {
             return
         }
 
-        // Start Swift-native recording
-        if audioRecorder.startRecording() {
+        // Start Swift-native recording with selected device
+        if audioRecorder.startRecording(deviceId: selectedDeviceId) {
             isRecording = true
             isStreamingMode = false
             statusMessage = "Recording..."
