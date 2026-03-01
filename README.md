@@ -15,7 +15,7 @@ A powerful macOS menu bar application for local speech-to-text transcription. Ru
 
 ## Showcase
 
-https://github.com/user-attachments/assets/Showcase.mp4
+https://github.com/user-attachments/assets/3f8da9f1-6a4b-483a-96ec-75d6239b5fa8
 
 > Press a shortcut, speak, and the transcription lands in your clipboard — ready to paste anywhere. The recording indicator follows you across desktops, snaps to screen corners, and adapts to light and dark mode.
 
