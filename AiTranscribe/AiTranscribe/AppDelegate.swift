@@ -4,6 +4,7 @@ import AppKit
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var appState: AppState?
     private var backendManager: BackendManager?
+    private var sessionManager: SessionManager?
     private var onboardingWindowController: OnboardingWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -22,6 +23,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             options: [.new],
             context: nil
         )
+    }
+
+    /// Store session manager reference for graceful shutdown
+    func configureSessionManager(_ sessionManager: SessionManager) {
+        self.sessionManager = sessionManager
+    }
+
+    /// Gracefully stop session recording before app quits
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let sessionManager, sessionManager.isSessionRecording else {
+            return .terminateNow
+        }
+
+        // Stop session recording before quitting
+        Task { @MainActor in
+            await sessionManager.stopSessionRecording()
+            // Small delay to let file finalize, then quit
+            try? await Task.sleep(for: .milliseconds(500))
+            NSApplication.shared.reply(toApplicationShouldTerminate: true)
+        }
+
+        return .terminateLater
     }
 
     /// Show onboarding window (called from SwiftUI)

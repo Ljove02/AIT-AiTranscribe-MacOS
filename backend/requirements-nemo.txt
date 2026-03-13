@@ -12,8 +12,8 @@ fastapi>=0.104.0
 uvicorn>=0.24.0
 python-multipart
 
-# Faster Whisper (for OpenAI Whisper models)
-faster-whisper
+# Whisper transcription handled by whisper-cli binary (whisper.cpp with Metal GPU)
+# No Python whisper dependency needed
 
 # Audio handling
 sounddevice

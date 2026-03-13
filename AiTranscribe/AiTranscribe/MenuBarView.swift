@@ -43,9 +43,12 @@ struct MenuBarView: View {
      If AppState changes, this view automatically updates.
      */
     @EnvironmentObject var appState: AppState
-    
+
     /// Backend manager to control the server
     @EnvironmentObject var backendManager: BackendManager
+
+    /// Session manager for long-form recordings
+    @EnvironmentObject var sessionManager: SessionManager
 
     /// SwiftUI's environment action to open settings (macOS 14+)
     @Environment(\.openSettings) private var openSettings
@@ -75,6 +78,15 @@ struct MenuBarView: View {
             if appState.isModelLoaded {
                 recordingControls
             }
+
+            Divider()
+                .padding(.vertical, 4)
+
+            // ─────────────────────────────────────────────────────────────────
+            // SESSION RECORDING
+            // ─────────────────────────────────────────────────────────────────
+
+            sessionRecordingSection
 
             Divider()
                 .padding(.vertical, 4)
@@ -186,6 +198,48 @@ struct MenuBarView: View {
                 } label: {
                     Label("Start Recording", systemImage: "mic.fill")
                 }
+                .disabled(sessionManager.isSessionRecording)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+    }
+
+    /// Session recording controls - Record/Stop a long-form session
+    private var sessionRecordingSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if sessionManager.isSessionRecording {
+                // Show duration and stop button
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(.red)
+                        .frame(width: 8, height: 8)
+                    Text("Session Recording")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 2)
+
+                Button {
+                    Task {
+                        await sessionManager.stopSessionRecording()
+                    }
+                } label: {
+                    Label("Stop Session", systemImage: "stop.circle.fill")
+                        .foregroundColor(.red)
+                }
+            } else {
+                Button {
+                    Task {
+                        await sessionManager.startSessionRecording(
+                            micDeviceId: appState.selectedDeviceId
+                        )
+                    }
+                } label: {
+                    Label("Record Session", systemImage: "waveform.badge.plus")
+                }
+                .disabled(!appState.isServerConnected || appState.isRecording)
             }
         }
         .padding(.horizontal, 12)
@@ -430,4 +484,5 @@ struct MenuBarView: View {
     MenuBarView()
         .environmentObject(AppState())
         .environmentObject(BackendManager())
+        .environmentObject(SessionManager())
 }

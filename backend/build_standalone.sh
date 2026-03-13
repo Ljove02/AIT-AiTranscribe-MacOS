@@ -77,17 +77,13 @@ python3 -m PyInstaller \
     --hidden-import numpy \
     --hidden-import torch \
     --hidden-import torchaudio \
-    --hidden-import faster_whisper \
-    --hidden-import ctranslate2 \
     --hidden-import huggingface_hub \
     --collect-all torch \
     --collect-all torchaudio \
-    --collect-all faster_whisper \
-    --collect-all ctranslate2 \
     --collect-all sounddevice \
     --copy-metadata torch \
     --copy-metadata torchaudio \
-    --copy-metadata faster-whisper \
+    --add-binary "bin/whisper-cli:bin" \
     server.py
 
 echo ""

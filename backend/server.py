@@ -65,6 +65,7 @@ import threading
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 import json
+import queue
 import asyncio
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -161,8 +162,10 @@ class ModelInfo(BaseModel):
     streaming_native: bool         # Is model optimized for streaming?
     downloaded: bool               # Is model downloaded?
     download_url: Optional[str]    # URL for manual download (Whisper only)
+    model_url: Optional[str] = None  # URL to model page (HuggingFace/GitHub)
     path: Optional[str]            # Path to model file (if downloaded)
     nemo_required: bool            # Does this model require NeMo to be installed?
+    session_compatible: bool       # Can this model do batch/session transcription?
     can_use: bool = True           # Can this model be used? (False if NeMo required but not available)
 
 
@@ -205,9 +208,35 @@ class RecordingStatus(BaseModel):
 # MODEL LOADING FUNCTIONS
 # ============================================================================
 
-# Whisper model instance (separate from NeMo)
-whisper_model = None
+# Whisper model path (whisper.cpp GGML file — no in-memory model, loaded per-invocation by whisper-cli)
+whisper_model_path = None
 current_model_type = None  # "nemo" or "whisper"
+
+# Path to whisper-cli binary
+import subprocess as _subprocess
+def _find_whisper_cli() -> Optional[str]:
+    """Find the whisper-cli binary path. Returns None if not found."""
+    candidates = [
+        Path(__file__).parent / "bin" / "whisper-cli",          # backend/bin/ (development)
+        Path(__file__).parent / "whisper-cli",                  # Same dir as server.py (Xcode bundle)
+        Path(__file__).parent.parent / "bin" / "whisper-cli",   # One level up
+        Path(sys.executable).parent / "bin" / "whisper-cli",    # PyInstaller bundle
+    ]
+    for path in candidates:
+        if path.exists():
+            return str(path)
+    # Check system PATH as fallback
+    import shutil
+    system_path = shutil.which("whisper-cli")
+    if system_path:
+        return system_path
+    return None
+
+whisper_cli_path = _find_whisper_cli()
+if whisper_cli_path:
+    print(f"whisper-cli found at: {whisper_cli_path}")
+else:
+    print("WARNING: whisper-cli not found. Whisper models will not work.")
 
 # Cached NeMo status (checked once at startup or on first request)
 _nemo_status_cache = None
@@ -238,7 +267,7 @@ def load_asr_model(model_id: str = DEFAULT_MODEL):
     Args:
         model_id: Which model to load (e.g., "parakeet-v2", "whisper-base-en")
     """
-    global asr_model, whisper_model, model_device, current_model_id, current_model_type
+    global asr_model, whisper_model_path, model_device, current_model_id, current_model_type
 
     if model_id not in AVAILABLE_MODELS:
         raise ValueError(f"Unknown model: {model_id}. Available: {list(AVAILABLE_MODELS.keys())}")
@@ -300,20 +329,31 @@ def _load_nemo_model(model_id: str, model_config: dict):
 
 
 def _load_whisper_model(model_id: str, model_config: dict):
-    """Load a Whisper model using faster-whisper (CTranslate2)."""
-    global whisper_model, model_device
+    """Validate whisper.cpp GGML model exists and store its path.
 
-    from faster_whisper import WhisperModel
+    whisper.cpp loads the model per-invocation via whisper-cli subprocess,
+    so "loading" just validates the file and stores the path. Instant.
+    """
+    global whisper_model_path, model_device
 
-    # Get model name for faster-whisper
-    # This can be a size like "base.en", "small.en", "large-v3"
-    # or a full HuggingFace path like "deepdml/faster-whisper-large-v3-turbo-ct2"
-    model_name = model_config["name"]
+    filename = model_config["filename"]
+    path = get_whisper_dir() / filename
 
-    # Load the model (faster-whisper auto-downloads from HuggingFace if needed)
-    # Use CPU with int8 for best compatibility on Mac
-    whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    model_device = "cpu"
+    if not path.exists():
+        raise FileNotFoundError(f"Whisper GGML model not found: {path}")
+    if whisper_cli_path is None:
+        raise FileNotFoundError("whisper-cli binary not found. Whisper models require it.")
+
+    whisper_model_path = str(path)
+    model_device = "metal"  # whisper.cpp uses Metal on Apple Silicon
+    file_size_mb = int(path.stat().st_size / (1024 * 1024))
+    print(f"")
+    print(f"========================================")
+    print(f"  WHISPER ENGINE: whisper.cpp (Metal GPU)")
+    print(f"  Model: {filename} ({file_size_mb} MB)")
+    print(f"  Path: {whisper_model_path}")
+    print(f"  Binary: {whisper_cli_path}")
+    print(f"========================================")
 
 
 def unload_asr_model():
@@ -323,7 +363,7 @@ def unload_asr_model():
     Python has garbage collection, but explicitly deleting
     and clearing CUDA/MPS cache ensures memory is freed.
     """
-    global asr_model, whisper_model, model_device, current_model_id, current_model_type
+    global asr_model, whisper_model_path, model_device, current_model_id, current_model_type
 
     # Import gc early for multiple collection passes
     import gc
@@ -341,9 +381,8 @@ def unload_asr_model():
         del asr_model
         asr_model = None
 
-    if whisper_model is not None:
-        del whisper_model
-        whisper_model = None
+    # whisper.cpp: just clear the path (no in-memory model to free)
+    whisper_model_path = None
 
     model_device = None
     current_model_id = None
@@ -395,7 +434,7 @@ def transcribe_audio(audio_path: str) -> tuple[str, float]:
     Returns:
         Tuple of (transcribed_text, processing_time)
     """
-    global asr_model, whisper_model, current_model_type
+    global asr_model, whisper_model_path, current_model_type
 
     if current_model_type == "nemo":
         return _transcribe_nemo(audio_path)
@@ -591,29 +630,44 @@ def _transcribe_nemo(audio_path: str) -> tuple[str, float]:
 
 
 def _transcribe_whisper(audio_path: str) -> tuple[str, float]:
-    """Transcribe using faster-whisper model."""
-    global whisper_model
+    """Transcribe using whisper.cpp via subprocess (Metal GPU accelerated)."""
+    global whisper_model_path
 
-    if whisper_model is None:
+    if whisper_model_path is None:
         raise RuntimeError("Whisper model not loaded")
+    if whisper_cli_path is None:
+        raise RuntimeError("whisper-cli binary not found. Place it at backend/bin/whisper-cli")
 
+    print(f"[whisper.cpp] Transcribing: {audio_path}")
+    print(f"[whisper.cpp] Model: {whisper_model_path}")
     start_time = time.time()
 
-    # Transcribe with faster-whisper
-    # Returns (segments_generator, transcription_info)
-    segments, info = whisper_model.transcribe(audio_path, beam_size=5)
-
-    # Collect all segment texts
-    text_parts = []
-    for segment in segments:
-        text_parts.append(segment.text)
+    result = _subprocess.run(
+        [
+            whisper_cli_path,
+            "-m", whisper_model_path,
+            "-f", audio_path,
+            "-np",          # no prints (suppress log output)
+            "-nt",          # no timestamps in text output
+            "-t", "4",      # threads
+            "-l", "auto",   # auto-detect language
+        ],
+        capture_output=True,
+        text=True,
+        timeout=1800,  # 30 min safety net
+    )
 
     processing_time = time.time() - start_time
 
-    # Join all segments into final text
-    text = " ".join(text_parts)
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        print(f"ERROR: whisper-cli failed (code {result.returncode}): {stderr}")
+        raise RuntimeError(f"whisper-cli failed: {stderr}")
 
-    return text.strip(), processing_time
+    text = result.stdout.strip()
+    word_count = len(text.split()) if text else 0
+    print(f"[whisper.cpp] Done in {processing_time:.1f}s — {word_count} words")
+    return text, processing_time
 
 
 # ============================================================================
@@ -638,33 +692,17 @@ def _get_progress() -> dict:
 
 
 def _transcribe_whisper_with_progress(audio_path: str, audio_duration: float) -> tuple[str, float]:
-    """Transcribe using faster-whisper with real segment-level progress reporting."""
-    global whisper_model
+    """Transcribe using whisper.cpp via subprocess.
 
-    if whisper_model is None:
-        raise RuntimeError("Whisper model not loaded")
-
-    start_time = time.time()
-
-    segments, info = whisper_model.transcribe(audio_path, beam_size=5)
-
-    text_parts = []
-    for segment in segments:
-        text_parts.append(segment.text)
-        # Report real progress based on segment timestamp vs total duration
-        if audio_duration > 0:
-            progress = min(segment.end / audio_duration, 0.99)
-            _set_progress(progress, estimated=False)
-
-    processing_time = time.time() - start_time
-    text = " ".join(text_parts)
-
-    return text.strip(), processing_time
+    whisper-cli doesn't support per-segment progress callbacks, so batch
+    transcription handles progress at the chunk level instead.
+    """
+    return _transcribe_whisper(audio_path)
 
 
 def is_model_loaded() -> bool:
     """Check if any model is currently loaded."""
-    return asr_model is not None or whisper_model is not None
+    return asr_model is not None or whisper_model_path is not None
 
 
 # ============================================================================
@@ -803,8 +841,10 @@ async def list_models() -> list[ModelInfo]:
             streaming_native=info.get("streaming_native", False),
             downloaded=info["downloaded"],
             download_url=info.get("download_url"),
+            model_url=info.get("model_url"),
             path=info.get("path"),
             nemo_required=requires_nemo,
+            session_compatible=info["type"] != "nemo" or info["id"] in ("parakeet-v2", "parakeet-v3"),
             can_use=can_use,
         ))
 
@@ -950,8 +990,10 @@ async def get_model(model_id: str) -> ModelInfo:
         streaming_native=info.get("streaming_native", False),
         downloaded=info["downloaded"],
         download_url=info.get("download_url"),
+        model_url=info.get("model_url"),
         path=info.get("path"),
         nemo_required=is_nemo_model(model_id),
+        session_compatible=info["type"] != "nemo" or model_id in ("parakeet-v2", "parakeet-v3"),
     )
 
 
@@ -1495,6 +1537,325 @@ async def stop_streaming() -> MessageResponse:
         message="Streaming stop requested",
         success=True
     )
+
+
+# ============================================================================
+# SESSION ENDPOINTS - Batch transcription of long recordings
+# ============================================================================
+
+from batch_transcriber import (
+    BatchTranscriber,
+    get_sessions_dir,
+    estimate_batches,
+)
+
+# Active batch transcriber (for cancellation support)
+active_batch_transcriber: Optional[BatchTranscriber] = None
+
+
+class BatchTranscribeRequest(BaseModel):
+    """Request to batch-transcribe a session recording."""
+    session_dir: str       # Directory name within Sessions/ folder
+    model_id: str          # e.g., "parakeet-v2"
+    ram_budget_mb: int     # Total RAM budget in MB (e.g., 4096)
+
+
+class EstimateBatchesRequest(BaseModel):
+    """Request to estimate batch count for a recording."""
+    audio_duration_seconds: float
+    model_id: str
+    ram_budget_mb: int
+
+
+class SessionDeleteRequest(BaseModel):
+    """Request to delete parts of a session."""
+    delete_audio: bool = True
+    delete_transcription: bool = True
+
+
+class BulkDeleteAudioRequest(BaseModel):
+    """Request to bulk-delete audio files."""
+    transcribed_only: bool = False
+
+
+@app.post("/session/transcribe")
+async def session_transcribe(request: BatchTranscribeRequest):
+    """
+    Batch-transcribe a session recording with SSE progress updates.
+
+    The audio file is split into chunks based on RAM budget, transcribed
+    sequentially, and the results are concatenated with overlap deduplication.
+
+    Events:
+    - {"event": "started", "total_batches": N, ...}
+    - {"event": "batch_progress", "batch": N, "total": M, "percent": P}
+    - {"event": "batch_complete", "batch": N, "total": M, "batch_text": "..."}
+    - {"event": "stats", "cpu_percent": X, "memory_mb": Y, "eta_seconds": Z}
+    - {"event": "done", "full_text": "...", "total_batches": N, "total_time": T}
+    - {"event": "error", "message": "..."}
+    """
+    global active_batch_transcriber
+
+    if not is_model_loaded():
+        raise HTTPException(status_code=503, detail="Model not loaded. Call POST /load first.")
+
+    # Resolve session directory
+    sessions_base = get_sessions_dir()
+    session_path = sessions_base / request.session_dir
+
+    if not session_path.exists():
+        raise HTTPException(status_code=404, detail=f"Session directory not found: {request.session_dir}")
+
+    # Find audio file (M4A or WAV)
+    audio_path = None
+    for ext in [".m4a", ".wav", ".mp4"]:
+        candidate = session_path / f"audio{ext}"
+        if candidate.exists():
+            audio_path = str(candidate)
+            break
+
+    if audio_path is None:
+        raise HTTPException(status_code=404, detail="No audio file found in session directory")
+
+    print(f"Session transcribe: dir={request.session_dir}, model={request.model_id}, "
+          f"budget={request.ram_budget_mb}MB, audio={audio_path}")
+
+    # Create the batch transcriber
+    transcriber = BatchTranscriber(
+        audio_path=audio_path,
+        model_id=request.model_id,
+        ram_budget_mb=request.ram_budget_mb,
+        transcribe_fn=transcribe_audio,
+    )
+    active_batch_transcriber = transcriber
+
+    async def event_generator():
+        """
+        Stream transcription events without blocking the event loop.
+
+        The synchronous transcriber.transcribe() generator is polled from a
+        background thread so other endpoints (/models, /status, /cancel) remain
+        responsive during long whisper-large-v3 transcriptions.
+        """
+        global active_batch_transcriber
+        event_queue: queue.Queue = queue.Queue()
+        _SENTINEL = object()
+
+        def _run_transcription():
+            try:
+                for event in transcriber.transcribe():
+                    event_queue.put(event)
+            except Exception as e:
+                event_queue.put({"event": "error", "message": str(e)})
+            finally:
+                event_queue.put(_SENTINEL)
+
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, _run_transcription)
+
+        try:
+            while True:
+                # Poll the queue without blocking the event loop
+                while True:
+                    try:
+                        event = event_queue.get_nowait()
+                        break
+                    except queue.Empty:
+                        await asyncio.sleep(0.5)
+                        continue
+
+                if event is _SENTINEL:
+                    break
+
+                yield f"data: {json.dumps(event)}\n\n"
+
+                if event.get("event") == "done":
+                    full_text = event.get("full_text", "")
+                    _save_session_transcription(session_path, full_text, event)
+        finally:
+            active_batch_transcriber = None
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/session/cancel-transcription", response_model=MessageResponse)
+async def session_cancel_transcription():
+    """Cancel an active batch transcription."""
+    global active_batch_transcriber
+
+    if active_batch_transcriber is None:
+        return MessageResponse(message="No active transcription to cancel", success=False)
+
+    active_batch_transcriber.cancel()
+    return MessageResponse(message="Transcription cancellation requested", success=True)
+
+
+@app.post("/session/estimate", response_model=None)
+async def session_estimate(request: EstimateBatchesRequest):
+    """
+    Estimate the number of batches and processing time for a recording.
+    Used by the frontend to show estimates before the user starts transcription.
+    """
+    result = estimate_batches(
+        audio_duration_seconds=request.audio_duration_seconds,
+        model_id=request.model_id,
+        ram_budget_mb=request.ram_budget_mb,
+    )
+    return result
+
+
+@app.get("/session/list")
+async def session_list():
+    """
+    List all sessions with their metadata.
+    Reads metadata.json from each session directory.
+    """
+    sessions_base = get_sessions_dir()
+    sessions = []
+
+    if not sessions_base.exists():
+        return {"sessions": []}
+
+    for entry in sorted(sessions_base.iterdir(), reverse=True):
+        if not entry.is_dir():
+            continue
+
+        metadata_path = entry / "metadata.json"
+        if metadata_path.exists():
+            try:
+                with open(metadata_path) as f:
+                    metadata = json.load(f)
+                metadata["directory_name"] = entry.name
+
+                # Check actual file state
+                audio_m4a = entry / "audio.m4a"
+                audio_wav = entry / "audio.wav"
+                metadata["has_audio"] = audio_m4a.exists() or audio_wav.exists()
+
+                transcription_path = entry / "transcription.txt"
+                metadata["has_transcription"] = transcription_path.exists()
+
+                if metadata["has_audio"]:
+                    audio_file = audio_m4a if audio_m4a.exists() else audio_wav
+                    metadata["file_size_mb"] = round(audio_file.stat().st_size / 1_000_000, 2)
+
+                sessions.append(metadata)
+            except Exception as e:
+                print(f"Error reading session metadata from {entry}: {e}")
+
+    return {"sessions": sessions}
+
+
+@app.delete("/session/{session_dir}")
+async def session_delete(session_dir: str, request: SessionDeleteRequest = None):
+    """Delete a session or parts of it."""
+    import shutil
+
+    sessions_base = get_sessions_dir()
+    session_path = sessions_base / session_dir
+
+    if not session_path.exists():
+        raise HTTPException(status_code=404, detail=f"Session not found: {session_dir}")
+
+    if request is None or (request.delete_audio and request.delete_transcription):
+        # Delete entire session directory
+        shutil.rmtree(session_path)
+        return MessageResponse(message=f"Session deleted: {session_dir}", success=True)
+
+    if request.delete_audio:
+        for ext in [".m4a", ".wav", ".mp4"]:
+            audio_file = session_path / f"audio{ext}"
+            if audio_file.exists():
+                audio_file.unlink()
+
+        # Update metadata
+        _update_session_metadata(session_path, {"has_audio": False, "file_size_mb": 0})
+
+    if request.delete_transcription:
+        transcription_file = session_path / "transcription.txt"
+        if transcription_file.exists():
+            transcription_file.unlink()
+        _update_session_metadata(session_path, {"has_transcription": False})
+
+    return MessageResponse(message=f"Session updated: {session_dir}", success=True)
+
+
+@app.post("/session/bulk-delete-audio", response_model=MessageResponse)
+async def session_bulk_delete_audio(request: BulkDeleteAudioRequest):
+    """Bulk delete audio files from sessions."""
+    sessions_base = get_sessions_dir()
+
+    if not sessions_base.exists():
+        return MessageResponse(message="No sessions found", success=True)
+
+    deleted_count = 0
+    for entry in sessions_base.iterdir():
+        if not entry.is_dir():
+            continue
+
+        # If transcribed_only, check for transcription
+        if request.transcribed_only:
+            transcription = entry / "transcription.txt"
+            if not transcription.exists():
+                continue
+
+        # Delete audio files
+        for ext in [".m4a", ".wav", ".mp4"]:
+            audio_file = entry / f"audio{ext}"
+            if audio_file.exists():
+                audio_file.unlink()
+                deleted_count += 1
+
+        _update_session_metadata(entry, {"has_audio": False, "file_size_mb": 0})
+
+    return MessageResponse(
+        message=f"Deleted audio from {deleted_count} sessions",
+        success=True,
+    )
+
+
+def _save_session_transcription(session_path: Path, full_text: str, done_event: dict):
+    """Save transcription results to the session directory."""
+    # Save transcription text
+    transcription_path = session_path / "transcription.txt"
+    transcription_path.write_text(full_text, encoding="utf-8")
+
+    # Update metadata
+    updates = {
+        "has_transcription": True,
+        "word_count": done_event.get("word_count", 0),
+        "batch_count": done_event.get("total_batches", 0),
+        "transcription_time_seconds": done_event.get("total_time", 0),
+        "status": "completed",
+    }
+    _update_session_metadata(session_path, updates)
+    print(f"Session transcription saved: {transcription_path}")
+
+
+def _update_session_metadata(session_path: Path, updates: dict):
+    """Update fields in a session's metadata.json."""
+    metadata_path = session_path / "metadata.json"
+    if not metadata_path.exists():
+        return
+
+    try:
+        with open(metadata_path) as f:
+            metadata = json.load(f)
+
+        metadata.update(updates)
+
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+    except Exception as e:
+        print(f"Error updating session metadata: {e}")
 
 
 # ============================================================================

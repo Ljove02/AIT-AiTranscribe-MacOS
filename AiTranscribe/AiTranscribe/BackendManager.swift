@@ -14,7 +14,7 @@
  --------------------------
  - Development: Runs `python server.py` from the backend directory
  - Production: Runs bundled `AiTranscribeServer` executable from app bundle
-
+		
  PROCESS MANAGEMENT:
  -------------------
  Swift's Process class (formerly NSTask) lets us run external commands.
