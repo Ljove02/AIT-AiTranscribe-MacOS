@@ -77,16 +77,6 @@
 		1E13911A2F1FF2900070C41D /* PRODUCTION_READY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = PRODUCTION_READY.md; sourceTree = "<group>"; };
 		1E13911B2F1FF2900070C41D /* ReadyOnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadyOnboardingView.swift; sourceTree = "<group>"; };
 		1E13911C2F1FF2900070C41D /* RecordingIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingIndicator.swift; sourceTree = "<group>"; };
-		1E1392012F20A0010070C41D /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
-		1E1392022F20A0020070C41D /* SettingsSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSidebar.swift; sourceTree = "<group>"; };
-		1E1392032F20A0030070C41D /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
-		1E1392042F20A0040070C41D /* GeneralSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneralSettingsView.swift; sourceTree = "<group>"; };
-		1E1392052F20A0050070C41D /* ModelsSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelsSettingsView.swift; sourceTree = "<group>"; };
-		1E1392062F20A0060070C41D /* HistorySettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistorySettingsView.swift; sourceTree = "<group>"; };
-		1E1392072F20A0070070C41D /* ShortcutsSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutsSettingsView.swift; sourceTree = "<group>"; };
-		1E1392082F20A0080070C41D /* AboutSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutSettingsView.swift; sourceTree = "<group>"; };
-		1E1392092F20A0090070C41D /* AudioDuckingSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioDuckingSettings.swift; sourceTree = "<group>"; };
-		1E13920A2F20A00A0070C41D /* AnimatedDownloadingBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimatedDownloadingBar.swift; sourceTree = "<group>"; };
 		1E13911E2F1FF2900070C41D /* ShortcutsOnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutsOnboardingView.swift; sourceTree = "<group>"; };
 		1E13911F2F1FF2900070C41D /* ShortcutsOnboardingView 2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ShortcutsOnboardingView 2.swift"; sourceTree = "<group>"; };
 		1E1391202F1FF2900070C41D /* SoundManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoundManager.swift; sourceTree = "<group>"; };
@@ -113,6 +103,16 @@
 		1E13913A2F1FF2900070C41D /* setup_nemo_venv.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = setup_nemo_venv.py; sourceTree = "<group>"; };
 		1E13913C2F1FF2900070C41D /* AiTranscribe.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = AiTranscribe.xcodeproj; sourceTree = "<group>"; };
 		1E1391432F1FF8480070C41D /* aitranscribe-server */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = "aitranscribe-server"; path = "AiTranscribe/Resources/aitranscribe-server"; sourceTree = "<group>"; };
+		1E1392012F20A0010070C41D /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		1E1392022F20A0020070C41D /* SettingsSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSidebar.swift; sourceTree = "<group>"; };
+		1E1392032F20A0030070C41D /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+		1E1392042F20A0040070C41D /* GeneralSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneralSettingsView.swift; sourceTree = "<group>"; };
+		1E1392052F20A0050070C41D /* ModelsSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelsSettingsView.swift; sourceTree = "<group>"; };
+		1E1392062F20A0060070C41D /* HistorySettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistorySettingsView.swift; sourceTree = "<group>"; };
+		1E1392072F20A0070070C41D /* ShortcutsSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutsSettingsView.swift; sourceTree = "<group>"; };
+		1E1392082F20A0080070C41D /* AboutSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutSettingsView.swift; sourceTree = "<group>"; };
+		1E1392092F20A0090070C41D /* AudioDuckingSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioDuckingSettings.swift; sourceTree = "<group>"; };
+		1E13920A2F20A00A0070C41D /* AnimatedDownloadingBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimatedDownloadingBar.swift; sourceTree = "<group>"; };
 		1E2647C52F17FEBC00C1C862 /* AiTranscribe.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AiTranscribe.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -245,23 +245,6 @@
 			path = AiTranscribe;
 			sourceTree = "<group>";
 		};
-		1E1392002F20A0000070C41D /* Settings */ = {
-			isa = PBXGroup;
-			children = (
-				1E1392082F20A0080070C41D /* AboutSettingsView.swift */,
-				1E13920A2F20A00A0070C41D /* AnimatedDownloadingBar.swift */,
-				1E1392092F20A0090070C41D /* AudioDuckingSettings.swift */,
-				1E1392032F20A0030070C41D /* DashboardView.swift */,
-				1E1392042F20A0040070C41D /* GeneralSettingsView.swift */,
-				1E1392062F20A0060070C41D /* HistorySettingsView.swift */,
-				1E1392052F20A0050070C41D /* ModelsSettingsView.swift */,
-				1E1392022F20A0020070C41D /* SettingsSidebar.swift */,
-				1E1392012F20A0010070C41D /* SettingsView.swift */,
-				1E1392072F20A0070070C41D /* ShortcutsSettingsView.swift */,
-			);
-			path = Settings;
-			sourceTree = "<group>";
-		};
 		1E13912F2F1FF2900070C41D /* __pycache__ */ = {
 			isa = PBXGroup;
 			children = (
@@ -329,6 +312,23 @@
 		1E13913E2F1FF2900070C41D /* Products */ = {
 			isa = PBXGroup;
 			name = Products;
+			sourceTree = "<group>";
+		};
+		1E1392002F20A0000070C41D /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+				1E1392082F20A0080070C41D /* AboutSettingsView.swift */,
+				1E13920A2F20A00A0070C41D /* AnimatedDownloadingBar.swift */,
+				1E1392092F20A0090070C41D /* AudioDuckingSettings.swift */,
+				1E1392032F20A0030070C41D /* DashboardView.swift */,
+				1E1392042F20A0040070C41D /* GeneralSettingsView.swift */,
+				1E1392062F20A0060070C41D /* HistorySettingsView.swift */,
+				1E1392052F20A0050070C41D /* ModelsSettingsView.swift */,
+				1E1392022F20A0020070C41D /* SettingsSidebar.swift */,
+				1E1392012F20A0010070C41D /* SettingsView.swift */,
+				1E1392072F20A0070070C41D /* ShortcutsSettingsView.swift */,
+			);
+			path = Settings;
 			sourceTree = "<group>";
 		};
 		1E2647BC2F17FEBC00C1C862 = {
@@ -586,7 +586,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 0.1.5;
 				PRODUCT_BUNDLE_IDENTIFIER = com.aitranscribe.AiTranscribe;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -634,7 +634,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 0.1.5;
 				PRODUCT_BUNDLE_IDENTIFIER = com.aitranscribe.AiTranscribe;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

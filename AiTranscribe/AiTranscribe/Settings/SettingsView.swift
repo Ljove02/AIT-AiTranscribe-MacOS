@@ -27,6 +27,11 @@ struct SettingsView: View {
                 case .dashboard:  DashboardView()
                 case .general:    GeneralSettingsView()
                 case .models:     ModelsSettingsView()
+                case .sessions:   SessionsSettingsView(onNavigateToModels: {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        selectedSection = .models
+                    }
+                })
                 case .history:    HistorySettingsView()
                 case .shortcuts:  ShortcutsSettingsView()
                 case .about:      AboutView()
@@ -37,7 +42,7 @@ struct SettingsView: View {
             .id(selectedSection)
             .animation(.easeInOut(duration: 0.15), value: selectedSection)
         }
-        .frame(width: 900, height: 620)
+        .frame(width: 1050, height: 720)
         .onAppear {
             // Pause health check timer to prevent UI re-renders
             backendManager.pauseHealthCheck()

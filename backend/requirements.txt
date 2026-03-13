@@ -12,8 +12,8 @@ torchaudio
 # NVIDIA NeMo (ASR framework for Parakeet models)
 nemo_toolkit[asr]
 
-# Faster Whisper (for OpenAI Whisper models)
-faster-whisper        # CTranslate2-based Whisper, fast and efficient
+# Whisper transcription handled by whisper-cli binary (whisper.cpp with Metal GPU)
+# No Python whisper dependency needed — uses subprocess
 
 # Audio handling
 sounddevice           # Record from microphone

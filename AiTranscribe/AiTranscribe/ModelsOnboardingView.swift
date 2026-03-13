@@ -76,23 +76,23 @@ struct ModelsOnboardingView: View {
                 tags: ["Fast", "English", "Recommended"],
                 requiresNemo: true
             ),
-            // Whisper Base (English)
+            // Whisper Base (English) — whisper.cpp GGML
             makeModel(
                 id: "whisper-base-en",
                 fallbackDisplay: "Whisper Base (English)",
-                fallbackDescription: "Fast, lightweight English transcription. Great for quick dictation.",
-                fallbackSizeGB: 0.142,  // 142 MB
-                fallbackRamGB: 0.150,   // 150 MB
-                tags: ["Compact", "English"]
+                fallbackDescription: "Fast, lightweight English transcription. GPU accelerated.",
+                fallbackSizeGB: 0.148,  // 148 MB
+                fallbackRamGB: 0.400,   // 400 MB
+                tags: ["Compact", "English", "Metal GPU"]
             ),
-            // Whisper Large v3 Turbo (multilingual)
+            // Whisper Large v3 Turbo (multilingual) — whisper.cpp GGML
             makeModel(
                 id: "whisper-large-v3-turbo",
                 fallbackDisplay: "Whisper Large v3 Turbo",
-                fallbackDescription: "Balanced • Multilingual",
-                fallbackSizeGB: 1.5,   // ~1500 MB
-                fallbackRamGB: 0.65,   // ~650 MB
-                tags: ["Balanced", "Multilingual"]
+                fallbackDescription: "Fast multilingual with Metal GPU acceleration.",
+                fallbackSizeGB: 1.62,   // ~1620 MB
+                fallbackRamGB: 1.7,     // ~1700 MB
+                tags: ["Balanced", "Multilingual", "Metal GPU"]
             )
         ]
     }

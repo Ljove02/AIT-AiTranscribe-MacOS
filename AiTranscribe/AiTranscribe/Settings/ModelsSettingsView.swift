@@ -40,15 +40,15 @@ struct ModelsSettingsView: View {
         case "parakeet-tdt-v3", "parakeet-v3":
             return (speed: 0.85, accuracy: 0.85)
         case "nemotron-streaming":
-            return (speed: 0.98, accuracy: 0.70)
+            return (speed: 1.00, accuracy: 0.70)
         case "whisper-base-en", "base.en":
-            return (speed: 0.75, accuracy: 0.70)
+            return (speed: 1.00, accuracy: 0.60)
         case "whisper-small-en", "small.en":
-            return (speed: 0.75, accuracy: 0.70)
+            return (speed: 0.92, accuracy: 0.65)
         case "whisper-large-v3-turbo", "large-v3-turbo":
-            return (speed: 0.50, accuracy: 0.90)
+            return (speed: 0.85, accuracy: 0.90)
         case "whisper-large-v3", "large-v3":
-            return (speed: 0.35, accuracy: 0.98)
+            return (speed: 0.80, accuracy: 0.98)
         default:
             return (speed: 0.70, accuracy: 0.75)
         }
@@ -485,25 +485,16 @@ struct ModelCardView: View {
         return "\(mb) MB"
     }
 
-    /// Compute the correct HuggingFace URL for this model
+    /// URL to the model's page (HuggingFace or GitHub)
     private var huggingFaceURL: URL? {
-        var repoPath: String
-
-        if model.type == "nemo" {
-            // NeMo models use their name directly (e.g., "nvidia/parakeet-tdt-0.6b-v2")
-            repoPath = model.name
-        } else {
-            // Whisper models via faster-whisper
-            if model.name.contains("/") {
-                // Already a full path (e.g., "deepdml/faster-whisper-large-v3-turbo-ct2")
-                repoPath = model.name
-            } else {
-                // Standard size name (e.g., "base.en") -> "Systran/faster-whisper-base.en"
-                repoPath = "Systran/faster-whisper-\(model.name)"
-            }
+        if let urlString = model.modelUrl {
+            return URL(string: urlString)
         }
-
-        return URL(string: "https://huggingface.co/\(repoPath)")
+        // Fallback for NeMo models without model_url
+        if model.type == "nemo" {
+            return URL(string: "https://huggingface.co/\(model.name)")
+        }
+        return nil
     }
 
     /// Get performance metrics for a model (speed and accuracy on a 0-1 scale)
@@ -514,15 +505,15 @@ struct ModelCardView: View {
         case "parakeet-tdt-v3", "parakeet-v3":
             return (speed: 0.85, accuracy: 0.85)
         case "nemotron-streaming":
-            return (speed: 0.98, accuracy: 0.70)
+            return (speed: 1.00, accuracy: 0.70)
         case "whisper-base-en", "base.en":
-            return (speed: 0.75, accuracy: 0.70)
+            return (speed: 1.00, accuracy: 0.60)
         case "whisper-small-en", "small.en":
-            return (speed: 0.75, accuracy: 0.70)
+            return (speed: 0.92, accuracy: 0.65)
         case "whisper-large-v3-turbo", "large-v3-turbo":
-            return (speed: 0.50, accuracy: 0.90)
+            return (speed: 0.85, accuracy: 0.90)
         case "whisper-large-v3", "large-v3":
-            return (speed: 0.35, accuracy: 0.98)
+            return (speed: 0.80, accuracy: 0.98)
         default:
             print("⚠️ Unknown model ID for performance metrics: \(model.id)")
             return (speed: 0.70, accuracy: 0.75)
@@ -596,6 +587,21 @@ struct ModelCardView: View {
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
                             .background(Color.purple.opacity(0.15))
+                            .cornerRadius(6)
+                        }
+
+                        // Session-compatible badge
+                        if model.sessionCompatible {
+                            HStack(spacing: 4) {
+                                Image(systemName: "waveform.circle")
+                                    .foregroundColor(.teal)
+                                Text("Sessions")
+                                    .foregroundColor(.teal)
+                            }
+                            .font(.caption)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.teal.opacity(0.15))
                             .cornerRadius(6)
                         }
 

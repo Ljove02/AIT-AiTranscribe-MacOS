@@ -30,6 +30,7 @@ import AVFoundation
 @main
 struct AiTranscribeApp: App {
     @StateObject private var appState = AppState()
+    @StateObject private var sessionManager = SessionManager()
     /// Use the shared singleton BackendManager
     @ObservedObject private var backendManager = BackendManager.shared
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -48,6 +49,7 @@ struct AiTranscribeApp: App {
             MenuBarView()
                 .environmentObject(appState)
                 .environmentObject(backendManager)
+                .environmentObject(sessionManager)
                 .task {
                     // Initialize once when the view appears
                     if !isInitialized {
@@ -68,6 +70,7 @@ struct AiTranscribeApp: App {
             SettingsView()
                 .environmentObject(appState)
                 .environmentObject(backendManager)
+                .environmentObject(sessionManager)
         }
     }
 
@@ -81,12 +84,19 @@ struct AiTranscribeApp: App {
 
         // Store references in AppDelegate
         appDelegate.configure(appState: appState, backendManager: backendManager)
+        appDelegate.configureSessionManager(sessionManager)
 
         // Show onboarding if needed
         let hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
         if !hasCompletedOnboarding {
             appDelegate.showOnboarding(appState: appState, backendManager: backendManager)
         }
+
+        // Wire session manager to app state for mutual exclusion
+        sessionManager.appState = appState
+
+        // Load saved sessions
+        sessionManager.loadSessions()
 
         // Wait for server ready and fetch status (model loads on-demand when recording starts)
         await backendManager.waitForServerReady()
@@ -98,7 +108,9 @@ struct AiTranscribeApp: App {
     }
 
     @MainActor private var menuBarIcon: String {
-        if appState.isRecording {
+        if sessionManager.isSessionRecording {
+            return "record.circle"
+        } else if appState.isRecording {
             return "waveform.circle.fill"
         } else if appState.isModelLoaded {
             return "mic.circle.fill"

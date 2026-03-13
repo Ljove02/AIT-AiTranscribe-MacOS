@@ -5,6 +5,8 @@ import SwiftUI
 struct HistorySettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var searchText = ""
+    @State private var selectedEntryId: UUID? = nil
+    @State private var showCopied = false
 
     var filteredHistory: [TranscriptionEntry] {
         if searchText.isEmpty {
@@ -16,6 +18,132 @@ struct HistorySettingsView: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            if let entryId = selectedEntryId,
+               let entry = appState.transcriptionHistory.first(where: { $0.id == entryId }) {
+                historyDetailView(entry: entry)
+            } else {
+                historyListView
+            }
+        }
+    }
+
+    // MARK: - Detail View
+
+    private func historyDetailView(entry: TranscriptionEntry) -> some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        selectedEntryId = nil
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                        Text("History")
+                    }
+                    .font(.subheadline)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.accentColor)
+
+                Spacer()
+
+                // Copy button
+                Button {
+                    appState.copyToClipboard(entry.text)
+                    showCopied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        showCopied = false
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
+                        Text(showCopied ? "Copied" : "Copy")
+                    }
+                    .font(.subheadline)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            // Metadata bar
+            HStack(spacing: 12) {
+                Label(detailDateFormatter.string(from: entry.timestamp), systemImage: "calendar")
+                Label(formatDuration(entry.duration), systemImage: "timer")
+                Label("\(entry.wordCount) words", systemImage: "text.word.spacing")
+                Label(entry.modelName, systemImage: "cpu")
+                    .foregroundColor(.accentColor)
+                Spacer()
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color(NSColor.controlBackgroundColor))
+
+            Divider()
+
+            // Full transcription text
+            ScrollView {
+                Text(entry.text)
+                    .font(.body)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+
+            Divider()
+
+            // Footer stats
+            HStack(spacing: 16) {
+                Text("\(entry.charCount) characters")
+                Text("\(entry.phrasesCount) sentences")
+                if entry.wordsPerMinute > 0 {
+                    Text("\(Int(entry.wordsPerMinute)) WPM")
+                }
+                Spacer()
+
+                Button(role: .destructive) {
+                    appState.deleteFromHistory(entry)
+                    selectedEntryId = nil
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .buttonStyle(.borderless)
+                .foregroundColor(.red)
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+    }
+
+    private var detailDateFormatter: DateFormatter {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }
+
+    private func formatDuration(_ seconds: Double) -> String {
+        if seconds < 60 {
+            return String(format: "%.0fs", seconds)
+        }
+        let mins = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        return "\(mins)m \(secs)s"
+    }
+
+    // MARK: - List View
+
+    private var historyListView: some View {
         VStack(spacing: 0) {
             // Search bar
             HStack {
@@ -53,9 +181,18 @@ struct HistorySettingsView: View {
                     LazyVStack(spacing: 0) {
                         ForEach(filteredHistory) { entry in
                             HistoryEntryRow(entry: entry)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    withAnimation(.easeInOut(duration: 0.15)) {
+                                        selectedEntryId = entry.id
+                                    }
+                                }
                                 .contextMenu {
                                     Button("Copy") {
                                         appState.copyToClipboard(entry.text)
+                                    }
+                                    Button("Open") {
+                                        selectedEntryId = entry.id
                                     }
                                     Divider()
                                     Button("Delete", role: .destructive) {

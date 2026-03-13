@@ -66,6 +66,9 @@ class AppState: ObservableObject {
     /// Is currently recording audio?
     @Published var isRecording: Bool = false
 
+    /// Set by SessionManager to prevent concurrent recording conflicts
+    var isSessionRecordingActive: Bool = false
+
     /// Current recording duration in seconds
     @Published var recordingDuration: Double = 0.0
 
@@ -165,7 +168,7 @@ class AppState: ObservableObject {
     // =========================================================================
 
     /// The client that talks to our Python backend
-    private let apiClient = APIClient()
+    let apiClient = APIClient()
 
     /// History manager for JSON storage
     private let historyManager = HistoryManager()
@@ -734,6 +737,13 @@ class AppState: ObservableObject {
 
     /// Start recording audio
     func startRecording() async {
+        // Mutual exclusion: don't start quick-transcribe while a session is recording
+        // (The session recorder uses the same mic and audio engine)
+        guard !isSessionRecordingActive else {
+            statusMessage = "Stop session recording first"
+            return
+        }
+
         // Cancel idle unload timer — user is active
         idleUnloadTimer?.invalidate()
         idleUnloadTimer = nil

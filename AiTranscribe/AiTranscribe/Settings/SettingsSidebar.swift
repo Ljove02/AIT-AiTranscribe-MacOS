@@ -6,6 +6,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case dashboard
     case general
     case models
+    case sessions
     case history
     case shortcuts
     case about
@@ -17,6 +18,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dashboard: return "Dashboard"
         case .general:   return "General"
         case .models:    return "Models"
+        case .sessions:  return "Sessions"
         case .history:   return "History"
         case .shortcuts: return "Shortcuts"
         case .about:     return "About"
@@ -28,6 +30,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dashboard: return "square.grid.2x2"
         case .general:   return "gear"
         case .models:    return "cube.box"
+        case .sessions:  return "waveform.circle"
         case .history:   return "clock.arrow.circlepath"
         case .shortcuts: return "keyboard"
         case .about:     return "info.circle"

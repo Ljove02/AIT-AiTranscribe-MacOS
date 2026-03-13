@@ -41,6 +41,9 @@ dist/
 backend/build/
 backend/dist/
 
+# Compiled binaries (architecture-specific, rebuild from source)
+backend/bin/
+
 # Distribution
 *.dmg
 
@@ -67,3 +70,6 @@ logs/
 *.temp
 .cache/
 temp/
+
+# Dev notes
+TODO-*.md

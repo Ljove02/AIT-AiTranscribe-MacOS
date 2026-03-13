@@ -143,7 +143,7 @@ class APIClient {
     }
 
     /// Make a POST request and decode the response
-    private func post<T: Decodable>(_ endpoint: String, body: Data? = nil) async throws -> T {
+    private func post<T: Decodable>(_ endpoint: String, body: Data? = nil, timeoutInterval: TimeInterval? = nil) async throws -> T {
         let url = baseURL.appendingPathComponent(endpoint)
 
         /*
@@ -157,6 +157,9 @@ class APIClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
+        if let timeoutInterval {
+            request.timeoutInterval = timeoutInterval
+        }
 
         let (data, response) = try await session.data(for: request)
 
@@ -221,11 +224,11 @@ class APIClient {
         return try await get("/models/\(modelId)")
     }
 
-    /// Load a specific ASR model
+    /// Load a specific ASR model (large models like whisper-large-v3 can take minutes)
     func loadModel(modelId: String = "parakeet-v2") async throws -> MessageResponse {
         let request = LoadModelRequest(modelId: modelId)
         let body = try encoder.encode(request)
-        return try await post("/load", body: body)
+        return try await post("/load", body: body, timeoutInterval: 600)
     }
 
     /// Unload the ASR model
@@ -479,6 +482,75 @@ class APIClient {
     func getNemoStatus() async throws -> NemoStatusResponse {
         return try await get("/nemo/status")
     }
+
+    // MARK: - Session Transcription
+
+    /// Start batch transcription of a session recording with SSE progress updates.
+    func transcribeSession(
+        sessionDir: String,
+        modelId: String,
+        ramBudgetMB: Int,
+        onEvent: @escaping (SessionTranscriptionEvent) -> Void
+    ) async throws {
+        let url = baseURL.appendingPathComponent("/session/transcribe")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 7200  // 2 hours max for long recordings
+
+        let body: [String: Any] = [
+            "session_dir": sessionDir,
+            "model_id": modelId,
+            "ram_budget_mb": ramBudgetMB,
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (asyncBytes, response) = try await session.bytes(for: request)
+        try checkResponse(response)
+
+        for try await line in asyncBytes.lines {
+            if line.hasPrefix("data: ") {
+                let jsonString = String(line.dropFirst(6))
+                if let data = jsonString.data(using: .utf8),
+                   let event = try? decoder.decode(SessionTranscriptionEvent.self, from: data) {
+                    await MainActor.run {
+                        onEvent(event)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Cancel an active batch transcription
+    func cancelSessionTranscription() async throws -> MessageResponse {
+        return try await post("/session/cancel-transcription")
+    }
+
+    /// Estimate batch count and processing time
+    func estimateSessionBatches(
+        audioDuration: Double,
+        modelId: String,
+        ramBudgetMB: Int
+    ) async throws -> SessionEstimateResponse {
+        let url = baseURL.appendingPathComponent("/session/estimate")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body: [String: Any] = [
+            "audio_duration_seconds": audioDuration,
+            "model_id": modelId,
+            "ram_budget_mb": ramBudgetMB,
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await session.data(for: request)
+        try checkResponse(response)
+        return try decoder.decode(SessionEstimateResponse.self, from: data)
+    }
 }
 
 
@@ -529,6 +601,7 @@ struct ModelInfoResponse: Codable, Identifiable {
     let streamingNative: Bool  // Is model optimized for streaming?
     let downloaded: Bool       // Is model downloaded?
     let downloadUrl: String?   // URL for download (Whisper only)
+    let modelUrl: String?      // URL to model page (HuggingFace/GitHub)
     let path: String?          // Path to model file
     let nemoRequired: Bool     // Does this model require NeMo?
 
@@ -540,7 +613,13 @@ struct ModelInfoResponse: Codable, Identifiable {
         case ramMB = "ram_mb"
         case streamingNative = "streaming_native"
         case downloadUrl = "download_url"
+        case modelUrl = "model_url"
         case nemoRequired = "nemo_required"
+    }
+
+    /// Models that support batch/session transcription (all Whisper + batch-capable NeMo)
+    var sessionCompatible: Bool {
+        type == "whisper" || ["parakeet-v2", "parakeet-v3"].contains(id)
     }
 
     /// Size in GB for display
@@ -640,5 +719,61 @@ struct NemoStatusResponse: Codable {
         case nemoVersion = "nemo_version"
         case torchVersion = "torch_version"
         case backendMode = "backend_mode"
+    }
+}
+
+/// SSE event from batch session transcription
+struct SessionTranscriptionEvent: Codable {
+    let event: String                // started, batch_progress, batch_complete, stats, done, error, cancelled
+    let batch: Int?
+    let total: Int?
+    let totalBatches: Int?
+    let percent: Double?
+    let batchText: String?
+    let cpuPercent: Double?
+    let memoryMb: Double?
+    let etaSeconds: Double?
+    let avgBatchTime: Double?
+    let fullText: String?
+    let totalTime: Double?
+    let wordCount: Int?
+    let partialText: String?
+    let batchesCompleted: Int?
+    let message: String?
+    let chunkDuration: Int?
+    let totalAudioSeconds: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case event, batch, total, percent, message
+        case totalBatches = "total_batches"
+        case batchText = "batch_text"
+        case cpuPercent = "cpu_percent"
+        case memoryMb = "memory_mb"
+        case etaSeconds = "eta_seconds"
+        case avgBatchTime = "avg_batch_time"
+        case fullText = "full_text"
+        case totalTime = "total_time"
+        case wordCount = "word_count"
+        case partialText = "partial_text"
+        case batchesCompleted = "batches_completed"
+        case chunkDuration = "chunk_duration"
+        case totalAudioSeconds = "total_audio_seconds"
+    }
+}
+
+/// Response from /session/estimate
+struct SessionEstimateResponse: Codable {
+    let numBatches: Int
+    let chunkDurationSeconds: Int
+    let estimatedTimeSeconds: Double
+    let availableRamMb: Int
+    let modelRamMb: Int
+
+    enum CodingKeys: String, CodingKey {
+        case numBatches = "num_batches"
+        case chunkDurationSeconds = "chunk_duration_seconds"
+        case estimatedTimeSeconds = "estimated_time_seconds"
+        case availableRamMb = "available_ram_mb"
+        case modelRamMb = "model_ram_mb"
     }
 }
