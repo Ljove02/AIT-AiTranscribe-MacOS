@@ -38,6 +38,9 @@ import Combine  // Apple's framework for reactive programming
 @MainActor
 class AppState: ObservableObject {
 
+    /// Shared singleton so AppDelegate can access it at launch (for onboarding)
+    static let shared = AppState()
+
     // =========================================================================
     // PUBLISHED PROPERTIES - Changes trigger UI updates
     // =========================================================================
@@ -512,6 +515,12 @@ class AppState: ObservableObject {
     func fetchAvailableModels() async {
         do {
             availableModels = try await apiClient.listModels()
+            // Force all windows to redisplay — on macOS 26 Tahoe, @Published
+            // changes can fail to trigger SwiftUI view updates due to the
+            // display cycle exception (caught by DisplayCycleFix).
+            for window in NSApp.windows {
+                window.display()
+            }
         } catch {
             print("Failed to fetch models: \(error)")
         }

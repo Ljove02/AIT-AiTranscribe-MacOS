@@ -30,10 +30,11 @@ struct SessionDetailView: View {
         sessionManager.currentTranscribingSessionId == sessionId
     }
 
-    /// System RAM in GB (minus 4GB for OS)
+    /// System RAM in GB (minus 4GB for OS). Must exceed minRamBudget by at least
+    /// the slider step (0.5) to avoid SwiftUI Slider precondition failure.
     private var maxRamBudget: Double {
         let totalRAM = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
-        return max(minRamBudget, totalRAM - 4)
+        return max(minRamBudget + 0.5, totalRAM - 4)
     }
 
     /// Minimum RAM budget = model RAM + 1GB buffer (can't go below what the model needs)
@@ -232,6 +233,21 @@ struct SessionDetailView: View {
             Text("Cannot transcribe — audio file has been deleted.")
                 .font(.caption)
                 .foregroundColor(.secondary)
+        } else if !appState.isServerConnected {
+            VStack(spacing: 10) {
+                ProgressView()
+                    .scaleEffect(0.9)
+                Text("Server Starting...")
+                    .font(.subheadline.bold())
+                Text("Transcription will be available once the backend is ready.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding()
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.05)))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.blue.opacity(0.2)))
         } else {
             notTranscribedControls(session)
         }

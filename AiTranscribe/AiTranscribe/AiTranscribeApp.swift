@@ -29,19 +29,20 @@ import AVFoundation
 
 @main
 struct AiTranscribeApp: App {
-    @StateObject private var appState = AppState()
-    @StateObject private var sessionManager = SessionManager()
-    /// Use the shared singleton BackendManager
+    /// Use shared singletons so AppDelegate can access them at launch
+    @ObservedObject private var appState = AppState.shared
+    @ObservedObject private var sessionManager = SessionManager.shared
     @ObservedObject private var backendManager = BackendManager.shared
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     @State private var hotkeysRegistered = false
-    @State private var isInitialized = false
 
     init() {
         // Force singleton creation early to ensure backend starts
-        print("AiTranscribeApp.init() - BackendManager.shared accessed")
+        print("AiTranscribeApp.init() - singletons created")
         _ = BackendManager.shared
+        _ = AppState.shared
+        _ = SessionManager.shared
     }
 
     var body: some Scene {
@@ -51,12 +52,6 @@ struct AiTranscribeApp: App {
                 .environmentObject(backendManager)
                 .environmentObject(sessionManager)
                 .task {
-                    // Initialize once when the view appears
-                    if !isInitialized {
-                        isInitialized = true
-                        await initializeApp()
-                    }
-
                     if !hotkeysRegistered {
                         HotkeyManager.shared.setup(appState: appState)
                         hotkeysRegistered = true
@@ -72,39 +67,6 @@ struct AiTranscribeApp: App {
                 .environmentObject(backendManager)
                 .environmentObject(sessionManager)
         }
-    }
-
-    /// Initialize the app - bindings, onboarding, model loading
-    @MainActor
-    private func initializeApp() async {
-        print("AiTranscribeApp: Initializing...")
-
-        // Bind state synchronization
-        appState.bindToBackendManager(backendManager)
-
-        // Store references in AppDelegate
-        appDelegate.configure(appState: appState, backendManager: backendManager)
-        appDelegate.configureSessionManager(sessionManager)
-
-        // Show onboarding if needed
-        let hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
-        if !hasCompletedOnboarding {
-            appDelegate.showOnboarding(appState: appState, backendManager: backendManager)
-        }
-
-        // Wire session manager to app state for mutual exclusion
-        sessionManager.appState = appState
-
-        // Load saved sessions
-        sessionManager.loadSessions()
-
-        // Wait for server ready and fetch status (model loads on-demand when recording starts)
-        await backendManager.waitForServerReady()
-        if backendManager.isServerReady {
-            await appState.checkServerStatus()
-        }
-
-        print("AiTranscribeApp: Initialization complete")
     }
 
     @MainActor private var menuBarIcon: String {

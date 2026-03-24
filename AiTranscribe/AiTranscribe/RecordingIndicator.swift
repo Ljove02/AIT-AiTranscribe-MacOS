@@ -514,14 +514,14 @@ class SnapPlaceholderController {
         let contentView = SnapPlaceholderView(isHighlighted: highlighted)
         let hostingView = NSHostingView(rootView: contentView)
         hostingView.frame = CGRect(x: 0, y: 0, width: 70, height: 42)
+        if #available(macOS 13.0, *) { hostingView.sizingOptions = [] }
 
-        let window = NSWindow(
+        let window = FloatingIndicatorWindow(
             contentRect: hostingView.frame,
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
-
         window.contentView = hostingView
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -536,6 +536,7 @@ class SnapPlaceholderController {
         let contentView = SnapPlaceholderView(isHighlighted: highlighted)
         let hostingView = NSHostingView(rootView: contentView)
         hostingView.frame = window.contentView?.frame ?? CGRect(x: 0, y: 0, width: 70, height: 42)
+        if #available(macOS 13.0, *) { hostingView.sizingOptions = [] }
         window.contentView = hostingView
     }
 }
@@ -780,6 +781,9 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
         // Update on main thread
         DispatchQueue.main.async { [weak self] in
             self?.currentVolume = volume
+            // Force window to redraw — on macOS 26, SwiftUI's reactive update
+            // pipeline can fail silently (caught by DisplayCycleFix).
+            self?.window?.display()
         }
     }
 
@@ -790,11 +794,21 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
         let hostingView = NSHostingView(rootView: contentView)
         hostingView.frame = CGRect(x: 0, y: 0, width: 70, height: 42)
 
+        // Prevent NSHostingView from trying to auto-update the window's
+        // content size min/max. This crashes on borderless floating windows
+        // because the constraint system throws an NSException.
+        if #available(macOS 13.0, *) {
+            hostingView.sizingOptions = []
+        }
+
         // Ensure the hosting view layer is fully transparent — prevents rectangular box artifact
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = .clear
 
-        let window = NSWindow(
+        // Use FloatingIndicatorWindow to prevent the NSHostingView constraint crash
+        // on macOS 26 Tahoe. It overrides _postWindowNeedsUpdateConstraints to be a
+        // no-op, preventing the NSException that crashes borderless floating windows.
+        let window = FloatingIndicatorWindow(
             contentRect: hostingView.frame,
             styleMask: [.borderless],
             backing: .buffered,
@@ -804,10 +818,10 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
         window.contentView = hostingView
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.hasShadow = false  // Disable window-level rectangular shadow
-        window.level = .floating  // Always on top
+        window.hasShadow = false
+        window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.isMovableByWindowBackground = true  // Can drag to reposition
+        window.isMovableByWindowBackground = true
         window.ignoresMouseEvents = false
 
         // Force the window's content view to be fully transparent at the AppKit level

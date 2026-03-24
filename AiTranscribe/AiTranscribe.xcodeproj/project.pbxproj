@@ -58,6 +58,7 @@
 		1E1391072F1FF2900070C41D /* Icon-iOS-Default-256x256@1x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-256x256@1x.png"; sourceTree = "<group>"; };
 		1E1391082F1FF2900070C41D /* IMPLEMENTATION_CHECKLIST.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = IMPLEMENTATION_CHECKLIST.md; sourceTree = "<group>"; };
 		1E1391092F1FF2900070C41D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		1E13920B2F20A00B0070C41D /* FloatingIndicatorWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingIndicatorWindow.swift; sourceTree = "<group>"; };
 		1E13910A2F1FF2900070C41D /* KeyboardSimulator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardSimulator.swift; sourceTree = "<group>"; };
 		1E13910B2F1FF2900070C41D /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		1E13910C2F1FF2900070C41D /* MicrophoneOnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicrophoneOnboardingView.swift; sourceTree = "<group>"; };
@@ -206,6 +207,7 @@
 				1E1391022F1FF2900070C41D /* DELETE_DUPLICATES_INSTRUCTIONS.md */,
 				1E1391032F1FF2900070C41D /* FINAL_POLISH.md */,
 				1E1391042F1FF2900070C41D /* FIXES_SUMMARY.md */,
+				1E13920B2F20A00B0070C41D /* FloatingIndicatorWindow.swift */,
 				1E1391052F1FF2900070C41D /* HistoryManager.swift */,
 				1E1391062F1FF2900070C41D /* HotkeyManager.swift */,
 				1E1391072F1FF2900070C41D /* Icon-iOS-Default-256x256@1x.png */,
@@ -600,6 +602,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "AiTranscribe/AiTranscribe-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
@@ -648,6 +651,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "AiTranscribe/AiTranscribe-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 			};

@@ -6,104 +6,38 @@
  Wider than the quick-transcribe indicator, with a pulsing red dot
  and HH:MM:SS timer display.
 
- Follows the same visual language and window management pattern
- as RecordingIndicator.swift but with a calmer, session-focused design.
+ ARCHITECTURE NOTE:
+ ------------------
+ On macOS 26 Tahoe, NSHostingView's SwiftUI rendering pipeline fails on
+ borderless floating windows because _postWindowNeedsDisplay throws during
+ layout. This prevents SwiftUI from ever re-rendering — the initial render
+ works but no updates are possible.
+
+ To work around this, the session indicator is built entirely with Core
+ Animation (CALayer + CATextLayer + CAShapeLayer). Core Animation renders
+ through the GPU compositor, completely bypassing AppKit's view display
+ system and the broken _postWindowNeedsDisplay path. Timer updates go
+ directly to CATextLayer.string, which Core Animation composites immediately.
  */
 
-import SwiftUI
 import AppKit
 import Combine
-
-// =============================================================================
-// SESSION INDICATOR VIEW
-// =============================================================================
-
-struct SessionIndicatorView: View {
-    @ObservedObject var controller: SessionIndicatorController
-
-    @State private var dotOpacity: Double = 1.0
-    @State private var appearScale: CGFloat = 0.3
-    @State private var appearOpacity: Double = 0
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        HStack(spacing: 8) {
-            if controller.isProcessing {
-                // Processing state: spinner + text
-                ProgressView()
-                    .scaleEffect(0.6)
-                    .frame(width: 12, height: 12)
-                Text("Processing...")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(colorScheme == .dark ? .white : .primary)
-            } else {
-                // Recording state: pulsing red dot + timer
-                Circle()
-                    .fill(.red)
-                    .frame(width: 8, height: 8)
-                    .opacity(dotOpacity)
-
-                Text(SessionManager.formatDurationHHMMSS(controller.duration))
-                    .font(.system(size: 13, weight: .medium, design: .monospaced))
-                    .foregroundColor(colorScheme == .dark ? .white : .primary)
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(
-            Capsule()
-                .fill(
-                    colorScheme == .dark
-                        ? Color(white: 0.15, opacity: 0.65)
-                        : Color(white: 0.92, opacity: 0.85)
-                )
-        )
-        .overlay(
-            Capsule()
-                .stroke(
-                    colorScheme == .dark
-                        ? Color.white.opacity(0.15)
-                        : Color.black.opacity(0.1),
-                    lineWidth: 0.5
-                )
-        )
-        .scaleEffect(appearScale)
-        .opacity(appearOpacity)
-        .onAppear {
-            // Appear animation
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                    appearScale = 1.0
-                    appearOpacity = 1.0
-                }
-            }
-
-            // Subtle pulsing red dot (slower than recording indicator)
-            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
-                dotOpacity = 0.3
-            }
-        }
-        .onChange(of: controller.isDisappearing) { _, isDisappearing in
-            if isDisappearing {
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    appearScale = 0.3
-                    appearOpacity = 0
-                }
-            }
-        }
-    }
-}
+import QuartzCore
 
 // =============================================================================
 // SESSION INDICATOR CONTROLLER
 // =============================================================================
 
 /// Manages the floating session indicator window.
-/// Follows the same pattern as RecordingIndicatorController but simplified.
+/// Uses pure Core Animation layers (no SwiftUI) for macOS 26 Tahoe compatibility.
 class SessionIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
     private var window: NSWindow?
     private var durationTimer: Timer?
+
+    // Core Animation layers
+    private var containerLayer: CALayer?
+    private var dotLayer: CALayer?
+    private var timerLayer: CATextLayer?
 
     /// Snap placeholder controller for drag-and-snap (reuses existing snap system)
     private let snapPlaceholders = SessionSnapPlaceholderController()
@@ -139,20 +73,40 @@ class SessionIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
             window?.orderOut(nil)
             window = nil
         }
+        dotLayer = nil
+        timerLayer = nil
+        containerLayer = nil
 
         duration = 0
         isDisappearing = false
+        isProcessing = false
         createWindow()
         updatePosition()
         window?.orderFront(nil)
         isVisible = true
 
+        // Appear animation (spring scale + fade)
+        if let layer = window?.contentView?.layer {
+            layer.opacity = 0
+            layer.transform = CATransform3DMakeScale(0.3, 0.3, 1.0)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                CATransaction.begin()
+                CATransaction.setAnimationDuration(0.4)
+                CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+
+                layer.opacity = 1.0
+                layer.transform = CATransform3DIdentity
+
+                CATransaction.commit()
+            }
+        }
+
         // Start timer to update duration every second
         durationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self else { return }
-            DispatchQueue.main.async {
-                self.duration += 1
-            }
+            self.duration += 1
+            self.updateTimerText()
         }
         if let timer = durationTimer {
             RunLoop.main.add(timer, forMode: .common)
@@ -165,6 +119,15 @@ class SessionIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
         durationTimer?.invalidate()
         durationTimer = nil
         isProcessing = true
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // Hide the red dot and shift text left to use the freed space
+        dotLayer?.isHidden = true
+        timerLayer?.frame = CGRect(x: 14, y: 9, width: 84, height: 18)
+        CATransaction.commit()
+
+        updateTimerText()
     }
 
     func hide() {
@@ -175,7 +138,22 @@ class SessionIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
         isProcessing = false
         isDisappearing = true
 
+        // Disappear animation (scale down + fade out)
+        if let layer = window?.contentView?.layer {
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(0.3)
+            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
+
+            layer.opacity = 0
+            layer.transform = CATransform3DMakeScale(0.3, 0.3, 1.0)
+
+            CATransaction.commit()
+        }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.dotLayer = nil
+            self?.timerLayer = nil
+            self?.containerLayer = nil
             self?.window?.orderOut(nil)
             self?.window = nil
             self?.isVisible = false
@@ -187,6 +165,32 @@ class SessionIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
     /// Sync duration from SessionManager (call from outside when duration updates)
     func updateDuration(_ newDuration: TimeInterval) {
         duration = newDuration
+    }
+
+    // MARK: - Timer Text
+
+    private func updateTimerText() {
+        let text = isProcessing
+            ? "Processing..."
+            : SessionManager.formatDurationHHMMSS(duration)
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)  // No implicit animation on text change
+        timerLayer?.string = makeAttributedString(text)
+        CATransaction.commit()
+    }
+
+    private func makeAttributedString(_ text: String) -> NSAttributedString {
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let font = isProcessing
+            ? NSFont.systemFont(ofSize: 13, weight: .medium)
+            : NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
+        let color = isDark ? NSColor.white : NSColor.labelColor
+
+        return NSAttributedString(string: text, attributes: [
+            .font: font,
+            .foregroundColor: color
+        ])
     }
 
     // MARK: - Drag and Snap
@@ -237,21 +241,80 @@ class SessionIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
     // MARK: - Window Management
 
     private func createWindow() {
-        let contentView = SessionIndicatorView(controller: self)
-        let hostingView = NSHostingView(rootView: contentView)
-        hostingView.frame = CGRect(x: 0, y: 0, width: 140, height: 36)
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        let windowWidth: CGFloat = 110
+        let windowHeight: CGFloat = 36
 
-        hostingView.wantsLayer = true
-        hostingView.layer?.backgroundColor = .clear
+        // Container NSView — pure layer-backed, no SwiftUI
+        let container = NSView(frame: CGRect(x: 0, y: 0, width: windowWidth, height: windowHeight))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = .clear
 
-        let window = NSWindow(
-            contentRect: hostingView.frame,
+        // --- Capsule background ---
+        let bgLayer = CALayer()
+        bgLayer.frame = container.bounds
+        bgLayer.cornerRadius = windowHeight / 2  // Makes it a capsule
+        bgLayer.backgroundColor = isDark
+            ? NSColor(white: 0.15, alpha: 0.65).cgColor
+            : NSColor(white: 0.92, alpha: 0.85).cgColor
+        container.layer?.addSublayer(bgLayer)
+
+        // --- Capsule border ---
+        let borderLayer = CAShapeLayer()
+        let borderRect = container.bounds.insetBy(dx: 0.25, dy: 0.25)
+        borderLayer.path = CGPath(roundedRect: borderRect,
+                                  cornerWidth: borderRect.height / 2,
+                                  cornerHeight: borderRect.height / 2,
+                                  transform: nil)
+        borderLayer.strokeColor = isDark
+            ? NSColor.white.withAlphaComponent(0.15).cgColor
+            : NSColor.black.withAlphaComponent(0.1).cgColor
+        borderLayer.fillColor = nil
+        borderLayer.lineWidth = 0.5
+        container.layer?.addSublayer(borderLayer)
+
+        // --- Red dot (pulsing) ---
+        let dot = CALayer()
+        dot.frame = CGRect(x: 14, y: (windowHeight - 8) / 2, width: 8, height: 8)
+        dot.cornerRadius = 4
+        dot.backgroundColor = NSColor.red.cgColor
+        container.layer?.addSublayer(dot)
+        self.dotLayer = dot
+
+        // Pulsing animation
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1.0
+        pulse.toValue = 0.3
+        pulse.duration = 1.5
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        dot.add(pulse, forKey: "pulse")
+
+        // --- Timer text ---
+        let textLayer = CATextLayer()
+        textLayer.string = makeAttributedString("00:00:00")
+        // Position: after dot (8) + spacing (8), starting at x=30
+        // Vertically centered: (36 - 18) / 2 = 9
+        textLayer.frame = CGRect(x: 30, y: 9, width: 68, height: 18)
+        textLayer.alignmentMode = .left
+        textLayer.contentsScale = scale
+        textLayer.truncationMode = .end
+        container.layer?.addSublayer(textLayer)
+        self.timerLayer = textLayer
+
+        self.containerLayer = container.layer
+
+        // --- Window ---
+        let window = FloatingIndicatorWindow(
+            contentRect: container.frame,
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
 
-        window.contentView = hostingView
+        window.contentView = container
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
@@ -259,12 +322,6 @@ class SessionIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isMovableByWindowBackground = true
         window.ignoresMouseEvents = false
-
-        if let cv = window.contentView {
-            cv.wantsLayer = true
-            cv.layer?.backgroundColor = .clear
-            cv.layer?.isOpaque = false
-        }
 
         self.window = window
     }
@@ -312,7 +369,7 @@ class SessionSnapPlaceholderController {
     private var windows: [SessionIndicatorController.ScreenPosition: NSWindow] = [:]
     private var highlightedPosition: SessionIndicatorController.ScreenPosition?
 
-    private let windowWidth: CGFloat = 140
+    private let windowWidth: CGFloat = 110
     private let windowHeight: CGFloat = 36
 
     func show() {
@@ -388,23 +445,14 @@ class SessionSnapPlaceholderController {
     }
 
     private func createPlaceholderWindow(at origin: CGPoint) -> NSWindow {
-        let view = Capsule()
-            .fill(.ultraThinMaterial)
-            .opacity(0.4)
-            .overlay(Capsule().stroke(Color.white.opacity(0.2), lineWidth: 1))
-            .shadow(color: .black.opacity(0.1), radius: 8, x: 0, y: 2)
-            .frame(width: windowWidth, height: windowHeight)
-
-        let hostingView = NSHostingView(rootView: view)
-        hostingView.frame = CGRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
-
-        let window = NSWindow(
-            contentRect: hostingView.frame,
+        let view = createPlaceholderView(highlighted: false)
+        let window = FloatingIndicatorWindow(
+            contentRect: CGRect(x: 0, y: 0, width: windowWidth, height: windowHeight),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
-        window.contentView = hostingView
+        window.contentView = view
         window.isOpaque = false
         window.backgroundColor = .clear
         window.level = .floating
@@ -414,16 +462,27 @@ class SessionSnapPlaceholderController {
     }
 
     private func updateWindowHighlight(_ window: NSWindow, highlighted: Bool) {
-        let view = Capsule()
-            .fill(.ultraThinMaterial)
-            .opacity(highlighted ? 0.9 : 0.4)
-            .overlay(Capsule().stroke(Color.white.opacity(highlighted ? 0.5 : 0.2), lineWidth: 1))
-            .shadow(color: .black.opacity(0.1), radius: 8, x: 0, y: 2)
-            .frame(width: windowWidth, height: windowHeight)
-            .scaleEffect(highlighted ? 1.05 : 1.0)
+        let view = createPlaceholderView(highlighted: highlighted)
+        window.contentView = view
+    }
 
-        let hostingView = NSHostingView(rootView: view)
-        hostingView.frame = window.contentView?.frame ?? CGRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
-        window.contentView = hostingView
+    /// Create a pure-AppKit placeholder view (no SwiftUI — avoids macOS 26 display issues)
+    private func createPlaceholderView(highlighted: Bool) -> NSView {
+        let view = NSView(frame: CGRect(x: 0, y: 0, width: windowWidth, height: windowHeight))
+        view.wantsLayer = true
+        view.layer?.backgroundColor = .clear
+
+        let bg = CALayer()
+        bg.frame = view.bounds
+        bg.cornerRadius = windowHeight / 2
+        bg.backgroundColor = NSColor(white: 0.5, alpha: highlighted ? 0.35 : 0.15).cgColor
+        bg.borderColor = NSColor.white.withAlphaComponent(highlighted ? 0.5 : 0.2).cgColor
+        bg.borderWidth = 1
+        if highlighted {
+            bg.transform = CATransform3DMakeScale(1.05, 1.05, 1.0)
+        }
+        view.layer?.addSublayer(bg)
+
+        return view
     }
 }
