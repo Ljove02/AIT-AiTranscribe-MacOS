@@ -13,11 +13,28 @@ A powerful macOS menu bar application for local speech-to-text transcription. Ru
 
 ---
 
+## Quick Install
+
+1. Download the latest **DMG** from [Releases](https://github.com/Ljove02/AIT-AiTranscribe-MacOS/releases)
+2. Open the DMG and **drag AiTranscribe to Applications**
+3. Run this once in Terminal (app is not signed with Apple Developer certificate):
+   ```bash
+   xattr -cr /Applications/AiTranscribe.app
+   ```
+
+---
+
 ## Showcase
 
-https://github.com/user-attachments/assets/3f8da9f1-6a4b-483a-96ec-75d6239b5fa8
+https://github.com/user-attachments/assets/ce9e1d33-9f0e-4fbc-8bf4-65f2f11f997f
 
 > Press a shortcut, speak, and the transcription lands in your clipboard — ready to paste anywhere. The recording indicator follows you across desktops, snaps to screen corners, and adapts to light and dark mode.
+
+### Session Recording
+
+https://github.com/user-attachments/assets/557b2948-05b4-4f62-9e13-ba3227000ce0
+
+> Record long sessions (meetings, lectures, interviews) with live timer. Audio is split into RAM-aware chunks and batch-transcribed with progress streaming.
 
 ---
 
