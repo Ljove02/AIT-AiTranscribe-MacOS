@@ -21,7 +21,7 @@ set -e  # Exit on error
 # Get the directory where this script is located (works even when called from different directory)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$SCRIPT_DIR"
-VERSION="0.1.2"
+VERSION="0.1.5"
 APP_NAME="AiTranscribe"
 SKIP_BACKEND=false
 
@@ -150,7 +150,7 @@ else
     fi
 
     # Copy backend Python files for NeMo mode (runs server.py with NeMo venv)
-    for pyfile in server.py model_manager.py recorder.py; do
+    for pyfile in server.py model_manager.py recorder.py batch_transcriber.py; do
         if [ -f "backend/$pyfile" ]; then
             cp "backend/$pyfile" "$RESOURCES_DIR/"
             print_success "Copied $pyfile to Resources"
@@ -158,6 +158,18 @@ else
             print_warning "$pyfile not found in backend/"
         fi
     done
+
+    # Copy whisper-cli binary (whisper.cpp Metal GPU transcription)
+    WHISPER_CLI="backend/bin/whisper-cli"
+    if [ -f "$WHISPER_CLI" ]; then
+        cp "$WHISPER_CLI" "$RESOURCES_DIR/"
+        chmod +x "$RESOURCES_DIR/whisper-cli"
+        print_success "whisper-cli copied to Resources"
+    else
+        print_warning "whisper-cli not found at $WHISPER_CLI"
+        echo "  Whisper models will not work without this binary."
+        echo "  Build it with: git clone https://github.com/ggml-org/whisper.cpp /tmp/whisper.cpp && cd /tmp/whisper.cpp && cmake -B build && cmake --build build -j --config Release && cp build/bin/whisper-cli $(pwd)/backend/bin/"
+    fi
 fi
 
 # =============================================================================
@@ -234,6 +246,24 @@ if [ -f "$BUNDLED_NEMO_REQS" ]; then
 else
     print_warning "NeMo requirements NOT found in app bundle!"
     echo "NeMo model installation may not work without this file."
+fi
+
+# Verify whisper-cli is in bundle
+BUNDLED_WHISPER="dist/${APP_NAME}.app/Contents/Resources/whisper-cli"
+if [ -f "$BUNDLED_WHISPER" ]; then
+    print_success "whisper-cli is bundled in app"
+else
+    print_warning "whisper-cli NOT found in app bundle!"
+    echo "Whisper model transcription will not work without this binary."
+fi
+
+# Verify batch_transcriber.py is in bundle
+BUNDLED_BATCH="dist/${APP_NAME}.app/Contents/Resources/batch_transcriber.py"
+if [ -f "$BUNDLED_BATCH" ]; then
+    print_success "batch_transcriber.py is bundled in app"
+else
+    print_warning "batch_transcriber.py NOT found in app bundle!"
+    echo "Session transcription may not work without this file."
 fi
 
 print_success "App copied to: dist/${APP_NAME}.app"

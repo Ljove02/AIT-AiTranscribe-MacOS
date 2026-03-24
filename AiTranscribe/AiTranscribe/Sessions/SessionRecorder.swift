@@ -38,6 +38,10 @@ import CoreMedia
 import CoreAudio
 import Combine
 
+#if canImport(AVFAudio)
+import AVFAudio
+#endif
+
 /// Records both system audio and microphone into a single M4A file
 class SessionRecorder: NSObject, ObservableObject {
 
@@ -75,6 +79,25 @@ class SessionRecorder: NSObject, ObservableObject {
     func startRecording(sessionDir: URL, micDeviceId: AudioDeviceID? = nil) async -> Bool {
         guard !isRecording else { return false }
 
+        // Check microphone permission BEFORE touching AVAudioEngine.
+        // Accessing engine.inputNode without permission causes a hard crash (ObjC exception).
+        let micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
+        switch micPermission {
+        case .notDetermined:
+            let granted = await AVCaptureDevice.requestAccess(for: .audio)
+            if !granted {
+                print("SessionRecorder: Microphone permission denied by user")
+                return false
+            }
+        case .denied, .restricted:
+            print("SessionRecorder: Microphone permission not granted (status: \(micPermission.rawValue))")
+            return false
+        case .authorized:
+            break
+        @unknown default:
+            break
+        }
+
         let m4aURL = sessionDir.appendingPathComponent("audio.m4a")
         let micURL = sessionDir.appendingPathComponent("mic_temp.caf")
         let sysURL = sessionDir.appendingPathComponent("sys_temp.caf")
@@ -86,12 +109,21 @@ class SessionRecorder: NSObject, ObservableObject {
         sysFile = nil
         sysFileFormat = nil
 
-        // Start system audio capture
-        let systemStarted = await startSystemAudioCapture()
+        // System audio capture via ScreenCaptureKit.
+        // Only attempt if Screen Recording permission is already granted.
+        // ScreenCaptureKit can hard-crash on unsigned/quarantined apps,
+        // so we check permission first and skip entirely if not granted.
+        var systemStarted = false
+        let hasScreenPermission = SystemAudioCapture.preflightPermission()
+        if hasScreenPermission {
+            systemStarted = await startSystemAudioCapture()
+        } else {
+            print("SessionRecorder: Screen Recording permission not granted — skipping system audio")
+        }
         hasSystemAudio = systemStarted
 
         if !systemStarted {
-            print("SessionRecorder: System audio unavailable, recording mic-only")
+            print("SessionRecorder: Recording mic-only")
             tempSysURL = nil
         }
 
@@ -205,7 +237,14 @@ class SessionRecorder: NSObject, ObservableObject {
         systemCapture.onAudioBuffer = { [weak self] sampleBuffer in
             self?.handleSystemAudioBuffer(sampleBuffer)
         }
-        return await systemCapture.startCapture()
+        do {
+            return try await Task {
+                await systemCapture.startCapture()
+            }.value
+        } catch {
+            print("SessionRecorder: System audio capture failed unexpectedly: \(error)")
+            return false
+        }
     }
 
     /// Write system audio directly at native format — NO AVAudioConverter.

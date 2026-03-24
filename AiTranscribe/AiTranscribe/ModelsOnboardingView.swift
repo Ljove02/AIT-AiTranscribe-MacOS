@@ -128,6 +128,23 @@ struct ModelsOnboardingView: View {
                 Text(downloadError ?? "An unknown error occurred")
             }
             
+            // Backend status banner
+            if !backendManager.isServerReady {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Backend is starting — downloads will be available shortly...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity)
+                .background(Color.orange.opacity(0.1))
+                .cornerRadius(8)
+                .padding(.horizontal, 40)
+            }
+
             // Model List - SCROLLABLE to prevent pushing buttons
             ScrollView {
                 VStack(spacing: 16) {
@@ -138,6 +155,7 @@ struct ModelsOnboardingView: View {
                             isLoading: loadingModels.contains(model.id),
                             isDownloaded: downloadedModels.contains(model.id) || isModelAlreadyDownloaded(model.id),
                             nemoAvailable: effectiveNemoAvailable,
+                            backendReady: backendManager.isServerReady,
                             onDownload: {
                                 // Check if NeMo is required but not available
                                 if model.requiresNemo && !effectiveNemoAvailable {
@@ -371,6 +389,7 @@ struct OnboardingModelCard: View {
     let isLoading: Bool
     let isDownloaded: Bool
     let nemoAvailable: Bool
+    let backendReady: Bool
     let onDownload: () -> Void
     let onInstallNemo: () -> Void
 
@@ -528,7 +547,7 @@ struct OnboardingModelCard: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(isDownloading || isDownloaded || isLoading)
+        .disabled(isDownloading || isDownloaded || isLoading || !backendReady)
         .help(helpText)
     }
 

@@ -49,17 +49,30 @@ class SystemAudioCapture: NSObject, ObservableObject {
 
     // MARK: - Permission Checking
 
-    /// Check if Screen Recording permission is granted.
+    /// Synchronous, crash-safe permission pre-check.
+    /// Only returns true on macOS 15+ where CGPreflightScreenCaptureAccess is available.
+    /// On older macOS, returns false (system audio skipped) to avoid SCShareableContent crashes.
+    static func preflightPermission() -> Bool {
+        if #available(macOS 15.0, *) {
+            return CGPreflightScreenCaptureAccess()
+        } else {
+            // On older macOS, we can't safely check without risking a crash
+            // on unsigned/quarantined apps. Skip system audio.
+            return false
+        }
+    }
+
+    /// Async permission check — used internally by startCapture().
     /// Uses CGPreflightScreenCaptureAccess on macOS 15+, falls back to SCShareableContent check.
     static func checkPermission() async -> Bool {
         if #available(macOS 15.0, *) {
             return CGPreflightScreenCaptureAccess()
         } else {
-            // On older macOS, try to enumerate shareable content — if it fails, permission not granted
             do {
                 _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
                 return true
             } catch {
+                print("SystemAudioCapture: Permission check failed: \(error)")
                 return false
             }
         }

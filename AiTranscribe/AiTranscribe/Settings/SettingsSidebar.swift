@@ -87,7 +87,7 @@ struct SettingsSidebar: View {
             Spacer()
 
             // Version at bottom
-            Text("Version 0.1.2")
+            Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.5")")
                 .font(.caption2)
                 .foregroundColor(.secondary.opacity(0.6))
                 .padding(.bottom, 16)

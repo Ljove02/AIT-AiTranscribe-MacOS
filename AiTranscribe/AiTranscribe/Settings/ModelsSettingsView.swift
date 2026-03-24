@@ -132,12 +132,11 @@ struct ModelsSettingsView: View {
                         .padding(.vertical, 40)
                     } else {
                         VStack(spacing: 12) {
-                            Image(systemName: "exclamationmark.triangle")
-                                .font(.largeTitle)
-                                .foregroundColor(.orange)
-                            Text("Backend not connected")
+                            ProgressView()
+                                .scaleEffect(1.2)
+                            Text("Server Starting...")
                                 .font(.headline)
-                            Text("Waiting for server to start...")
+                            Text("Models will appear once the backend is ready.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }

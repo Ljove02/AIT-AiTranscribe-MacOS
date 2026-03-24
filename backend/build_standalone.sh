@@ -40,6 +40,23 @@ else
 fi
 
 echo ""
+
+# Check if whisper-cli exists
+if [ ! -f "bin/whisper-cli" ]; then
+    echo "WARNING: bin/whisper-cli not found!"
+    echo "Whisper models will not work without it."
+    echo "Build it with:"
+    echo "  git clone https://github.com/ggml-org/whisper.cpp /tmp/whisper.cpp"
+    echo "  cd /tmp/whisper.cpp && cmake -B build && cmake --build build -j --config Release"
+    echo "  cp build/bin/whisper-cli $(pwd)/bin/"
+    echo ""
+    read -p "Continue without whisper-cli? (y/N) " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+fi
+
 echo "Building standalone executable..."
 echo ""
 

@@ -206,6 +206,9 @@ private struct SessionMetadata: Codable {
 @MainActor
 class SessionManager: ObservableObject {
 
+    /// Shared singleton so AppDelegate can access it at launch
+    static let shared = SessionManager()
+
     // MARK: - Published State
 
     /// All sessions, sorted newest first

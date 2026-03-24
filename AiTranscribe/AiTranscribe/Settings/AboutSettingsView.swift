@@ -32,7 +32,7 @@ struct AboutView: View {
                 .fontWeight(.bold)
 
             // Version
-            Text("Version 0.1.2")
+            Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.5")")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
 

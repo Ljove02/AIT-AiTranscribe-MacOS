@@ -2,44 +2,64 @@ import SwiftUI
 import AppKit
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    private var appState: AppState?
-    private var backendManager: BackendManager?
-    private var sessionManager: SessionManager?
     private var onboardingWindowController: OnboardingWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("AppDelegate: applicationDidFinishLaunching")
-        // Backend initialization is now handled in MenuBarView.task
-    }
 
-    func configure(appState: AppState, backendManager: BackendManager) {
-        print("AppDelegate.configure() - storing references")
-        self.appState = appState
-        self.backendManager = backendManager
+        // Fix macOS 26 Tahoe bug: NSHostingView triggers re-entrant _postWindowNeeds*
+        // calls during the display cycle, crashing ANY window with SwiftUI content.
+        DisplayCycleFix.install()
 
+        // Use singletons — available immediately, no need to wait for SwiftUI
+        let appState = AppState.shared
+        let backendManager = BackendManager.shared
+        let sessionManager = SessionManager.shared
+
+        // Bind state synchronization
+        appState.bindToBackendManager(backendManager)
+
+        // Wire session manager to app state for mutual exclusion
+        sessionManager.appState = appState
+
+        // Load saved sessions
+        sessionManager.loadSessions()
+
+        // Show onboarding if needed — immediately on launch, no click required
+        let hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
+        if !hasCompletedOnboarding {
+            showOnboarding(appState: appState, backendManager: backendManager)
+        }
+
+        // Monitor onboarding completion
         UserDefaults.standard.addObserver(
             self,
             forKeyPath: "hasCompletedOnboarding",
             options: [.new],
             context: nil
         )
-    }
 
-    /// Store session manager reference for graceful shutdown
-    func configureSessionManager(_ sessionManager: SessionManager) {
-        self.sessionManager = sessionManager
+        // Background: wait for server ready, then fetch status
+        Task { @MainActor in
+            // Health check will detect readiness (no timeout wall)
+            while !backendManager.isServerReady {
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+            await appState.checkServerStatus()
+            print("AppDelegate: Server ready, initial status fetched")
+        }
     }
 
     /// Gracefully stop session recording before app quits
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let sessionManager, sessionManager.isSessionRecording else {
+        let sessionManager = SessionManager.shared
+        guard sessionManager.isSessionRecording else {
             return .terminateNow
         }
 
         // Stop session recording before quitting
         Task { @MainActor in
             await sessionManager.stopSessionRecording()
-            // Small delay to let file finalize, then quit
             try? await Task.sleep(for: .milliseconds(500))
             NSApplication.shared.reply(toApplicationShouldTerminate: true)
         }
@@ -47,7 +67,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
-    /// Show onboarding window (called from SwiftUI)
+    /// Show onboarding window
     func showOnboarding(appState: AppState, backendManager: BackendManager) {
         print("AppDelegate.showOnboarding() - showing onboarding window")
         let controller = OnboardingWindowController()

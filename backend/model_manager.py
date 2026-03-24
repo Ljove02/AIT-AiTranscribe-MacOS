@@ -721,6 +721,23 @@ def check_nemo_available() -> dict:
         "device": "cpu"
     }
 
+    # PyInstaller bundled mode: NeMo can never work because TorchScript requires
+    # source code access which isn't available in frozen executables. Skip the heavy
+    # import entirely — saves ~2 minutes of matplotlib font cache + NeMo init.
+    import sys
+    if getattr(sys, 'frozen', False) or getattr(sys, '_MEIPASS', None):
+        print("DEBUG: Running in bundled mode — skipping NeMo import (TorchScript limitation)")
+        return result
+
+    # Fast pre-check: skip heavy import if nemo package isn't even installed.
+    try:
+        import importlib.util
+        if importlib.util.find_spec("nemo") is None:
+            print("DEBUG: NeMo package not found (fast check) — skipping heavy import")
+            return result
+    except Exception:
+        pass
+
     try:
         import nemo
         import nemo.collections.asr as nemo_asr
@@ -729,7 +746,6 @@ def check_nemo_available() -> dict:
     except ImportError:
         return result
     except (OSError, RuntimeError, Exception) as e:
-        # PyInstaller builds can't load NeMo due to TorchScript source requirements
         print(f"DEBUG: NeMo not available in bundled mode: {type(e).__name__}")
         return result
 

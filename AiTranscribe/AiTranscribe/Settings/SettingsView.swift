@@ -44,11 +44,13 @@ struct SettingsView: View {
         }
         .frame(width: 1050, height: 720)
         .onAppear {
-            // Pause health check timer to prevent UI re-renders
-            backendManager.pauseHealthCheck()
+            // Only pause health checks if server is already ready
+            // (avoid pausing during startup — we need to detect readiness)
+            if backendManager.isServerReady {
+                backendManager.pauseHealthCheck()
+            }
         }
         .onDisappear {
-            // Resume health check timer when Settings window closes
             backendManager.resumeHealthCheck()
         }
     }

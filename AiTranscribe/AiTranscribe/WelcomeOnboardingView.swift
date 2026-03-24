@@ -21,6 +21,7 @@ struct WelcomeOnboardingView: View {
     /// Track backend readiness state
     @State private var isWaitingForBackend = true
     @State private var dotCount = 0
+    @State private var waitTime: TimeInterval = 0
 
     private let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
@@ -69,43 +70,31 @@ struct WelcomeOnboardingView: View {
             Spacer()
             Spacer() // Extra spacer to push button down consistently
             
-            // Get Started Button (or Loading state)
+            // Get Started Button (always shown — backend starts in background)
             VStack(spacing: 8) {
+                Button(action: onNext) {
+                    HStack {
+                        Text("Get Started")
+                            .font(.title3.weight(.semibold))
+                        Image(systemName: "arrow.right")
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .padding(.horizontal, 60)
+
+                // Show backend status beneath the button
                 if isWaitingForBackend {
-                    // Show loading state while waiting for backend
-                    VStack(spacing: 12) {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                                .scaleEffect(0.8)
-                            Text("Starting backend\(String(repeating: ".", count: dotCount))")
-                                .font(.title3.weight(.medium))
-                                .foregroundColor(.secondary)
-                                .frame(width: 180, alignment: .leading)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-
-                        Text("This may take a minute on first launch")
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                        Text("Backend starting in background\(String(repeating: ".", count: dotCount))")
                             .font(.caption)
-                            .foregroundStyle(.tertiary)
+                            .foregroundColor(.secondary)
                     }
-                    .padding(.horizontal, 60)
                 } else {
-                    // Backend ready - show Get Started button
-                    Button(action: onNext) {
-                        HStack {
-                            Text("Get Started")
-                                .font(.title3.weight(.semibold))
-                            Image(systemName: "arrow.right")
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .padding(.horizontal, 60)
-
-                    // Footer - moved inside button section
                     Text("First time? Let's set up your app.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
@@ -117,14 +106,10 @@ struct WelcomeOnboardingView: View {
         .padding()
         .onReceive(timer) { _ in
             dotCount = (dotCount + 1) % 4
-        }
-        .task {
-            // Wait for backend to be ready
-            while !backendManager.isServerReady {
-                try? await Task.sleep(for: .milliseconds(500))
+            // Update backend readiness (non-blocking)
+            if backendManager.isServerReady {
+                isWaitingForBackend = false
             }
-            // Backend is ready
-            isWaitingForBackend = false
         }
     }
 }
