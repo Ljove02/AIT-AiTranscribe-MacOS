@@ -752,12 +752,19 @@ class BackendManager: ObservableObject {
     // HEALTH MONITORING
     // =========================================================================
 
-    /// Start periodic health checks
+    /// Start periodic health checks.
+    /// Uses a shorter interval (2s) until the server is ready, then switches to 5s.
     private func startHealthCheck() {
         healthCheckTimer?.invalidate()
-        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        let interval: TimeInterval = isServerReady ? 5.0 : 2.0
+        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.checkHealth()
+                guard let self else { return }
+                self.checkHealth()
+                // Once server becomes ready, slow down to 5s interval
+                if self.isServerReady {
+                    self.startHealthCheck()
+                }
             }
         }
     }
@@ -774,7 +781,7 @@ class BackendManager: ObservableObject {
         startHealthCheck()
     }
 
-    /// Check if the process is still healthy
+    /// Check if the process is still healthy and if the server is responding
     private func checkHealth() {
         guard let process = process else {
             isRunning = false
@@ -787,6 +794,26 @@ class BackendManager: ObservableObject {
             isServerReady = false
             if !isIntentionallyStopping {
                 handleUnexpectedTermination()
+            }
+            return
+        }
+
+        // If running but not yet marked as ready, poll the health endpoint
+        if !isServerReady {
+            Task {
+                do {
+                    let url = URL(string: "http://localhost:8765/health")!
+                    let (_, response) = try await URLSession.shared.data(from: url)
+                    if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                        await MainActor.run {
+                            self.isServerReady = true
+                            self.statusMessage = "Ready - \(self.currentBackendMode.displayName)"
+                            self.addLog("Server is ready (detected by health check)", level: .info)
+                        }
+                    }
+                } catch {
+                    // Server not ready yet, will retry on next health check
+                }
             }
         }
     }

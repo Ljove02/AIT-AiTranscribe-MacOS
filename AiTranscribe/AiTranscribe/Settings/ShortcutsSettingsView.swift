@@ -4,8 +4,8 @@ import Carbon.HIToolbox
 // MARK: - Shortcuts Settings View
 
 struct ShortcutsSettingsView: View {
-    @AppStorage("toggleRecordingShortcut") private var toggleShortcut = "⌥Space"
-    @AppStorage("cancelRecordingShortcut") private var cancelShortcut = "⌥Escape"
+    @AppStorage("toggleRecordingShortcut") private var toggleShortcut = "⌃P"
+    @AppStorage("cancelRecordingShortcut") private var cancelShortcut = "⌃K"
 
     @State private var isRecordingToggleShortcut = false
     @State private var isRecordingCancelShortcut = false
@@ -42,7 +42,7 @@ struct ShortcutsSettingsView: View {
                 Text("Click a shortcut button and press your desired key combination.")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Text("Default: Option+Space to toggle, Option+Escape to cancel")
+                Text("Default: Control+P to toggle, Control+K to cancel")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

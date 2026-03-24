@@ -239,7 +239,7 @@ struct MenuBarView: View {
                 } label: {
                     Label("Record Session", systemImage: "waveform.badge.plus")
                 }
-                .disabled(!appState.isServerConnected || appState.isRecording)
+                .disabled(appState.isRecording)
             }
         }
         .padding(.horizontal, 12)
@@ -325,7 +325,7 @@ struct MenuBarView: View {
                 .padding(.vertical, 4)
 
             // Version
-            Text("AiTranscribe v0.1.2")
+            Text("AiTranscribe v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.5")")
                 .font(.caption)
                 .foregroundColor(.secondary)
 

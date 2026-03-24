@@ -59,23 +59,23 @@ class HotkeyManager {
         installEventHandler()
 
         // Read shortcuts from UserDefaults
-        let toggleShortcut = UserDefaults.standard.string(forKey: "toggleRecordingShortcut") ?? "⌥Space"
-        let cancelShortcut = UserDefaults.standard.string(forKey: "cancelRecordingShortcut") ?? "Escape"
+        let toggleShortcut = UserDefaults.standard.string(forKey: "toggleRecordingShortcut") ?? "⌃P"
+        let cancelShortcut = UserDefaults.standard.string(forKey: "cancelRecordingShortcut") ?? "⌃K"
 
-        // Register Option+Space for toggle recording
+        // Register Control+P for toggle recording
         if let (keyCode, modifiers) = parseShortcut(toggleShortcut) {
             registerHotkey(id: .toggleRecording, keyCode: keyCode, modifiers: modifiers)
         } else {
-            // Default: Option+Space
-            registerHotkey(id: .toggleRecording, keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey))
+            // Default: Control+P
+            registerHotkey(id: .toggleRecording, keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(controlKey))
         }
 
-        // Register Option+Escape for cancel (Escape alone cannot be a global hotkey)
+        // Register Control+K for cancel recording
         if let (keyCode, modifiers) = parseShortcut(cancelShortcut) {
             registerHotkey(id: .cancelRecording, keyCode: keyCode, modifiers: modifiers)
         } else {
-            // Default: Option+Escape
-            registerHotkey(id: .cancelRecording, keyCode: UInt32(kVK_Escape), modifiers: UInt32(optionKey))
+            // Default: Control+K
+            registerHotkey(id: .cancelRecording, keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(controlKey))
         }
     }
 

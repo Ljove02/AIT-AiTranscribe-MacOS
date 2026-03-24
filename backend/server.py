@@ -655,6 +655,7 @@ def _transcribe_whisper(audio_path: str) -> tuple[str, float]:
         capture_output=True,
         text=True,
         timeout=1800,  # 30 min safety net
+        cwd="/tmp",    # explicit cwd — prevents getcwd crash if parent dir was deleted
     )
 
     processing_time = time.time() - start_time
