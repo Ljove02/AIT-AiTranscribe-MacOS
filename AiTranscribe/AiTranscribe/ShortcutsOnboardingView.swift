@@ -16,8 +16,8 @@ struct ShortcutsOnboardingView: View {
     let onNext: () -> Void
     let onBack: () -> Void
     
-    @AppStorage("toggleRecordingShortcut") private var toggleShortcut = "⌥Space"
-    @AppStorage("cancelRecordingShortcut") private var cancelShortcut = "⌥Escape"
+    @AppStorage("toggleRecordingShortcut") private var toggleShortcut = "⌃P"
+    @AppStorage("cancelRecordingShortcut") private var cancelShortcut = "⌃K"
     
     var body: some View {
         VStack(spacing: 24) {

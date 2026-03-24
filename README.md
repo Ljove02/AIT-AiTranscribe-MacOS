@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/3f8da9f1-6a4b-483a-96ec-75d6239b5fa8
 ### Core
 
 - **100% Local and Private** — All processing happens on your Mac. No internet, no cloud, no data leaves your machine.
-- **Global Hotkey** — Press `Option + Space` from any app to start recording. Press again to stop. The transcription is in your clipboard before you can blink.
+- **Global Hotkey** — Press `Control + P` from any app to start recording. Press again to stop. The transcription is in your clipboard before you can blink.
 - **Menu Bar App** — Lives in your menu bar, always accessible, never in your way.
 - **Multiple AI Models** — NVIDIA Parakeet, OpenAI Whisper (base, small, large-v3, large-v3-turbo), and NVIDIA NeMo with streaming support.
 - **Auto-Paste** — Transcribed text can be pasted automatically at your cursor position right after transcription.
@@ -148,7 +148,7 @@ cp -R dist/AiTranscribe.app /Applications/
    - **Parakeet TDT 0.6B** — Recommended. Best balance of speed and accuracy.
    - **Whisper Base (English)** — Lightweight, good for quick transcriptions.
    - **Whisper Large v3** — Highest accuracy, requires more RAM.
-3. Press `Option + Space` to start recording
+3. Press `Control + P` to start recording
 4. Speak into your microphone
 5. Press the hotkey again to stop — text is in your clipboard
 

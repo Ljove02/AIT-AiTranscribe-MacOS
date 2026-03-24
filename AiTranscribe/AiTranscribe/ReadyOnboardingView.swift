@@ -17,7 +17,7 @@ struct ReadyOnboardingView: View {
     let onFinish: () -> Void
     
     @EnvironmentObject var appState: AppState
-    @AppStorage("toggleRecordingShortcut") private var toggleShortcut = "⌥Space"
+    @AppStorage("toggleRecordingShortcut") private var toggleShortcut = "⌃P"
     
     var body: some View {
         VStack(spacing: 0) {
