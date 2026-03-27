@@ -2,7 +2,7 @@
  AudioRecorder.swift
  ===================
 
- Records audio using AVFoundation (Apple's audio framework).
+ Records audio using AVCaptureSession (Apple's capture framework).
 
  WHY RECORD IN SWIFT?
  --------------------
@@ -14,11 +14,17 @@
  2. Audio is captured with the app's own permission
  3. We send the audio to Python backend for transcription only
 
+ WHY AVCaptureSession (NOT AVAudioEngine)?
+ ------------------------------------------
+ AVAudioEngine's inputNode tap silently dies when another app activates
+ a Voice Processing AudioUnit (Google Meet, Zoom, etc.). AVCaptureSession
+ captures at the HAL level and coexists with video call apps.
+
  HOW IT WORKS:
  -------------
- 1. AVAudioEngine captures audio from the microphone
- 2. Audio is stored in a buffer as we record
- 3. When stopped, we convert to WAV format
+ 1. AVCaptureSession captures audio from the microphone as CMSampleBuffers
+ 2. Buffers are converted to 16kHz mono and stored in memory
+ 3. When stopped, we combine buffers into WAV format
  4. WAV data is sent to backend's /transcribe-bytes endpoint
  */
 
@@ -42,15 +48,20 @@ class AudioRecorder: NSObject, ObservableObject {
     /// Recording duration in seconds
     @Published var duration: TimeInterval = 0.0
 
-    // MARK: - Audio Engine
+    // MARK: - Capture Session
 
-    /// The audio engine that manages audio processing
-    private var audioEngine: AVAudioEngine?
+    /// AVCaptureSession captures at the HAL level — coexists with
+    /// video call apps that use Voice Processing AudioUnits.
+    private var captureSession: AVCaptureSession?
+    private let captureQueue = DispatchQueue(label: "com.aitranscribe.audio-capture")
 
-    /// Buffer to store recorded audio
-    private var audioBuffer: AVAudioPCMBuffer?
+    /// Converts native mic format to 16kHz mono for speech recognition
+    private var audioConverter: AVAudioConverter?
 
-    /// All recorded buffers
+    /// Adaptive gain — compensates for hardware gain changes
+    private var micGain: Float = 2.0
+
+    /// All recorded buffers (16kHz mono)
     private var recordedBuffers: [AVAudioPCMBuffer] = []
 
     /// Timer for updating duration
@@ -62,7 +73,7 @@ class AudioRecorder: NSObject, ObservableObject {
     /// Sample rate (16kHz for speech recognition)
     private let sampleRate: Double = 16000
 
-    /// Audio format for recording
+    /// Audio format for recording (16kHz mono float32)
     private var recordingFormat: AVAudioFormat?
 
     // MARK: - Initialization
@@ -88,36 +99,19 @@ class AudioRecorder: NSObject, ObservableObject {
 
         // Clear previous recording
         recordedBuffers.removeAll()
+        audioConverter = nil
+        micGain = 2.0
         currentVolume = 0.0
         duration = 0.0
 
-        // If a specific device is requested, temporarily set it as the system default
-        // This is the most reliable way to make AVAudioEngine use a specific device,
-        // as setting the device directly on the audio unit can fail when switching
-        // between devices with different formats (e.g., Bluetooth AirPods ↔ built-in mic)
-        var previousDefaultDevice: AudioDeviceID?
+        // If a specific device is requested, set it as the system default
         if let deviceId = deviceId {
             let currentDefault = AudioRecorder.getDefaultInputDeviceId()
             if currentDefault != deviceId {
-                previousDefaultDevice = currentDefault
                 AudioRecorder.setDefaultInputDevice(deviceId)
-                // Small delay to let CoreAudio settle after device switch
-                usleep(50_000) // 50ms
+                usleep(50_000)
             }
         }
-
-        // Create audio engine (will use the current system default input)
-        audioEngine = AVAudioEngine()
-        guard let audioEngine = audioEngine else {
-            // Restore previous default if we changed it
-            if let prev = previousDefaultDevice { AudioRecorder.setDefaultInputDevice(prev) }
-            return false
-        }
-
-        let inputNode = audioEngine.inputNode
-
-        // Get the native format of the input
-        let inputFormat = inputNode.outputFormat(forBus: 0)
 
         // Create our target format (16kHz mono for speech recognition)
         guard let targetFormat = AVAudioFormat(
@@ -126,59 +120,54 @@ class AudioRecorder: NSObject, ObservableObject {
             channels: 1,
             interleaved: false
         ) else {
-            print("Failed to create target audio format")
+            print("AudioRecorder: Failed to create target audio format")
             return false
         }
-
         recordingFormat = targetFormat
 
-        // Create a converter if sample rates differ
-        let converter = AVAudioConverter(from: inputFormat, to: targetFormat)
+        // Setup AVCaptureSession
+        let session = AVCaptureSession()
 
-        // Install tap on input node to capture audio
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, time in
-            guard let self = self else { return }
-
-            // Convert to target format if needed
-            if let converter = converter {
-                let frameCount = AVAudioFrameCount(Double(buffer.frameLength) * self.sampleRate / inputFormat.sampleRate)
-                guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCount) else { return }
-
-                var error: NSError?
-                let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
-                    outStatus.pointee = .haveData
-                    return buffer
-                }
-
-                converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
-
-                if error == nil {
-                    self.processAudioBuffer(convertedBuffer)
-                }
-            } else {
-                self.processAudioBuffer(buffer)
-            }
-        }
-
-        // Start the engine
-        do {
-            try audioEngine.start()
-            isRecording = true
-            startTime = Date()
-
-            // Start duration timer
-            durationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-                guard let self = self, let start = self.startTime else { return }
-                DispatchQueue.main.async {
-                    self.duration = Date().timeIntervalSince(start)
-                }
-            }
-
-            return true
-        } catch {
-            print("Failed to start audio engine: \(error)")
+        guard let micDevice = AVCaptureDevice.default(for: .audio) else {
+            print("AudioRecorder: No mic device available")
             return false
         }
+
+        do {
+            let input = try AVCaptureDeviceInput(device: micDevice)
+            guard session.canAddInput(input) else {
+                print("AudioRecorder: Cannot add mic input")
+                return false
+            }
+            session.addInput(input)
+        } catch {
+            print("AudioRecorder: Failed to create mic input: \(error)")
+            return false
+        }
+
+        let audioOutput = AVCaptureAudioDataOutput()
+        audioOutput.setSampleBufferDelegate(self, queue: captureQueue)
+        guard session.canAddOutput(audioOutput) else {
+            print("AudioRecorder: Cannot add audio output")
+            return false
+        }
+        session.addOutput(audioOutput)
+
+        session.startRunning()
+        captureSession = session
+        isRecording = true
+        startTime = Date()
+
+        // Start duration timer
+        durationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self = self, let start = self.startTime else { return }
+            DispatchQueue.main.async {
+                self.duration = Date().timeIntervalSince(start)
+            }
+        }
+
+        print("AudioRecorder: Started via AVCaptureSession (device: \(micDevice.localizedName))")
+        return true
     }
 
     /// Process incoming audio buffer
@@ -221,10 +210,10 @@ class AudioRecorder: NSObject, ObservableObject {
         durationTimer?.invalidate()
         durationTimer = nil
 
-        // Stop engine
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        audioEngine = nil
+        // Stop capture session
+        captureSession?.stopRunning()
+        captureSession = nil
+        audioConverter = nil
 
         isRecording = false
         currentVolume = 0.0
@@ -253,6 +242,8 @@ class AudioRecorder: NSObject, ObservableObject {
         }
         combinedBuffer.frameLength = AVAudioFrameCount(totalFrames)
 
+        print("AudioRecorder: Stopped (frames: \(totalFrames), duration: \(String(format: "%.1f", duration))s)")
+
         // Convert to WAV data
         return createWAVData(from: combinedBuffer)
     }
@@ -262,9 +253,9 @@ class AudioRecorder: NSObject, ObservableObject {
         durationTimer?.invalidate()
         durationTimer = nil
 
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        audioEngine = nil
+        captureSession?.stopRunning()
+        captureSession = nil
+        audioConverter = nil
 
         isRecording = false
         currentVolume = 0.0
@@ -504,6 +495,104 @@ class AudioRecorder: NSObject, ObservableObject {
 }
 
 // MARK: - Input Device Model
+
+// MARK: - AVCaptureSession Mic Delegate
+
+extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput,
+                       didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        guard isRecording else { return }
+        guard let formatDesc = sampleBuffer.formatDescription else { return }
+
+        let sourceFormat = AVAudioFormat(cmAudioFormatDescription: formatDesc)
+        let frameCount = AVAudioFrameCount(sampleBuffer.numSamples)
+        guard frameCount > 0 else { return }
+
+        // Create converter lazily from first buffer's format
+        if audioConverter == nil, let targetFormat = recordingFormat {
+            audioConverter = AVAudioConverter(from: sourceFormat, to: targetFormat)
+        }
+
+        // Convert CMSampleBuffer → AVAudioPCMBuffer (memcpy, no conversion)
+        guard let sourcePCM = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: frameCount) else { return }
+        sourcePCM.frameLength = frameCount
+
+        guard let blockBuffer = sampleBuffer.dataBuffer else { return }
+        var totalLength: Int = 0
+        var dataPointer: UnsafeMutablePointer<CChar>?
+        let status = CMBlockBufferGetDataPointer(
+            blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
+            totalLengthOut: &totalLength, dataPointerOut: &dataPointer
+        )
+        guard status == noErr, let dataPointer else { return }
+
+        let bytesToCopy = min(totalLength, Int(frameCount) * Int(sourceFormat.streamDescription.pointee.mBytesPerFrame))
+        if sourceFormat.isInterleaved {
+            if let channelData = sourcePCM.floatChannelData {
+                memcpy(channelData[0], dataPointer, bytesToCopy)
+            }
+        } else {
+            let channels = Int(sourceFormat.channelCount)
+            let bytesPerChannel = Int(frameCount) * MemoryLayout<Float>.size
+            if let channelData = sourcePCM.floatChannelData {
+                for ch in 0..<channels {
+                    let offset = ch * bytesPerChannel
+                    if offset + bytesPerChannel <= totalLength {
+                        memcpy(channelData[ch], dataPointer.advanced(by: offset), bytesPerChannel)
+                    }
+                }
+            }
+        }
+
+        // Adaptive mic gain — targets consistent RMS regardless of
+        // hardware gain changes (e.g. Google Meet lowering mic volume)
+        if let channelData = sourcePCM.floatChannelData {
+            let frames = Int(sourcePCM.frameLength)
+            let channels = Int(sourceFormat.channelCount)
+
+            var sum: Float = 0
+            for i in 0..<frames { let s = channelData[0][i]; sum += s * s }
+            let rms = sqrt(sum / Float(max(frames, 1)))
+
+            let targetRMS: Float = 0.05
+            if rms > 0.002 {
+                let desiredGain = min(targetRMS / rms, 10.0)
+                let alpha: Float = desiredGain > micGain ? 0.3 : 0.05
+                micGain += alpha * (desiredGain - micGain)
+            }
+            micGain = max(micGain, 1.0)
+
+            for ch in 0..<channels {
+                for i in 0..<frames {
+                    channelData[ch][i] = min(max(channelData[ch][i] * micGain, -1.0), 1.0)
+                }
+            }
+        }
+
+        // Convert to 16kHz mono target format
+        if let converter = audioConverter, let targetFormat = recordingFormat {
+            let outputFrameCount = AVAudioFrameCount(
+                Double(frameCount) * targetFormat.sampleRate / sourceFormat.sampleRate
+            )
+            guard outputFrameCount > 0 else { return }
+            guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputFrameCount) else { return }
+
+            var error: NSError?
+            let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+                outStatus.pointee = .haveData
+                return sourcePCM
+            }
+            converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
+
+            if error == nil {
+                processAudioBuffer(convertedBuffer)
+            }
+        } else {
+            processAudioBuffer(sourcePCM)
+        }
+    }
+}
 
 /// Represents an audio input device from CoreAudio
 struct InputDevice: Identifiable, Equatable, Hashable {

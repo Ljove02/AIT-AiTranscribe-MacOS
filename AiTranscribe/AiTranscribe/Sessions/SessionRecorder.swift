@@ -13,7 +13,9 @@
  distortion and corruption.
 
  Now: both sources write at their NATIVE format with zero conversion.
- - Mic: writes at whatever format AVAudioEngine provides (e.g. 48kHz)
+ - Mic: captured via AVCaptureSession (not AVAudioEngine) so it
+   coexists with video call apps (Google Meet, Zoom) that activate
+   Voice Processing AudioUnits. Writes CMSampleBuffer data directly.
  - System audio: writes CMSampleBuffer data directly at native format
    (48kHz stereo from ScreenCaptureKit)
 
@@ -56,7 +58,14 @@ class SessionRecorder: NSObject, ObservableObject {
     // MARK: - Private Properties
 
     private let systemCapture = SystemAudioCapture()
-    private var micEngine: AVAudioEngine?
+
+    /// Mic captured via AVCaptureSession — works alongside video call
+    /// apps (Google Meet, Zoom) that use Voice Processing AudioUnits.
+    /// AVAudioEngine's inputNode tap silently dies when another app
+    /// activates voice processing; AVCaptureSession captures at the
+    /// HAL level and is unaffected.
+    private var micCaptureSession: AVCaptureSession?
+    private let micCaptureQueue = DispatchQueue(label: "com.aitranscribe.mic-capture")
 
     /// Separate files for each audio source — no lock contention
     private var micFile: AVAudioFile?
@@ -71,6 +80,14 @@ class SessionRecorder: NSObject, ObservableObject {
     private var durationTimer: Timer?
     private var startTime: Date?
 
+    /// Mic diagnostics
+    private var micFramesWritten: Int64 = 0
+    private var micFileCreated = false
+
+    /// Adaptive mic gain — compensates for hardware gain changes
+    /// (e.g. Google Meet lowering mic volume when joining a call)
+    private var micGain: Float = 2.0
+
     /// Final output format: 16kHz mono AAC
     private let outputSampleRate: Double = 16000
 
@@ -79,8 +96,7 @@ class SessionRecorder: NSObject, ObservableObject {
     func startRecording(sessionDir: URL, micDeviceId: AudioDeviceID? = nil) async -> Bool {
         guard !isRecording else { return false }
 
-        // Check microphone permission BEFORE touching AVAudioEngine.
-        // Accessing engine.inputNode without permission causes a hard crash (ObjC exception).
+        // Check microphone permission BEFORE creating capture session.
         let micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
         switch micPermission {
         case .notDetermined:
@@ -323,74 +339,166 @@ class SessionRecorder: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Microphone (zero conversion — write at native format)
+    // MARK: - Microphone (AVCaptureSession — coexists with video calls)
 
     private func startMicrophoneCapture(sessionDir: URL, deviceId: AudioDeviceID? = nil) -> Bool {
-        var previousDefaultDevice: AudioDeviceID?
+        // If a specific device was requested, set it as default so
+        // AVCaptureDevice.default picks it up.
         if let deviceId {
             let currentDefault = AudioRecorder.getDefaultInputDeviceId()
             if currentDefault != deviceId {
-                previousDefaultDevice = currentDefault
                 AudioRecorder.setDefaultInputDevice(deviceId)
                 usleep(50_000)
             }
         }
 
-        micEngine = AVAudioEngine()
-        guard let engine = micEngine else {
-            if let prev = previousDefaultDevice { AudioRecorder.setDefaultInputDevice(prev) }
+        let session = AVCaptureSession()
+
+        guard let micDevice = AVCaptureDevice.default(for: .audio) else {
+            print("SessionRecorder: No mic device available")
             return false
         }
 
-        let inputNode = engine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-
-        // Create mic file at the NATIVE format — no conversion needed
-        guard let micURL = tempMicURL else { return false }
         do {
-            micFile = try AVAudioFile(
-                forWriting: micURL,
-                settings: inputFormat.settings,
-                commonFormat: inputFormat.commonFormat,
-                interleaved: inputFormat.isInterleaved
-            )
-            print("SessionRecorder: Mic file created (\(inputFormat))")
+            let input = try AVCaptureDeviceInput(device: micDevice)
+            guard session.canAddInput(input) else {
+                print("SessionRecorder: Cannot add mic input to capture session")
+                return false
+            }
+            session.addInput(input)
         } catch {
-            print("SessionRecorder: Failed to create mic audio file: \(error)")
+            print("SessionRecorder: Failed to create mic input: \(error)")
             return false
         }
 
-        // Install tap — write directly at native format, ZERO conversion
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-            guard let self else { return }
+        let audioOutput = AVCaptureAudioDataOutput()
+        audioOutput.setSampleBufferDelegate(self, queue: micCaptureQueue)
+        guard session.canAddOutput(audioOutput) else {
+            print("SessionRecorder: Cannot add audio output to capture session")
+            return false
+        }
+        session.addOutput(audioOutput)
 
-            self.updateMicVolume(from: buffer)
+        // Mic file created lazily from first buffer's format
+        micFramesWritten = 0
+        micFileCreated = false
 
-            // Write directly — no converter, no format change
-            guard let micFile = self.micFile else { return }
+        session.startRunning()
+        micCaptureSession = session
+
+        print("SessionRecorder: Mic capture started via AVCaptureSession (device: \(micDevice.localizedName))")
+        return true
+    }
+
+    /// Write mic audio from AVCaptureSession — same zero-conversion
+    /// pattern as system audio. File created lazily from first buffer.
+    private func handleMicBuffer(_ sampleBuffer: CMSampleBuffer) {
+        guard isRecording else { return }
+        guard let formatDesc = sampleBuffer.formatDescription else { return }
+        guard sampleBuffer.dataBuffer != nil else { return }
+
+        let sourceFormat = AVAudioFormat(cmAudioFormatDescription: formatDesc)
+        let frameCount = AVAudioFrameCount(sampleBuffer.numSamples)
+        guard frameCount > 0 else { return }
+
+        // Create mic file lazily from the first buffer's actual format
+        if !micFileCreated, let micURL = tempMicURL {
             do {
-                try micFile.write(from: buffer)
+                micFile = try AVAudioFile(
+                    forWriting: micURL,
+                    settings: sourceFormat.settings,
+                    commonFormat: sourceFormat.commonFormat,
+                    interleaved: sourceFormat.isInterleaved
+                )
+                micFileCreated = true
+                print("SessionRecorder: Mic file created from first buffer (\(sourceFormat))")
             } catch {
-                if self.isRecording {
-                    print("SessionRecorder: Mic write error: \(error)")
+                print("SessionRecorder: Failed to create mic file: \(error)")
+                return
+            }
+        }
+
+        // Copy CMSampleBuffer data into AVAudioPCMBuffer (just memcpy)
+        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: frameCount) else { return }
+        pcmBuffer.frameLength = frameCount
+
+        guard let blockBuffer = sampleBuffer.dataBuffer else { return }
+        var totalLength: Int = 0
+        var dataPointer: UnsafeMutablePointer<CChar>?
+
+        let status = CMBlockBufferGetDataPointer(
+            blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
+            totalLengthOut: &totalLength, dataPointerOut: &dataPointer
+        )
+        guard status == noErr, let dataPointer else { return }
+
+        let bytesToCopy = min(totalLength, Int(frameCount) * Int(sourceFormat.streamDescription.pointee.mBytesPerFrame))
+        if sourceFormat.isInterleaved {
+            if let channelData = pcmBuffer.floatChannelData {
+                memcpy(channelData[0], dataPointer, bytesToCopy)
+            }
+        } else {
+            let channels = Int(sourceFormat.channelCount)
+            let bytesPerChannel = Int(frameCount) * MemoryLayout<Float>.size
+            if let channelData = pcmBuffer.floatChannelData {
+                for ch in 0..<channels {
+                    let offset = ch * bytesPerChannel
+                    if offset + bytesPerChannel <= totalLength {
+                        memcpy(channelData[ch], dataPointer.advanced(by: offset), bytesPerChannel)
+                    }
                 }
             }
         }
 
+        // Adaptive mic gain — compensates for hardware gain changes
+        // (e.g. Google Meet lowering mic volume when joining a call).
+        // Targets a comfortable speech RMS (~0.05). Gain adjusts smoothly
+        // to avoid pumping artifacts: fast attack, slow release.
+        if let channelData = pcmBuffer.floatChannelData {
+            let frames = Int(pcmBuffer.frameLength)
+            let channels = Int(sourceFormat.channelCount)
+
+            // Calculate RMS from first channel
+            var sum: Float = 0
+            for i in 0..<frames { let s = channelData[0][i]; sum += s * s }
+            let rms = sqrt(sum / Float(max(frames, 1)))
+
+            // Adjust gain toward target RMS (only when speech detected)
+            let targetRMS: Float = 0.05
+            if rms > 0.002 {
+                let desiredGain = min(targetRMS / rms, 10.0)
+                let alpha: Float = desiredGain > micGain ? 0.3 : 0.05
+                micGain += alpha * (desiredGain - micGain)
+            }
+            micGain = max(micGain, 1.0) // Never go below unity
+
+            for ch in 0..<channels {
+                for i in 0..<frames {
+                    channelData[ch][i] = min(max(channelData[ch][i] * micGain, -1.0), 1.0)
+                }
+            }
+        }
+
+        // Update volume meter
+        updateMicVolume(from: pcmBuffer)
+
+        // Write directly — only this callback writes to micFile
+        guard let micFile else { return }
         do {
-            try engine.start()
-            print("SessionRecorder: Microphone capture started (native format)")
-            return true
+            try micFile.write(from: pcmBuffer)
+            micFramesWritten += Int64(frameCount)
         } catch {
-            print("SessionRecorder: Failed to start mic engine: \(error)")
-            return false
+            if isRecording {
+                print("SessionRecorder: Mic write error: \(error)")
+            }
         }
     }
 
     private func stopMicrophoneCapture() {
-        micEngine?.inputNode.removeTap(onBus: 0)
-        micEngine?.stop()
-        micEngine = nil
+        micCaptureSession?.stopRunning()
+        micCaptureSession = nil
+        micFileCreated = false
+        print("SessionRecorder: Mic stopped (total frames written: \(micFramesWritten))")
     }
 
     private func updateMicVolume(from buffer: AVAudioPCMBuffer) {
@@ -589,5 +697,15 @@ class SessionRecorder: NSObject, ObservableObject {
                 }
             }
         }
+    }
+}
+
+// MARK: - AVCaptureSession Mic Delegate
+
+extension SessionRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput,
+                       didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        handleMicBuffer(sampleBuffer)
     }
 }
