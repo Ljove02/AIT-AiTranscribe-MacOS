@@ -41,10 +41,15 @@ class SystemAudioCapture: NSObject, ObservableObject {
     /// Callback invoked with each audio buffer received from system audio
     var onAudioBuffer: ((CMSampleBuffer) -> Void)?
 
+    /// Callback invoked with each microphone buffer received from ScreenCaptureKit.
+    /// Available on macOS 15+ when captureMicrophone is enabled.
+    var onMicrophoneBuffer: ((CMSampleBuffer) -> Void)?
+
     // MARK: - Private
 
     private var stream: SCStream?
     private var streamOutput: AudioStreamOutput?
+    private var microphoneOutput: MicrophoneStreamOutput?
     private var videoOutput: VideoDiscardOutput?
 
     // MARK: - Permission Checking
@@ -93,10 +98,23 @@ class SystemAudioCapture: NSObject, ObservableObject {
 
     // MARK: - Capture Control
 
-    /// Start capturing system audio.
+    /// Start capturing system audio and/or microphone audio.
     /// - Returns: true if capture started, false if permission denied or error
-    func startCapture() async -> Bool {
+    func startCapture(
+        captureSystemAudio: Bool = true,
+        captureMicrophone: Bool = false,
+        microphoneCaptureDeviceID: String? = nil
+    ) async -> Bool {
         guard !isCapturing else { return false }
+        guard captureSystemAudio || captureMicrophone else {
+            print("SystemAudioCapture: No audio sources requested")
+            return false
+        }
+
+        if captureMicrophone, #unavailable(macOS 15.0) {
+            print("SystemAudioCapture: Microphone capture via ScreenCaptureKit requires macOS 15+")
+            return false
+        }
 
         // Check permission
         let hasPermission = await SystemAudioCapture.checkPermission()
@@ -119,10 +137,14 @@ class SystemAudioCapture: NSObject, ObservableObject {
 
             // Configure for audio-only capture
             let config = SCStreamConfiguration()
-            config.capturesAudio = true
+            config.capturesAudio = captureSystemAudio
             config.excludesCurrentProcessAudio = true  // Don't capture our own app's sounds
             config.sampleRate = 48000                   // ScreenCaptureKit native rate
             config.channelCount = 2                     // Stereo system audio
+            if #available(macOS 15.0, *), captureMicrophone {
+                config.captureMicrophone = true
+                config.microphoneCaptureDeviceID = microphoneCaptureDeviceID
+            }
 
             // Minimize video overhead since we don't need it
             config.width = 2
@@ -133,10 +155,21 @@ class SystemAudioCapture: NSObject, ObservableObject {
             // Create stream
             let stream = SCStream(filter: filter, configuration: config, delegate: nil)
 
-            // Audio output handler
+            // Audio output handlers
             let output = AudioStreamOutput()
             output.onAudioBuffer = { [weak self] sampleBuffer in
                 self?.onAudioBuffer?(sampleBuffer)
+            }
+
+            let microphoneOutput: MicrophoneStreamOutput?
+            if #available(macOS 15.0, *), captureMicrophone {
+                let micOutput = MicrophoneStreamOutput()
+                micOutput.onMicrophoneBuffer = { [weak self] sampleBuffer in
+                    self?.onMicrophoneBuffer?(sampleBuffer)
+                }
+                microphoneOutput = micOutput
+            } else {
+                microphoneOutput = nil
             }
 
             // Separate discard handler for video — using the same object for both
@@ -144,16 +177,29 @@ class SystemAudioCapture: NSObject, ObservableObject {
             // blocks audio when a video frame arrives and causes stuttering.
             let videoDiscard = VideoDiscardOutput()
 
-            try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: .global(qos: .userInitiated))
+            if captureSystemAudio {
+                try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: .global(qos: .userInitiated))
+            }
+            if let microphoneOutput, #available(macOS 15.0, *) {
+                try stream.addStreamOutput(microphoneOutput, type: .microphone, sampleHandlerQueue: .global(qos: .userInitiated))
+            }
             try stream.addStreamOutput(videoDiscard, type: .screen, sampleHandlerQueue: .global(qos: .background))
             try await stream.startCapture()
 
             self.stream = stream
             self.streamOutput = output
+            self.microphoneOutput = microphoneOutput
             self.videoOutput = videoDiscard
             self.isCapturing = true
 
-            print("SystemAudioCapture: Started capturing system audio (48kHz stereo)")
+            var sources: [String] = []
+            if captureSystemAudio {
+                sources.append("system audio")
+            }
+            if captureMicrophone {
+                sources.append("microphone")
+            }
+            print("SystemAudioCapture: Started capturing \(sources.joined(separator: " + "))")
             return true
 
         } catch {
@@ -174,6 +220,7 @@ class SystemAudioCapture: NSObject, ObservableObject {
 
         self.stream = nil
         self.streamOutput = nil
+        self.microphoneOutput = nil
         self.videoOutput = nil
         self.isCapturing = false
         print("SystemAudioCapture: Stopped")
@@ -193,6 +240,20 @@ private class AudioStreamOutput: NSObject, SCStreamOutput {
         guard sampleBuffer.isValid else { return }
 
         onAudioBuffer?(sampleBuffer)
+    }
+}
+
+/// Receives microphone sample buffers from ScreenCaptureKit
+@available(macOS 15.0, *)
+private class MicrophoneStreamOutput: NSObject, SCStreamOutput {
+
+    var onMicrophoneBuffer: ((CMSampleBuffer) -> Void)?
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .microphone else { return }
+        guard sampleBuffer.isValid else { return }
+
+        onMicrophoneBuffer?(sampleBuffer)
     }
 }
 

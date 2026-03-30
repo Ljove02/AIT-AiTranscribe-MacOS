@@ -343,6 +343,14 @@ class SessionManager: ObservableObject {
         print("SessionManager: Deleted session '\(session.name)'")
     }
 
+    /// Delete multiple sessions entirely.
+    func bulkDeleteSessions(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            deleteSession(id: id)
+        }
+    }
+
     /// Delete only the audio file for a session (keeps transcription)
     func deleteSessionAudio(id: UUID) {
         guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }

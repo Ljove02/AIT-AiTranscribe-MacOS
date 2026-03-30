@@ -810,7 +810,7 @@ class AppState: ObservableObject {
         }
 
         // Start Swift-native recording with selected device
-        if audioRecorder.startRecording(deviceId: selectedDeviceId) {
+        if await audioRecorder.startRecording(deviceId: selectedDeviceId) {
             isRecording = true
             isStreamingMode = false
             statusMessage = "Recording..."
@@ -947,7 +947,7 @@ class AppState: ObservableObject {
         incrementalTyper.reset()
 
         // Stop Swift AudioRecorder and get WAV data
-        guard let audioData = audioRecorder.stopRecording() else {
+        guard let audioData = await audioRecorder.stopRecording() else {
             isRecording = false
             statusMessage = "No audio recorded"
             recordingIndicator.hide()
@@ -1066,7 +1066,7 @@ class AppState: ObservableObject {
             isStreamingMode = false
         } else {
             // Cancel Swift AudioRecorder (no backend call needed)
-            audioRecorder.cancelRecording()
+            await audioRecorder.cancelRecording()
         }
 
         isRecording = false

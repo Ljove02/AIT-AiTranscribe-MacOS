@@ -5,6 +5,8 @@ import SwiftUI
 /// A card displaying a single session in the sessions list
 struct SessionCardView: View {
     let session: Session
+    var selectionMode = false
+    var isSelected = false
 
     private var statusColor: Color {
         switch session.status {
@@ -35,6 +37,12 @@ struct SessionCardView: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            if selectionMode {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 18))
+                    .foregroundColor(isSelected ? .accentColor : .secondary.opacity(0.8))
+            }
+
             // Audio icon
             Image(systemName: session.hasAudio ? "waveform" : "waveform.slash")
                 .font(.system(size: 16))
@@ -93,6 +101,10 @@ struct SessionCardView: View {
         .padding(.vertical, 10)
         .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(isSelected ? Color.accentColor.opacity(0.08) : Color.clear)
+        )
         .contentShape(Rectangle())
     }
 }

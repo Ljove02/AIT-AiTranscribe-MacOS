@@ -298,27 +298,28 @@ struct TestTranscriptionOnboardingView: View {
         recordingDuration = 0
         isRecording = true
         
-        // Start audio recorder
-        if appState.audioRecorder.startRecording() {
-            // Start duration timer
-            recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-                recordingDuration = appState.audioRecorder.duration
-                
-                // Check for silence (volume < 0.01 for 2 seconds)
-                if appState.audioRecorder.currentVolume < 0.01 {
-                    self.checkForSilence()
-                } else {
-                    // Reset silence tracking if sound detected
-                    self.silenceStartTime = nil
+        Task { @MainActor in
+            if await appState.audioRecorder.startRecording() {
+                // Start duration timer
+                recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+                    recordingDuration = appState.audioRecorder.duration
+
+                    // Check for silence (volume < 0.01 for 2 seconds)
+                    if appState.audioRecorder.currentVolume < 0.01 {
+                        self.checkForSilence()
+                    } else {
+                        // Reset silence tracking if sound detected
+                        self.silenceStartTime = nil
+                    }
+
+                    // Safety timeout at 30 seconds
+                    if recordingDuration >= 30.0 {
+                        stopRecording()
+                    }
                 }
-                
-                // Safety timeout at 30 seconds
-                if recordingDuration >= 30.0 {
-                    stopRecording()
-                }
+            } else {
+                isRecording = false
             }
-        } else {
-            isRecording = false
         }
     }
     
@@ -346,15 +347,19 @@ struct TestTranscriptionOnboardingView: View {
         isTranscribing = true
         
         // Get audio data from recorder
-        guard let data = appState.audioRecorder.stopRecording() else {
-            isTranscribing = false
-            return
-        }
-        
-        audioData = data
-        
-        // Transcribe
         Task {
+            guard let data = await appState.audioRecorder.stopRecording() else {
+                await MainActor.run {
+                    isTranscribing = false
+                }
+                return
+            }
+
+            await MainActor.run {
+                audioData = data
+            }
+
+            // Transcribe
             await transcribeAudio(data)
         }
     }

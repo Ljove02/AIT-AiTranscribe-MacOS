@@ -36,6 +36,241 @@ import Combine
 
 /// Records audio from the microphone using AVFoundation
 class AudioRecorder: NSObject, ObservableObject {
+    private static func fourCCString(_ value: OSType) -> String {
+        let bytes: [CChar] = [
+            CChar((value >> 24) & 0xFF),
+            CChar((value >> 16) & 0xFF),
+            CChar((value >> 8) & 0xFF),
+            CChar(value & 0xFF),
+            0
+        ]
+        return String(cString: bytes)
+    }
+
+    private static func canonicalPCMFormat(from formatDesc: CMAudioFormatDescription) -> AVAudioFormat? {
+        guard let asbdPointer = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
+            return nil
+        }
+
+        let asbd = asbdPointer.pointee
+        guard asbd.mFormatID == kAudioFormatLinearPCM,
+              asbd.mSampleRate > 0,
+              asbd.mChannelsPerFrame > 0 else {
+            return nil
+        }
+
+        let isFloat = (asbd.mFormatFlags & kLinearPCMFormatFlagIsFloat) != 0
+        let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+
+        let commonFormat: AVAudioCommonFormat
+        switch (isFloat, asbd.mBitsPerChannel) {
+        case (true, 32):
+            commonFormat = .pcmFormatFloat32
+        case (true, 64):
+            commonFormat = .pcmFormatFloat64
+        case (false, 16):
+            commonFormat = .pcmFormatInt16
+        case (false, 32):
+            commonFormat = .pcmFormatInt32
+        default:
+            return nil
+        }
+
+        return AVAudioFormat(
+            commonFormat: commonFormat,
+            sampleRate: asbd.mSampleRate,
+            channels: AVAudioChannelCount(asbd.mChannelsPerFrame),
+            interleaved: !isNonInterleaved
+        )
+    }
+
+    private static func stringProperty(
+        for deviceId: AudioDeviceID,
+        selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
+    ) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: CFString = "" as CFString
+        var size = UInt32(MemoryLayout<CFString>.size)
+        let status = AudioObjectGetPropertyData(deviceId, &address, 0, nil, &size, &value)
+        guard status == noErr else { return nil }
+        return value as String
+    }
+
+    static func getInputDeviceUID(_ deviceId: AudioDeviceID) -> String? {
+        stringProperty(for: deviceId, selector: kAudioDevicePropertyDeviceUID)
+    }
+
+    static func getInputDeviceName(_ deviceId: AudioDeviceID) -> String? {
+        stringProperty(for: deviceId, selector: kAudioDevicePropertyDeviceNameCFString)
+    }
+
+    static func captureDevice(for deviceId: AudioDeviceID?) -> AVCaptureDevice? {
+        let captureDevices = AVCaptureDevice.devices(for: .audio)
+        guard let deviceId else {
+            return AVCaptureDevice.default(for: .audio) ?? captureDevices.first
+        }
+
+        let targetUID = getInputDeviceUID(deviceId)
+        let targetName = getInputDeviceName(deviceId)
+
+        if let targetUID,
+           let matchingDevice = captureDevices.first(where: { $0.uniqueID == targetUID }) {
+            return matchingDevice
+        }
+
+        if let targetName,
+           let matchingDevice = captureDevices.first(where: { $0.localizedName == targetName }) {
+            return matchingDevice
+        }
+
+        return AVCaptureDevice.default(for: .audio) ?? captureDevices.first
+    }
+
+    private func copyPCMData(from sampleBuffer: CMSampleBuffer,
+                             frameCount: AVAudioFrameCount,
+                             into pcmBuffer: AVAudioPCMBuffer) -> Bool {
+        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer,
+            at: 0,
+            frameCount: Int32(frameCount),
+            into: pcmBuffer.mutableAudioBufferList
+        )
+        guard status == noErr else {
+            print("AudioRecorder: Failed to copy PCM data: \(status)")
+            return false
+        }
+        return true
+    }
+
+    private func normalizeMicBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
+        guard let formatDesc = sampleBuffer.formatDescription else { return nil }
+        let mediaSubType = CMFormatDescriptionGetMediaSubType(formatDesc)
+        guard mediaSubType == kAudioFormatLinearPCM else {
+            let fourCC = Self.fourCCString(mediaSubType)
+            print("AudioRecorder: Unsupported mic buffer format: \(fourCC)")
+            return nil
+        }
+        guard let sourceFormat = Self.canonicalPCMFormat(from: formatDesc) else {
+            print("AudioRecorder: Failed to canonicalize mic PCM format")
+            return nil
+        }
+
+        let frameCount = AVAudioFrameCount(sampleBuffer.numSamples)
+        guard frameCount > 0 else { return nil }
+        guard let sourcePCM = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: frameCount) else { return nil }
+        sourcePCM.frameLength = frameCount
+
+        guard copyPCMData(from: sampleBuffer, frameCount: frameCount, into: sourcePCM) else { return nil }
+
+        if sourceFormat.commonFormat == .pcmFormatFloat32, !sourceFormat.isInterleaved {
+            return sourcePCM
+        }
+
+        guard let normalizedFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sourceFormat.sampleRate,
+            channels: sourceFormat.channelCount,
+            interleaved: false
+        ) else {
+            return nil
+        }
+        guard let normalizedPCM = AVAudioPCMBuffer(pcmFormat: normalizedFormat, frameCapacity: frameCount),
+              let normalizedChannelData = normalizedPCM.floatChannelData else {
+            return nil
+        }
+        normalizedPCM.frameLength = frameCount
+
+        let frames = Int(frameCount)
+        let channels = Int(sourceFormat.channelCount)
+        let sourceBuffers = UnsafeMutableAudioBufferListPointer(sourcePCM.mutableAudioBufferList)
+
+        func clamp(_ value: Float) -> Float {
+            min(max(value, -1.0), 1.0)
+        }
+
+        switch sourceFormat.commonFormat {
+        case .pcmFormatFloat32:
+            if sourceFormat.isInterleaved {
+                guard let rawData = sourceBuffers[0].mData?.assumingMemoryBound(to: Float.self) else { return nil }
+                for frame in 0..<frames {
+                    let baseIndex = frame * channels
+                    for channel in 0..<channels {
+                        normalizedChannelData[channel][frame] = clamp(rawData[baseIndex + channel])
+                    }
+                }
+            } else {
+                for channel in 0..<channels {
+                    guard let rawData = sourceBuffers[channel].mData?.assumingMemoryBound(to: Float.self) else { return nil }
+                    for frame in 0..<frames {
+                        normalizedChannelData[channel][frame] = clamp(rawData[frame])
+                    }
+                }
+            }
+        case .pcmFormatFloat64:
+            if sourceFormat.isInterleaved {
+                guard let rawData = sourceBuffers[0].mData?.assumingMemoryBound(to: Double.self) else { return nil }
+                for frame in 0..<frames {
+                    let baseIndex = frame * channels
+                    for channel in 0..<channels {
+                        normalizedChannelData[channel][frame] = clamp(Float(rawData[baseIndex + channel]))
+                    }
+                }
+            } else {
+                for channel in 0..<channels {
+                    guard let rawData = sourceBuffers[channel].mData?.assumingMemoryBound(to: Double.self) else { return nil }
+                    for frame in 0..<frames {
+                        normalizedChannelData[channel][frame] = clamp(Float(rawData[frame]))
+                    }
+                }
+            }
+        case .pcmFormatInt16:
+            let scale = Float(Int16.max)
+            if sourceFormat.isInterleaved {
+                guard let rawData = sourceBuffers[0].mData?.assumingMemoryBound(to: Int16.self) else { return nil }
+                for frame in 0..<frames {
+                    let baseIndex = frame * channels
+                    for channel in 0..<channels {
+                        normalizedChannelData[channel][frame] = clamp(Float(rawData[baseIndex + channel]) / scale)
+                    }
+                }
+            } else {
+                for channel in 0..<channels {
+                    guard let rawData = sourceBuffers[channel].mData?.assumingMemoryBound(to: Int16.self) else { return nil }
+                    for frame in 0..<frames {
+                        normalizedChannelData[channel][frame] = clamp(Float(rawData[frame]) / scale)
+                    }
+                }
+            }
+        case .pcmFormatInt32:
+            let scale = Float(Int32.max)
+            if sourceFormat.isInterleaved {
+                guard let rawData = sourceBuffers[0].mData?.assumingMemoryBound(to: Int32.self) else { return nil }
+                for frame in 0..<frames {
+                    let baseIndex = frame * channels
+                    for channel in 0..<channels {
+                        normalizedChannelData[channel][frame] = clamp(Float(rawData[baseIndex + channel]) / scale)
+                    }
+                }
+            } else {
+                for channel in 0..<channels {
+                    guard let rawData = sourceBuffers[channel].mData?.assumingMemoryBound(to: Int32.self) else { return nil }
+                    for frame in 0..<frames {
+                        normalizedChannelData[channel][frame] = clamp(Float(rawData[frame]) / scale)
+                    }
+                }
+            }
+        default:
+            return nil
+        }
+
+        return normalizedPCM
+    }
+
 
     // MARK: - Published State
 
@@ -54,6 +289,11 @@ class AudioRecorder: NSObject, ObservableObject {
     /// video call apps that use Voice Processing AudioUnits.
     private var captureSession: AVCaptureSession?
     private let captureQueue = DispatchQueue(label: "com.aitranscribe.audio-capture")
+    private let compatibilityMicCapture = CoreAudioMicrophoneCapture(queueLabel: "com.aitranscribe.audioqueue-mic")
+    private var usingCompatibilityMicrophone = false
+    private var fallbackMonitorTask: Task<Void, Never>?
+    private var recordingToken = UUID()
+    private var micCallbackCount: Int64 = 0
 
     /// Converts native mic format to 16kHz mono for speech recognition
     private var audioConverter: AVAudioConverter?
@@ -76,6 +316,14 @@ class AudioRecorder: NSObject, ObservableObject {
     /// Audio format for recording (16kHz mono float32)
     private var recordingFormat: AVAudioFormat?
 
+    /// Request native Linear PCM from AVCapture. We deliberately avoid
+    /// forcing float/non-interleaved output because video-call apps can
+    /// expose voice-processed telephony formats that normalize more
+    /// reliably when we preserve their native PCM layout first.
+    private let captureAudioSettings: [String: Any] = [
+        AVFormatIDKey: kAudioFormatLinearPCM,
+    ]
+
     // MARK: - Initialization
 
     override init() {
@@ -94,7 +342,7 @@ class AudioRecorder: NSObject, ObservableObject {
     /// Start recording audio with an optional specific device
     /// - Parameter deviceId: CoreAudio AudioDeviceID to record from. If nil, uses system default.
     /// - Returns: True if recording started successfully
-    func startRecording(deviceId: AudioDeviceID? = nil) -> Bool {
+    func startRecording(deviceId: AudioDeviceID? = nil) async -> Bool {
         guard !isRecording else { return false }
 
         // Clear previous recording
@@ -103,15 +351,9 @@ class AudioRecorder: NSObject, ObservableObject {
         micGain = 2.0
         currentVolume = 0.0
         duration = 0.0
-
-        // If a specific device is requested, set it as the system default
-        if let deviceId = deviceId {
-            let currentDefault = AudioRecorder.getDefaultInputDeviceId()
-            if currentDefault != deviceId {
-                AudioRecorder.setDefaultInputDevice(deviceId)
-                usleep(50_000)
-            }
-        }
+        micCallbackCount = 0
+        fallbackMonitorTask?.cancel()
+        recordingToken = UUID()
 
         // Create our target format (16kHz mono for speech recognition)
         guard let targetFormat = AVAudioFormat(
@@ -128,7 +370,7 @@ class AudioRecorder: NSObject, ObservableObject {
         // Setup AVCaptureSession
         let session = AVCaptureSession()
 
-        guard let micDevice = AVCaptureDevice.default(for: .audio) else {
+        guard let micDevice = AudioRecorder.captureDevice(for: deviceId) else {
             print("AudioRecorder: No mic device available")
             return false
         }
@@ -146,6 +388,7 @@ class AudioRecorder: NSObject, ObservableObject {
         }
 
         let audioOutput = AVCaptureAudioDataOutput()
+        audioOutput.audioSettings = captureAudioSettings
         audioOutput.setSampleBufferDelegate(self, queue: captureQueue)
         guard session.canAddOutput(audioOutput) else {
             print("AudioRecorder: Cannot add audio output")
@@ -155,18 +398,19 @@ class AudioRecorder: NSObject, ObservableObject {
 
         session.startRunning()
         captureSession = session
+        usingCompatibilityMicrophone = false
         isRecording = true
         startTime = Date()
+        startDurationTimer()
+        scheduleCompatibilityFallback(recordingToken: recordingToken, deviceId: deviceId)
 
-        // Start duration timer
-        durationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self = self, let start = self.startTime else { return }
-            DispatchQueue.main.async {
-                self.duration = Date().timeIntervalSince(start)
-            }
+        if let deviceId {
+            let coreAudioName = AudioRecorder.getInputDeviceName(deviceId) ?? "unknown"
+            let coreAudioUID = AudioRecorder.getInputDeviceUID(deviceId) ?? "unknown"
+            print("AudioRecorder: Started via AVCaptureSession (CoreAudio: \(coreAudioName) [\(deviceId)] / UID: \(coreAudioUID), capture: \(micDevice.localizedName) / \(micDevice.uniqueID))")
+        } else {
+            print("AudioRecorder: Started via AVCaptureSession (device: \(micDevice.localizedName) / \(micDevice.uniqueID))")
         }
-
-        print("AudioRecorder: Started via AVCaptureSession (device: \(micDevice.localizedName))")
         return true
     }
 
@@ -203,16 +447,22 @@ class AudioRecorder: NSObject, ObservableObject {
 
     /// Stop recording and return audio data
     /// - Returns: Audio data as WAV format, or nil if no audio
-    func stopRecording() -> Data? {
+    func stopRecording() async -> Data? {
         guard isRecording else { return nil }
 
         // Stop timer
         durationTimer?.invalidate()
         durationTimer = nil
+        fallbackMonitorTask?.cancel()
+        fallbackMonitorTask = nil
 
-        // Stop capture session
-        captureSession?.stopRunning()
-        captureSession = nil
+        if usingCompatibilityMicrophone {
+            compatibilityMicCapture.stop()
+            usingCompatibilityMicrophone = false
+        } else {
+            captureSession?.stopRunning()
+            captureSession = nil
+        }
         audioConverter = nil
 
         isRecording = false
@@ -249,17 +499,92 @@ class AudioRecorder: NSObject, ObservableObject {
     }
 
     /// Cancel recording without returning data
-    func cancelRecording() {
+    func cancelRecording() async {
         durationTimer?.invalidate()
         durationTimer = nil
+        fallbackMonitorTask?.cancel()
+        fallbackMonitorTask = nil
 
-        captureSession?.stopRunning()
-        captureSession = nil
+        if usingCompatibilityMicrophone {
+            compatibilityMicCapture.stop()
+            usingCompatibilityMicrophone = false
+        } else {
+            captureSession?.stopRunning()
+            captureSession = nil
+        }
         audioConverter = nil
 
         isRecording = false
         currentVolume = 0.0
         recordedBuffers.removeAll()
+    }
+
+    private func startDurationTimer() {
+        durationTimer?.invalidate()
+        durationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self, let start = self.startTime else { return }
+            DispatchQueue.main.async {
+                self.duration = Date().timeIntervalSince(start)
+            }
+        }
+    }
+
+    private func scheduleCompatibilityFallback(recordingToken: UUID, deviceId: AudioDeviceID?) {
+        fallbackMonitorTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard let self else { return }
+            guard !Task.isCancelled else { return }
+            guard self.recordingToken == recordingToken else { return }
+            guard self.isRecording, !self.usingCompatibilityMicrophone else { return }
+            guard self.captureSession != nil else { return }
+
+            if self.micCallbackCount == 0 {
+                print("AudioRecorder: No AVCapture microphone callbacks detected, switching to CoreAudio microphone compatibility path")
+                let started = await self.switchToCompatibilityMicrophone(deviceId: deviceId)
+                if started {
+                    print("AudioRecorder: Compatibility microphone fallback enabled")
+                } else {
+                    print("AudioRecorder: Compatibility microphone fallback failed")
+                }
+            }
+        }
+    }
+
+    private func switchToCompatibilityMicrophone(deviceId: AudioDeviceID?) async -> Bool {
+        guard isRecording, !usingCompatibilityMicrophone else { return false }
+
+        let started = startCompatibilityMicrophone(deviceId: deviceId)
+        guard started else { return false }
+
+        captureSession?.stopRunning()
+        captureSession = nil
+        audioConverter = nil
+        micCallbackCount = 0
+
+        usingCompatibilityMicrophone = true
+        return true
+    }
+
+    private func startCompatibilityMicrophone(deviceId: AudioDeviceID?) -> Bool {
+        compatibilityMicCapture.onBuffer = { [weak self] buffer in
+            self?.handleNormalizedMicBuffer(buffer)
+        }
+
+        let started = compatibilityMicCapture.start(deviceId: deviceId)
+        guard started else { return false }
+
+        if let deviceId,
+           let micDevice = AudioRecorder.captureDevice(for: deviceId),
+           let coreAudioUID = AudioRecorder.getInputDeviceUID(deviceId) {
+            let coreAudioName = AudioRecorder.getInputDeviceName(deviceId) ?? "unknown"
+            print("AudioRecorder: Started via CoreAudio AudioQueue microphone (CoreAudio: \(coreAudioName) [\(deviceId)] / UID: \(coreAudioUID), capture: \(micDevice.localizedName) / \(micDevice.uniqueID))")
+        } else if let micDevice = AudioRecorder.captureDevice(for: deviceId) {
+            print("AudioRecorder: Started via CoreAudio AudioQueue microphone (device: \(micDevice.localizedName) / \(micDevice.uniqueID))")
+        } else {
+            print("AudioRecorder: Started via CoreAudio AudioQueue microphone (system default device)")
+        }
+
+        return true
     }
 
     // MARK: - WAV Conversion
@@ -502,47 +827,24 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        guard isRecording else { return }
-        guard let formatDesc = sampleBuffer.formatDescription else { return }
+        handleMicSampleBuffer(sampleBuffer)
+    }
 
-        let sourceFormat = AVAudioFormat(cmAudioFormatDescription: formatDesc)
-        let frameCount = AVAudioFrameCount(sampleBuffer.numSamples)
-        guard frameCount > 0 else { return }
+    private func handleMicSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+        guard isRecording else { return }
+        guard let sourcePCM = normalizeMicBuffer(from: sampleBuffer) else { return }
+        handleNormalizedMicBuffer(sourcePCM)
+    }
+
+    private func handleNormalizedMicBuffer(_ sourcePCM: AVAudioPCMBuffer) {
+        guard isRecording else { return }
+        micCallbackCount += 1
+        let sourceFormat = sourcePCM.format
+        let frameCount = sourcePCM.frameLength
 
         // Create converter lazily from first buffer's format
         if audioConverter == nil, let targetFormat = recordingFormat {
             audioConverter = AVAudioConverter(from: sourceFormat, to: targetFormat)
-        }
-
-        // Convert CMSampleBuffer → AVAudioPCMBuffer (memcpy, no conversion)
-        guard let sourcePCM = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: frameCount) else { return }
-        sourcePCM.frameLength = frameCount
-
-        guard let blockBuffer = sampleBuffer.dataBuffer else { return }
-        var totalLength: Int = 0
-        var dataPointer: UnsafeMutablePointer<CChar>?
-        let status = CMBlockBufferGetDataPointer(
-            blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
-            totalLengthOut: &totalLength, dataPointerOut: &dataPointer
-        )
-        guard status == noErr, let dataPointer else { return }
-
-        let bytesToCopy = min(totalLength, Int(frameCount) * Int(sourceFormat.streamDescription.pointee.mBytesPerFrame))
-        if sourceFormat.isInterleaved {
-            if let channelData = sourcePCM.floatChannelData {
-                memcpy(channelData[0], dataPointer, bytesToCopy)
-            }
-        } else {
-            let channels = Int(sourceFormat.channelCount)
-            let bytesPerChannel = Int(frameCount) * MemoryLayout<Float>.size
-            if let channelData = sourcePCM.floatChannelData {
-                for ch in 0..<channels {
-                    let offset = ch * bytesPerChannel
-                    if offset + bytesPerChannel <= totalLength {
-                        memcpy(channelData[ch], dataPointer.advanced(by: offset), bytesPerChannel)
-                    }
-                }
-            }
         }
 
         // Adaptive mic gain — targets consistent RMS regardless of
@@ -579,18 +881,194 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
             guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputFrameCount) else { return }
 
             var error: NSError?
+            var providedInput = false
             let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+                if providedInput {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                providedInput = true
                 outStatus.pointee = .haveData
                 return sourcePCM
             }
-            converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
+            let status = converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
 
-            if error == nil {
+            if let error {
+                print("AudioRecorder: Target conversion failed: \(error.localizedDescription)")
+            } else if convertedBuffer.frameLength > 0 {
                 processAudioBuffer(convertedBuffer)
+            } else {
+                print("AudioRecorder: Target conversion produced no frames (status: \(status))")
             }
         } else {
             processAudioBuffer(sourcePCM)
         }
+    }
+}
+
+final class CoreAudioMicrophoneCapture {
+    var onBuffer: ((AVAudioPCMBuffer) -> Void)?
+
+    private let callbackQueue: DispatchQueue
+    private var audioQueue: AudioQueueRef?
+    private var audioQueueBuffers: [AudioQueueBufferRef] = []
+    private var streamDescription: AudioStreamBasicDescription?
+
+    init(queueLabel: String) {
+        self.callbackQueue = DispatchQueue(label: queueLabel)
+    }
+
+    deinit {
+        stop()
+    }
+
+    var outputFormatSummary: String? {
+        guard let streamDescription else { return nil }
+        return "sampleRate=\(streamDescription.mSampleRate), channels=\(streamDescription.mChannelsPerFrame), commonFormat=float32, interleaved=false (AudioQueue int16 input)"
+    }
+
+    func start(deviceId: AudioDeviceID?) -> Bool {
+        stop()
+
+        let candidateFormats = [
+            Self.makeStreamDescription(sampleRate: 48_000, channels: 1),
+            Self.makeStreamDescription(sampleRate: 48_000, channels: 2),
+        ]
+
+        var queue: AudioQueueRef?
+        var activeDescription: AudioStreamBasicDescription?
+
+        for var candidate in candidateFormats {
+            let status = AudioQueueNewInputWithDispatchQueue(&queue, &candidate, 0, callbackQueue) { [weak self] inAQ, inBuffer, _, _, _ in
+                self?.handleInputBuffer(queue: inAQ, buffer: inBuffer)
+            }
+            if status == noErr, let queue {
+                activeDescription = candidate
+                self.audioQueue = queue
+                break
+            }
+        }
+
+        guard let audioQueue, let activeDescription else {
+            print("CoreAudioMicrophoneCapture: Failed to create input queue")
+            return false
+        }
+
+        if let deviceId, let deviceUID = AudioRecorder.getInputDeviceUID(deviceId) {
+            var deviceUIDRef: CFString = deviceUID as CFString
+            let status = withUnsafePointer(to: &deviceUIDRef) { pointer in
+                AudioQueueSetProperty(
+                    audioQueue,
+                    kAudioQueueProperty_CurrentDevice,
+                    pointer,
+                    UInt32(MemoryLayout<CFString>.size)
+                )
+            }
+            if status != noErr {
+                print("CoreAudioMicrophoneCapture: Failed to bind input queue to device UID \(deviceUID): \(status)")
+            }
+        }
+
+        streamDescription = activeDescription
+
+        let framesPerBuffer = max(UInt32(activeDescription.mSampleRate / 10.0), 2_048)
+        let bufferByteSize = max(framesPerBuffer * activeDescription.mBytesPerFrame, 4_096)
+
+        for _ in 0..<4 {
+            var bufferRef: AudioQueueBufferRef?
+            let allocateStatus = AudioQueueAllocateBuffer(audioQueue, bufferByteSize, &bufferRef)
+            guard allocateStatus == noErr, let bufferRef else {
+                print("CoreAudioMicrophoneCapture: Failed to allocate input buffer: \(allocateStatus)")
+                stop()
+                return false
+            }
+
+            let enqueueStatus = AudioQueueEnqueueBuffer(audioQueue, bufferRef, 0, nil)
+            guard enqueueStatus == noErr else {
+                print("CoreAudioMicrophoneCapture: Failed to enqueue input buffer: \(enqueueStatus)")
+                stop()
+                return false
+            }
+
+            audioQueueBuffers.append(bufferRef)
+        }
+
+        let startStatus = AudioQueueStart(audioQueue, nil)
+        guard startStatus == noErr else {
+            print("CoreAudioMicrophoneCapture: Failed to start input queue: \(startStatus)")
+            stop()
+            return false
+        }
+
+        return true
+    }
+
+    func stop() {
+        guard let audioQueue else { return }
+        AudioQueueStop(audioQueue, true)
+        AudioQueueDispose(audioQueue, true)
+        self.audioQueue = nil
+        self.audioQueueBuffers.removeAll()
+        self.streamDescription = nil
+    }
+
+    private func handleInputBuffer(queue: AudioQueueRef, buffer: AudioQueueBufferRef) {
+        defer {
+            let status = AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
+            if status != noErr {
+                print("CoreAudioMicrophoneCapture: Failed to re-enqueue input buffer: \(status)")
+            }
+        }
+
+        let byteCount = Int(buffer.pointee.mAudioDataByteSize)
+        guard byteCount > 0, let streamDescription else { return }
+        let inputData = buffer.pointee.mAudioData.assumingMemoryBound(to: Int16.self)
+
+        let channels = Int(max(streamDescription.mChannelsPerFrame, 1))
+        let samplesPerBuffer = byteCount / MemoryLayout<Int16>.size
+        let frameCount = samplesPerBuffer / channels
+        guard frameCount > 0 else { return }
+
+        guard let outputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: streamDescription.mSampleRate,
+            channels: AVAudioChannelCount(channels),
+            interleaved: false
+        ),
+        let pcmBuffer = AVAudioPCMBuffer(
+            pcmFormat: outputFormat,
+            frameCapacity: AVAudioFrameCount(frameCount)
+        ),
+        let floatChannelData = pcmBuffer.floatChannelData else {
+            return
+        }
+
+        pcmBuffer.frameLength = AVAudioFrameCount(frameCount)
+        let scale = Float(Int16.max)
+
+        for frame in 0..<frameCount {
+            let baseIndex = frame * channels
+            for channel in 0..<channels {
+                let sample = Float(inputData[baseIndex + channel]) / scale
+                floatChannelData[channel][frame] = min(max(sample, -1.0), 1.0)
+            }
+        }
+
+        onBuffer?(pcmBuffer)
+    }
+
+    private static func makeStreamDescription(sampleRate: Double, channels: UInt32) -> AudioStreamBasicDescription {
+        AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: channels * UInt32(MemoryLayout<Int16>.size),
+            mFramesPerPacket: 1,
+            mBytesPerFrame: channels * UInt32(MemoryLayout<Int16>.size),
+            mChannelsPerFrame: channels,
+            mBitsPerChannel: 16,
+            mReserved: 0
+        )
     }
 }
 
