@@ -6,221 +6,181 @@ struct ModelsSettingsView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var backendManager: BackendManager
 
-    /// Real-time streaming - output text at cursor position as you speak
+    let hasAnimated: Bool
+    let onAnimated: () -> Void
+
+    /// Real-time streaming toggle
     @AppStorage("realTimeStreaming") private var realTimeStreaming = false
 
-    /// Sort option for models
-    @State private var sortBy: ModelSortOption = .none
+    /// Current mode: speech-to-text or summarization
+    @State private var selectedMode: ModelMode = .speechToText
+
+    /// Filter for model list
+    @State private var selectedFilter: ModelFilter = .all
+
+    /// Search query
+    @State private var searchQuery = ""
 
     /// Show NeMo setup sheet
     @State private var showingNemoSetup = false
 
-    /// Whether we're still checking NeMo status (prevents false "Install NeMo" display)
+    /// Show Summary runtime setup sheet
+    @State private var showingSummarySetup = false
+
+    /// Whether we're still checking NeMo status
     @State private var isCheckingNemoStatus = true
 
-    /// Computed property for effective NeMo availability
-    /// - In development mode: trust backend's nemoAvailable (devs may have NeMo in main env)
-    /// - In production mode: require user to install via UI (nemoVenvExists)
+    /// Animation state — init from hasAnimated so first frame is correct
+    @State private var appeared: Bool
+
+    init(hasAnimated: Bool, onAnimated: @escaping () -> Void) {
+        self.hasAnimated = hasAnimated
+        self.onAnimated = onAnimated
+        _appeared = State(initialValue: hasAnimated)
+    }
+
+    // MARK: - Computed
+
     private var effectiveNemoAvailable: Bool {
-        appState.nemoVenvExists || (appState.backendMode == "development" && appState.nemoAvailable)
+        // Trust the backend's nemoAvailable flag (it knows if NeMo actually works)
+        // OR check if the venv exists locally (production install)
+        // OR if a NeMo model is currently loaded (proof it works)
+        appState.nemoAvailable || appState.nemoVenvExists || nemoModelIsLoaded
     }
 
-    /// Sort options for models
-    enum ModelSortOption: String, CaseIterable {
-        case none = "None"
-        case speed = "Speed"
-        case accuracy = "Accuracy"
+    /// If a NeMo model is loaded, NeMo is definitively available
+    private var nemoModelIsLoaded: Bool {
+        guard let loadedId = appState.loadedModelId else { return false }
+        return appState.availableModels.first(where: { $0.id == loadedId })?.nemoRequired == true
     }
 
-    /// Helper to get performance metrics for sorting
-    private func getPerformanceMetrics(for model: ModelInfoResponse) -> (speed: Double, accuracy: Double) {
-        switch model.id {
-        case "parakeet-tdt-v2", "parakeet-v2":
-            return (speed: 0.95, accuracy: 0.85)
-        case "parakeet-tdt-v3", "parakeet-v3":
-            return (speed: 0.85, accuracy: 0.85)
-        case "nemotron-streaming":
-            return (speed: 1.00, accuracy: 0.70)
-        case "whisper-base-en", "base.en":
-            return (speed: 1.00, accuracy: 0.60)
-        case "whisper-small-en", "small.en":
-            return (speed: 0.92, accuracy: 0.65)
-        case "whisper-large-v3-turbo", "large-v3-turbo":
-            return (speed: 0.85, accuracy: 0.90)
-        case "whisper-large-v3", "large-v3":
-            return (speed: 0.80, accuracy: 0.98)
-        default:
-            return (speed: 0.70, accuracy: 0.75)
+    private var downloadedSTTModels: [ModelInfoResponse] {
+        appState.availableModels.filter { $0.downloaded }
+    }
+
+    private var totalSTTSizeMB: Int {
+        downloadedSTTModels.reduce(0) { $0 + $1.sizeMB }
+    }
+
+    /// Filter + search speech-to-text models
+    private var filteredModels: [ModelInfoResponse] {
+        var models = appState.availableModels
+
+        // Apply filter
+        switch selectedFilter {
+        case .all:
+            break
+        case .recommended:
+            models = models.filter { isRecommended($0) }
+        case .downloaded:
+            models = models.filter { $0.downloaded }
         }
-    }
 
-    /// Sort models based on selected option
-    private func sortedModels(_ models: [ModelInfoResponse]) -> [ModelInfoResponse] {
-        switch sortBy {
-        case .none:
-            return models
-        case .speed:
-            return models.sorted { getPerformanceMetrics(for: $0).speed > getPerformanceMetrics(for: $1).speed }
-        case .accuracy:
-            return models.sorted { getPerformanceMetrics(for: $0).accuracy > getPerformanceMetrics(for: $1).accuracy }
+        // Apply search
+        if !searchQuery.isEmpty {
+            models = models.filter {
+                $0.displayName.localizedCaseInsensitiveContains(searchQuery) ||
+                $0.author.localizedCaseInsensitiveContains(searchQuery) ||
+                $0.description.localizedCaseInsensitiveContains(searchQuery)
+            }
         }
+
+        return models
     }
 
-    /// Group models by streaming capability and author
-    var streamingModels: [ModelInfoResponse] {
-        sortedModels(appState.availableModels.filter { $0.streamingNative })
+    /// Group filtered models by category
+    private var streamingModels: [ModelInfoResponse] {
+        filteredModels.filter { $0.streamingNative }
     }
 
-    var nvidiaModels: [ModelInfoResponse] {
-        sortedModels(appState.availableModels.filter { $0.author == "NVIDIA" && !$0.streamingNative })
+    private var nvidiaModels: [ModelInfoResponse] {
+        filteredModels.filter { $0.author == "NVIDIA" && !$0.streamingNative }
     }
 
-    var openaiModels: [ModelInfoResponse] {
-        sortedModels(appState.availableModels.filter { $0.author == "OpenAI" })
+    private var openaiModels: [ModelInfoResponse] {
+        filteredModels.filter { $0.author == "OpenAI" }
     }
 
-    /// All models sorted when sort is active
-    var allSortedModels: [ModelInfoResponse] {
-        sortedModels(appState.availableModels)
+    private var summaryModels: [SummaryModelInfoResponse] {
+        appState.availableSummaryModels
     }
+
+    private func isRecommended(_ model: ModelInfoResponse) -> Bool {
+        ["parakeet-tdt-v2", "parakeet-v2", "whisper-large-v3-turbo", "large-v3-turbo", "nemotron-streaming"].contains(model.id)
+    }
+
+    // MARK: - Body
 
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
-                // Header
-                HStack {
-                    Text("Speech-to-Text Models")
-                        .font(.headline)
-                    Spacer()
-
-                    // Sort picker
-                    HStack(spacing: 6) {
-                        Text("Sort by:")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Picker("", selection: $sortBy) {
-                            ForEach(ModelSortOption.allCases, id: \.self) { option in
-                                Text(option.rawValue).tag(option)
-                            }
+                // Top: storage bar + support pills
+                ModelsHeaderBar(
+                    downloadedCount: downloadedSTTModels.count,
+                    totalCount: appState.availableModels.count,
+                    totalSizeMB: totalSTTSizeMB,
+                    nemoAvailable: effectiveNemoAvailable,
+                    isCheckingNemo: isCheckingNemoStatus,
+                    summaryInstalled: appState.summaryRuntimeInstalled,
+                    summaryReady: appState.summaryRuntimeReady,
+                    onNemoTap: { showingNemoSetup = true },
+                    onSummaryTap: { showingSummarySetup = true },
+                    onRefresh: {
+                        Task {
+                            await appState.fetchAvailableModels()
+                            await appState.fetchSummaryModels()
                         }
-                        .pickerStyle(.menu)
-                        .frame(width: 100)
                     }
+                )
+                .staggerIn(index: 0, appeared: appeared)
 
-                    Button {
-                        Task { await appState.fetchAvailableModels() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.plain)
-                    .help("Refresh models")
-                }
-                .padding()
+                // Mode switcher
+                ModeSwitcher(selectedMode: $selectedMode)
+                    .padding(.top, 16)
+                    .staggerIn(index: 1, appeared: appeared)
 
-                Divider()
+                SettingsDivider()
+                    .padding(.top, 12)
+                    .staggerIn(index: 2, appeared: appeared)
 
-                // Show loading indicator only if models are empty AND server is connected
-                if appState.availableModels.isEmpty {
-                    if appState.isServerConnected {
-                        VStack(spacing: 12) {
-                            ProgressView()
-                            Text("Loading models...")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 40)
-                    } else {
-                        VStack(spacing: 12) {
-                            ProgressView()
-                                .scaleEffect(1.2)
-                            Text("Server Starting...")
-                                .font(.headline)
-                            Text("Models will appear once the backend is ready.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 40)
-                    }
+                // Content based on selected mode
+                if selectedMode == .speechToText {
+                    speechToTextContent
                 } else {
-                    // Model cards - either grouped or flat sorted list
-                    VStack(spacing: 16) {
-                        if sortBy == .none {
-                            // Grouped sections (original behavior)
-                            if !streamingModels.isEmpty {
-                                modelSection(
-                                    title: "Real-Time Streaming",
-                                    subtitle: "Optimized for live transcription with sub-100ms latency",
-                                    models: streamingModels
-                                )
-                            }
-
-                            if !nvidiaModels.isEmpty {
-                                modelSection(
-                                    title: "NVIDIA Parakeet",
-                                    subtitle: "High accuracy batch transcription",
-                                    models: nvidiaModels
-                                )
-                            }
-
-                            if !openaiModels.isEmpty {
-                                modelSection(
-                                    title: "OpenAI Whisper",
-                                    subtitle: "Versatile multilingual transcription",
-                                    models: openaiModels
-                                )
-                            }
-                        } else {
-                            // Flat sorted list when sorting is active
-                            modelSection(
-                                title: sortBy == .speed ? "All Models (Sorted by Speed)" : "All Models (Sorted by Accuracy)",
-                                subtitle: sortBy == .speed ? "Fastest to slowest" : "Highest to lowest accuracy",
-                                models: allSortedModels
-                            )
-                        }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 12)
-                    .padding(.trailing, 4)
+                    summarizationContent
                 }
 
-                Divider()
-
-                // NeMo status section
-                nemoStatusSection
-
-                Divider()
-
-                // Storage info footer
-                storageFooter
+                Spacer(minLength: 20)
             }
+            .padding(.horizontal, 28)
+            .padding(.top, 8)
         }
+        .scrollIndicators(.automatic)
         .onAppear {
-            // Fetch models - this will be quick if already cached
             Task { await appState.fetchAvailableModels() }
-
-            // Check NeMo status in background (don't block model display)
+            Task { await appState.fetchSummaryModels() }
+            Task { await appState.fetchSummaryRuntimeStatus() }
             Task {
-                // Quick local check first (instant)
-                appState.refreshNemoVenvState()
-                isCheckingNemoStatus = false
-
-                // Then do the backend check asynchronously
+                // checkNemoStatus calls refreshNemoVenvState internally
+                // and updates nemoAvailable + nemoVenvExists
                 await appState.checkNemoStatus()
+                // Only clear checking state AFTER the backend responded
+                isCheckingNemoStatus = false
             }
         }
-        // Re-fetch models when server connection changes
         .onChange(of: appState.isServerConnected) { _, isConnected in
             if isConnected && appState.availableModels.isEmpty {
                 Task { await appState.fetchAvailableModels() }
+            }
+            if isConnected && appState.availableSummaryModels.isEmpty {
+                Task { await appState.fetchSummaryModels() }
+                Task { await appState.fetchSummaryRuntimeStatus() }
             }
         }
         .sheet(isPresented: $showingNemoSetup) {
             NemoSetupView(
                 setupManager: appState.nemoSetupManager,
                 onComplete: {
-                    // Refresh state after installation
                     Task {
                         await appState.checkNemoStatus()
                         await appState.fetchAvailableModels()
@@ -230,217 +190,533 @@ struct ModelsSettingsView: View {
             .environmentObject(appState)
             .environmentObject(backendManager)
         }
-    }
-
-    // MARK: - NeMo Status Section
-
-    private var nemoStatusSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "cpu")
-                    .foregroundColor(.purple)
-                Text("NeMo Support")
-                    .font(.headline)
-                Spacer()
-            }
-
-            // Show loading state while checking NeMo status
-            if isCheckingNemoStatus {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Checking NeMo status...")
-                            .font(.subheadline)
-                        Text("Please wait")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                }
-            }
-            // Use effectiveNemoAvailable which considers both backend mode and venv
-            else if effectiveNemoAvailable {
-                // NeMo is available (either via venv or dev mode)
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                    VStack(alignment: .leading, spacing: 2) {
-                        if appState.nemoVenvExists {
-                            Text("NeMo is installed")
-                                .font(.subheadline)
-                        } else {
-                            Text("NeMo available (development)")
-                                .font(.subheadline)
-                        }
-                        if let version = appState.nemoVersion {
-                            Text("Version: \(version)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    Spacer()
-                }
-            } else if appState.nemoVenvExists && !appState.nemoAvailable {
-                // Venv exists but NeMo not available in current backend (needs restart)
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("NeMo installed but not active")
-                            .font(.subheadline)
-                        Text("Restart the app to use NeMo models")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                    Button("Restart Backend") {
-                        Task {
-                            await backendManager.switchToNemoMode()
-                            await appState.checkNemoStatus()
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-            } else {
-                // NeMo not available
-                HStack(spacing: 8) {
-                    Image(systemName: "xmark.circle")
-                        .foregroundColor(.secondary)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("NeMo not installed")
-                            .font(.subheadline)
-                        Text("Required for NVIDIA Parakeet & Nemotron models (~3GB)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                    Button("Install NeMo") {
-                        showingNemoSetup = true
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                }
-            }
-
-            // Remove NeMo button (when installed via UI and not checking)
-            if appState.nemoVenvExists && !isCheckingNemoStatus {
-                HStack {
-                    Spacer()
-                    Button(role: .destructive) {
-                        Task {
-                            try? await appState.nemoSetupManager.removeNemoVenv()
-                            await backendManager.switchToWhisperMode()
-                            await appState.checkNemoStatus()
-                        }
-                    } label: {
-                        Label("Remove NeMo", systemImage: "trash")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundColor(.red)
-                }
-            }
+        .sheet(isPresented: $showingSummarySetup) {
+            SummarySetupView(setupManager: appState.summarySetupManager)
+                .environmentObject(appState)
         }
-        .padding()
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(8)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
+        .task(id: "stagger") {
+            guard !hasAnimated else { return }
+            try? await Task.sleep(for: .milliseconds(80))
+            appeared = true
+            onAnimated()
+        }
     }
 
-    /// Section for a group of models
+    // MARK: - Speech-to-Text Content
+
     @ViewBuilder
-    private func modelSection(title: String, subtitle: String, models: [ModelInfoResponse]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Section header
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.headline)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .padding(.bottom, 4)
+    private var speechToTextContent: some View {
+        // Search + filter row
+        SearchAndFilterBar(
+            searchQuery: $searchQuery,
+            selectedFilter: $selectedFilter,
+            allCount: appState.availableModels.count,
+            recommendedCount: appState.availableModels.filter { isRecommended($0) }.count,
+            downloadedCount: downloadedSTTModels.count
+        )
+        .padding(.top, 12)
+        .staggerIn(index: 3, appeared: appeared)
 
-            // Model cards
-            ForEach(models) { model in
-                ModelCardView(
-                    model: model,
-                    isLoaded: appState.loadedModelId == model.id,
-                    isLoading: appState.loadingModelId == model.id,
-                    isDownloading: appState.downloadingModelId == model.id,
-                    // Use effectiveNemoAvailable which considers both backend mode and venv existence
-                    nemoAvailable: effectiveNemoAvailable,
-                    isCheckingNemoStatus: isCheckingNemoStatus,
-                    realTimeStreaming: $realTimeStreaming,
-                    onLoad: {
-                        // Save as preferred model
-                        appState.setPreferredModel(model.id)
-                        // Load the model
-                        await appState.loadModel(modelId: model.id)
-                    },
-                    onUnload: { await appState.unloadModel() },
-                    onDownload: { _ = await appState.downloadModel(modelId: model.id) },
-                    onDelete: { await appState.deleteModel(modelId: model.id) },
-                    onStreamingChanged: { enabled in
-                        if enabled {
-                            appState.checkAccessibilityPermissionsIfNeeded()
+        if appState.availableModels.isEmpty {
+            modelLoadingState
+                .staggerIn(index: 4, appeared: appeared)
+        } else if filteredModels.isEmpty {
+            emptySearchState
+                .staggerIn(index: 4, appeared: appeared)
+        } else {
+            // Model grid sections
+            VStack(spacing: 16) {
+                if !streamingModels.isEmpty {
+                    ModelSectionView(
+                        title: "Real-Time Streaming",
+                        icon: "waveform",
+                        tint: .orange,
+                        columns: 1
+                    ) {
+                        ForEach(streamingModels) { model in
+                            compactModelCard(model)
                         }
-                    },
-                    onInstallNemo: {
-                        showingNemoSetup = true
                     }
-                )
+                }
+
+                if !nvidiaModels.isEmpty {
+                    ModelSectionView(
+                        title: "NVIDIA Parakeet",
+                        icon: "cpu",
+                        tint: .green,
+                        columns: 2
+                    ) {
+                        ForEach(nvidiaModels) { model in
+                            compactModelCard(model)
+                        }
+                    }
+                }
+
+                if !openaiModels.isEmpty {
+                    ModelSectionView(
+                        title: "OpenAI Whisper",
+                        icon: "globe",
+                        tint: .blue,
+                        columns: 2
+                    ) {
+                        ForEach(openaiModels) { model in
+                            compactModelCard(model)
+                        }
+                    }
+                }
             }
+            .padding(.top, 12)
+            .staggerIn(index: 4, appeared: appeared)
+        }
+
+        // Storage footer
+        storageFooter
+            .padding(.top, 12)
+            .staggerIn(index: 5, appeared: appeared)
+    }
+
+    // MARK: - Summarization Content
+
+    @ViewBuilder
+    private var summarizationContent: some View {
+        if !summaryModels.isEmpty {
+            VStack(spacing: 12) {
+                HStack {
+                    SettingsSectionHeader(title: "Summarization Models")
+                    Spacer()
+                    Button {
+                        Task { await appState.fetchSummaryModels() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                ForEach(summaryModels) { model in
+                    SummaryModelCard(
+                        model: model,
+                        isDownloading: appState.downloadingSummaryModelId == model.id,
+                        downloadProgress: appState.summaryDownloadProgress,
+                        runtimeInstalled: appState.summaryRuntimeInstalled,
+                        onDownload: {
+                            Task { _ = await appState.downloadSummaryModel(modelId: model.id) }
+                        },
+                        onDelete: {
+                            Task { await appState.deleteSummaryModel(modelId: model.id) }
+                        }
+                    )
+                }
+            }
+            .padding(.top, 12)
+            .staggerIn(index: 3, appeared: appeared)
+        } else if !appState.summaryRuntimeInstalled {
+            // No models and no runtime — prompt to install via pill
+            VStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 24))
+                    .foregroundStyle(.tertiary)
+                Text("Summary runtime not installed")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text("Click the Summarization pill above to set up")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 40)
+            .staggerIn(index: 3, appeared: appeared)
         }
     }
 
-    /// Storage information footer
-    private var storageFooter: some View {
-        HStack {
-            Image(systemName: "info.circle")
-                .foregroundColor(.secondary)
-            Text("Only one model can be loaded at a time. Models are downloaded on first use.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Spacer()
+    // MARK: - Loading / Empty States
 
-            // Open storage folder button (HuggingFace cache)
+    private var modelLoadingState: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .scaleEffect(1.1)
+            Text(appState.isServerConnected ? "Loading models..." : "Server Starting...")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.primary)
+            Text(appState.isServerConnected ? "Fetching available models" : "Models will appear once the backend is ready.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
+    }
+
+    private var emptySearchState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 24))
+                .foregroundStyle(.tertiary)
+            Text("No models match your search")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
+    }
+
+    // MARK: - Compact Model Card
+
+    @ViewBuilder
+    private func compactModelCard(_ model: ModelInfoResponse) -> some View {
+        CompactModelCardView(
+            model: model,
+            isLoaded: appState.loadedModelId == model.id,
+            isLoading: appState.loadingModelId == model.id,
+            isDownloading: appState.downloadingModelId == model.id,
+            nemoAvailable: effectiveNemoAvailable,
+            isCheckingNemoStatus: isCheckingNemoStatus,
+            realTimeStreaming: $realTimeStreaming,
+            onLoad: {
+                appState.setPreferredModel(model.id)
+                await appState.loadModel(modelId: model.id)
+            },
+            onUnload: { await appState.unloadModel() },
+            onDownload: { _ = await appState.downloadModel(modelId: model.id) },
+            onDelete: { await appState.deleteModel(modelId: model.id) },
+            onStreamingChanged: { enabled in
+                if enabled {
+                    appState.checkAccessibilityPermissionsIfNeeded()
+                }
+            },
+            onInstallNemo: { showingNemoSetup = true }
+        )
+    }
+
+    // MARK: - Storage Footer
+
+    private var storageFooter: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+            Text("Only one model can be loaded at a time")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+            Spacer()
             Button {
-                openStorageFolder()
+                let path = NSString(string: "~/.cache/huggingface/hub").expandingTildeInPath
+                let url = URL(fileURLWithPath: path)
+                try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: url.path)
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "folder")
                     Text("Open Cache")
                 }
-                .font(.caption)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.thinMaterial, in: Capsule())
             }
             .buttonStyle(.plain)
-            .foregroundColor(.accentColor)
-            .help("Open HuggingFace model cache folder")
         }
-        .padding(8)
-    }
-
-    /// Open the model storage folder in Finder (HuggingFace cache)
-    private func openStorageFolder() {
-        // Models are stored in HuggingFace cache
-        let path = NSString(string: "~/.cache/huggingface/hub").expandingTildeInPath
-        let url = URL(fileURLWithPath: path)
-
-        // Create directory if it doesn't exist
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-
-        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: url.path)
+        .padding(.vertical, 8)
     }
 }
 
-// MARK: - Model Card View
+// MARK: - Enums
 
-/// Reusable model card component
-struct ModelCardView: View {
+enum ModelMode: String, CaseIterable {
+    case speechToText = "Speech-to-Text"
+    case summarization = "Summarization"
+
+    var icon: String {
+        switch self {
+        case .speechToText: return "waveform"
+        case .summarization: return "sparkles"
+        }
+    }
+}
+
+enum ModelFilter: String, CaseIterable {
+    case all = "All"
+    case recommended = "Recommended"
+    case downloaded = "Downloaded"
+}
+
+// MARK: - Models Header Bar
+
+/// Top bar with download stats, storage info, support pills, and refresh
+struct ModelsHeaderBar: View {
+    let downloadedCount: Int
+    let totalCount: Int
+    let totalSizeMB: Int
+    let nemoAvailable: Bool
+    let isCheckingNemo: Bool
+    let summaryInstalled: Bool
+    let summaryReady: Bool
+    let onNemoTap: () -> Void
+    let onSummaryTap: () -> Void
+    let onRefresh: () -> Void
+
+    private var sizeString: String {
+        if totalSizeMB >= 1024 {
+            return String(format: "%.1f GB", Double(totalSizeMB) / 1024.0)
+        } else if totalSizeMB > 0 {
+            return "\(totalSizeMB) MB"
+        }
+        return "Zero KB"
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            // Title row
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Models")
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                    Text("\(downloadedCount) downloaded · \(sizeString)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button(action: onRefresh) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .background(.quaternary, in: .circle)
+                }
+                .buttonStyle(.plain)
+                .help("Refresh models")
+            }
+
+            // Support pills row
+            HStack(spacing: 8) {
+                // NeMo pill
+                SupportPill(
+                    label: "NeMo",
+                    icon: "cpu",
+                    status: isCheckingNemo ? .checking : (nemoAvailable ? .installed : .notInstalled),
+                    tint: .purple,
+                    action: onNemoTap
+                )
+
+                // Summarization pill
+                SupportPill(
+                    label: "Summarization",
+                    icon: "sparkles",
+                    status: summaryInstalled ? (summaryReady ? .installed : .warning) : .notInstalled,
+                    tint: .orange,
+                    action: onSummaryTap
+                )
+
+                Spacer()
+            }
+        }
+    }
+}
+
+// MARK: - Support Pill
+
+enum SupportStatus {
+    case checking, installed, warning, notInstalled
+
+    var dotColor: Color {
+        switch self {
+        case .checking: return .secondary
+        case .installed: return .green
+        case .warning: return .orange
+        case .notInstalled: return .secondary
+        }
+    }
+}
+
+struct SupportPill: View {
+    let label: String
+    let icon: String
+    let status: SupportStatus
+    let tint: Color
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(tint)
+
+                Text(label)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.primary)
+
+                Circle()
+                    .fill(status.dotColor)
+                    .frame(width: 6, height: 6)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(.thinMaterial, in: Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(.white.opacity(isHovered ? 0.12 : 0.06), lineWidth: 0.5)
+            )
+            .scaleEffect(isHovered ? 1.02 : 1.0)
+            .animation(.easeOut(duration: 0.15), value: isHovered)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+}
+
+// MARK: - Mode Switcher
+
+struct ModeSwitcher: View {
+    @Binding var selectedMode: ModelMode
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(ModelMode.allCases, id: \.self) { mode in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        selectedMode = mode
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: mode.icon)
+                            .font(.system(size: 11, weight: .medium))
+                        Text(mode.rawValue)
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(selectedMode == mode ? .white : .secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(
+                        selectedMode == mode
+                            ? AnyShapeStyle(Color.accentColor)
+                            : AnyShapeStyle(Color.primary.opacity(0.06))
+                    )
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+
+            Spacer()
+        }
+    }
+}
+
+// MARK: - Search and Filter Bar
+
+struct SearchAndFilterBar: View {
+    @Binding var searchQuery: String
+    @Binding var selectedFilter: ModelFilter
+    let allCount: Int
+    let recommendedCount: Int
+    let downloadedCount: Int
+
+    var body: some View {
+        VStack(spacing: 10) {
+            // Filter tabs
+            HStack(spacing: 3) {
+                FilterTab(label: "All", count: allCount, isSelected: selectedFilter == .all) {
+                    selectedFilter = .all
+                }
+                FilterTab(label: "Recommended", count: recommendedCount, isSelected: selectedFilter == .recommended) {
+                    selectedFilter = .recommended
+                }
+                FilterTab(label: "Downloads", count: downloadedCount, isSelected: selectedFilter == .downloaded) {
+                    selectedFilter = .downloaded
+                }
+
+                Spacer()
+
+                // Search field
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                    TextField("Search models", text: $searchQuery)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .frame(width: 120)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.thinMaterial, in: Capsule())
+            }
+        }
+    }
+}
+
+struct FilterTab: View {
+    let label: String
+    let count: Int
+    let isSelected: Bool
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Text(label)
+                    .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                Text("(\(count))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+            .foregroundStyle(isSelected ? .primary : .secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                isSelected
+                    ? AnyShapeStyle(Color.primary.opacity(0.08))
+                    : (isHovered ? AnyShapeStyle(Color.primary.opacity(0.04)) : AnyShapeStyle(.clear))
+            )
+            .clipShape(Capsule())
+            .animation(.easeOut(duration: 0.15), value: isSelected)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+}
+
+// MARK: - Model Section View (Grid)
+
+struct ModelSectionView<Content: View>: View {
+    let title: String
+    let icon: String
+    let tint: Color
+    let columns: Int
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Section label
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(tint)
+                Text(title.uppercased())
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .tracking(0.8)
+            }
+
+            // Grid layout
+            let gridColumns = Array(repeating: GridItem(.flexible(), spacing: 10), count: columns)
+            LazyVGrid(columns: gridColumns, spacing: 10) {
+                content
+            }
+        }
+    }
+}
+
+// MARK: - Compact Model Card
+
+struct CompactModelCardView: View {
     let model: ModelInfoResponse
     let isLoaded: Bool
     let isLoading: Bool
@@ -455,462 +731,452 @@ struct ModelCardView: View {
     let onStreamingChanged: (Bool) -> Void
     let onInstallNemo: () -> Void
 
-    @State private var languagesExpanded = false
+    @State private var isHovered = false
     @State private var showingDeleteConfirmation = false
+    @State private var cardAppeared = false
 
-    /// Whether this model can be used (has required dependencies)
     private var canUseModel: Bool {
         if model.nemoRequired {
-            // If still checking, assume it's available to avoid showing false "Install NeMo"
-            if isCheckingNemoStatus {
-                return true
-            }
-            return nemoAvailable
+            return isCheckingNemoStatus || nemoAvailable
         }
         return true
     }
 
-    /// Whether to show the "Requires NeMo" badge
-    private var showNemoRequiredBadge: Bool {
-        // Don't show while still checking - prevents flickering
+    private var showNemoRequired: Bool {
         model.nemoRequired && !nemoAvailable && !isCheckingNemoStatus
     }
 
-    /// Format size for display
     private func formatSize(_ mb: Int) -> String {
-        if mb >= 1024 {
-            return String(format: "%.1f GB", Double(mb) / 1024.0)
-        }
+        if mb >= 1024 { return String(format: "%.1f GB", Double(mb) / 1024.0) }
         return "\(mb) MB"
     }
 
-    /// URL to the model's page (HuggingFace or GitHub)
-    private var huggingFaceURL: URL? {
-        if let urlString = model.modelUrl {
-            return URL(string: urlString)
-        }
-        // Fallback for NeMo models without model_url
-        if model.type == "nemo" {
-            return URL(string: "https://huggingface.co/\(model.name)")
-        }
-        return nil
-    }
-
-    /// Get performance metrics for a model (speed and accuracy on a 0-1 scale)
     private func getPerformanceMetrics() -> (speed: Double, accuracy: Double) {
         switch model.id {
-        case "parakeet-tdt-v2", "parakeet-v2":
-            return (speed: 0.95, accuracy: 0.85)
-        case "parakeet-tdt-v3", "parakeet-v3":
-            return (speed: 0.85, accuracy: 0.85)
-        case "nemotron-streaming":
-            return (speed: 1.00, accuracy: 0.70)
-        case "whisper-base-en", "base.en":
-            return (speed: 1.00, accuracy: 0.60)
-        case "whisper-small-en", "small.en":
-            return (speed: 0.92, accuracy: 0.65)
-        case "whisper-large-v3-turbo", "large-v3-turbo":
-            return (speed: 0.85, accuracy: 0.90)
-        case "whisper-large-v3", "large-v3":
-            return (speed: 0.80, accuracy: 0.98)
-        default:
-            print("⚠️ Unknown model ID for performance metrics: \(model.id)")
-            return (speed: 0.70, accuracy: 0.75)
+        case "parakeet-tdt-v2", "parakeet-v2": return (0.95, 0.85)
+        case "parakeet-tdt-v3", "parakeet-v3": return (0.85, 0.85)
+        case "nemotron-streaming": return (1.00, 0.70)
+        case "whisper-base-en", "base.en": return (1.00, 0.60)
+        case "whisper-small-en", "small.en": return (0.92, 0.65)
+        case "whisper-large-v3-turbo", "large-v3-turbo": return (0.85, 0.90)
+        case "whisper-large-v3", "large-v3": return (0.80, 0.98)
+        default: return (0.70, 0.75)
         }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Header with badges
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Text(model.displayName)
-                            .font(.title3)
-                            .fontWeight(.semibold)
-
-                        // Downloaded badge (only for downloaded models)
-                        if model.downloaded {
-                            HStack(spacing: 4) {
-                                Image(systemName: "arrow.down.circle.fill")
-                                    .foregroundColor(.blue)
-                                Text("Downloaded")
-                                    .foregroundColor(.blue)
-                            }
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.blue.opacity(0.15))
-                            .cornerRadius(6)
-                        }
-
-                        // Active badge
-                        if isLoaded {
-                            HStack(spacing: 4) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.green)
-                                Text("Active")
-                                    .foregroundColor(.green)
-                            }
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.green.opacity(0.15))
-                            .cornerRadius(6)
-                        }
-
-                        // Real-Time Streaming badge (ONLY for Nemotron Streaming)
-                        if model.streamingNative && model.id == "nemotron-streaming" {
-                            HStack(spacing: 4) {
-                                Image(systemName: "waveform")
-                                    .foregroundColor(.orange)
-                                Text("Real-Time")
-                                    .foregroundColor(.orange)
-                            }
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.orange.opacity(0.15))
-                            .cornerRadius(6)
-                        }
-
-                        // Multilingual badge
-                        if model.multilingual {
-                            HStack(spacing: 4) {
-                                Image(systemName: "globe")
-                                    .foregroundColor(.purple)
-                                Text("Multilingual")
-                                    .foregroundColor(.purple)
-                            }
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.purple.opacity(0.15))
-                            .cornerRadius(6)
-                        }
-
-                        // Session-compatible badge
-                        if model.sessionCompatible {
-                            HStack(spacing: 4) {
-                                Image(systemName: "waveform.circle")
-                                    .foregroundColor(.teal)
-                                Text("Sessions")
-                                    .foregroundColor(.teal)
-                            }
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.teal.opacity(0.15))
-                            .cornerRadius(6)
-                        }
-
-                        // Requires NeMo badge (for NeMo models when NeMo is not available)
-                        if showNemoRequiredBadge {
-                            HStack(spacing: 4) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundColor(.orange)
-                                Text("Requires NeMo")
-                                    .foregroundColor(.orange)
-                            }
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.orange.opacity(0.15))
-                            .cornerRadius(6)
-                        }
-                    }
+        VStack(alignment: .leading, spacing: 10) {
+            // Top: name + status
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(model.displayName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
 
                     Text("by \(model.author)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
                 }
 
                 Spacer()
 
-                // View on HuggingFace link
-                if let url = huggingFaceURL {
-                    Link(destination: url) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "arrow.up.right.square")
-                            Text("View")
-                        }
-                        .font(.caption)
-                    }
+                // Status indicator
+                if isLoaded {
+                    statusDot(color: .green, label: "Active")
+                } else if model.downloaded {
+                    statusDot(color: .blue, label: "Ready")
+                } else if showNemoRequired {
+                    statusDot(color: .orange, label: "NeMo")
                 }
             }
 
-            // Description
-            Text(model.description)
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-
-            // Model specs
-            HStack(spacing: 16) {
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.down.circle")
-                    Text(formatSize(model.sizeMB))
+            // Badges row
+            HStack(spacing: 4) {
+                if model.streamingNative {
+                    badge("Real-Time", color: .orange)
                 }
-                .help("Download size")
-
-                HStack(spacing: 4) {
-                    Image(systemName: "memorychip")
-                    Text(formatSize(model.ramMB))
+                if model.multilingual {
+                    badge("Multilingual", color: .purple)
                 }
-                .help("RAM usage when loaded")
+                if model.sessionCompatible {
+                    badge("Sessions", color: .teal)
+                }
+            }
 
-                // Language count
+            // Specs
+            HStack(spacing: 12) {
+                specLabel(icon: "arrow.down.circle", text: formatSize(model.sizeMB))
+                specLabel(icon: "memorychip", text: formatSize(model.ramMB))
                 if model.multilingual && model.languageNames.count > 1 {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            languagesExpanded.toggle()
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "globe")
-                            if model.languageNames.first == "99+ languages" {
-                                Text("99+ languages")
-                            } else {
-                                Text("\(model.languageNames.count) languages")
-                            }
-                            Image(systemName: languagesExpanded ? "chevron.up" : "chevron.down")
-                                .font(.caption2)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundColor(.secondary)
-                    .help("Click to see supported languages")
+                    specLabel(icon: "globe", text: model.languageNames.first == "99+ languages" ? "99+ langs" : "\(model.languageNames.count) langs")
                 } else {
-                    HStack(spacing: 4) {
-                        Image(systemName: "globe")
-                        Text(model.languageNames.first ?? "English")
-                    }
-                    .help("Supported language")
+                    specLabel(icon: "globe", text: model.languageNames.first ?? "English")
                 }
             }
-            .font(.caption)
-            .foregroundColor(.secondary)
 
             // Performance bars
-            VStack(spacing: 8) {
-                let metrics = getPerformanceMetrics()
-
-                // Speed bar
-                HStack(spacing: 8) {
-                    Image(systemName: "bolt.fill")
-                        .foregroundColor(.purple)
-                        .frame(width: 16)
-                    Text("Speed")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .frame(width: 60, alignment: .leading)
-
-                    GeometryReader { geometry in
-                        ZStack(alignment: .leading) {
-                            // Background
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(Color.secondary.opacity(0.2))
-                                .frame(height: 6)
-
-                            // Filled portion
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(Color.purple)
-                                .frame(width: geometry.size.width * metrics.speed, height: 6)
-                        }
-                    }
-                    .frame(height: 6)
-                }
-
-                // Accuracy bar
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.purple)
-                        .frame(width: 16)
-                    Text("Accuracy")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .frame(width: 60, alignment: .leading)
-
-                    GeometryReader { geometry in
-                        ZStack(alignment: .leading) {
-                            // Background
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(Color.secondary.opacity(0.2))
-                                .frame(height: 6)
-
-                            // Filled portion
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(Color.purple)
-                                .frame(width: geometry.size.width * metrics.accuracy, height: 6)
-                        }
-                    }
-                    .frame(height: 6)
-                }
-            }
-            .padding(.vertical, 8)
-
-            // Expanded language grid (for multilingual models)
-            if model.multilingual && languagesExpanded && model.languageNames.first != "99+ languages" {
-                LanguageGridView(languages: model.languageNames)
-                    .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .top)))
+            let metrics = getPerformanceMetrics()
+            VStack(spacing: 5) {
+                miniBar(label: "Speed", value: metrics.speed, color: .blue)
+                miniBar(label: "Accuracy", value: metrics.accuracy, color: .purple)
             }
 
-            Divider()
+            // Divider
+            Rectangle()
+                .fill(.white.opacity(0.06))
+                .frame(height: 0.5)
 
-            // Action buttons row
-            HStack(spacing: 12) {
-                // Left side: Action button
-                if showNemoRequiredBadge {
-                    Button {
+            // Action row
+            HStack(spacing: 8) {
+                if showNemoRequired {
+                    actionButton(label: "Install NeMo", icon: "cpu", style: .prominent, tint: .orange) {
                         onInstallNemo()
-                    } label: {
-                        HStack {
-                            Image(systemName: "cpu")
-                            Text("Install NeMo Support")
-                        }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.orange)
-                }
-                // Download button (all models must be downloaded first)
-                else if !model.downloaded {
-                    Button {
+                } else if !model.downloaded {
+                    actionButton(label: "Download", icon: "arrow.down.circle", style: .prominent) {
                         Task { await onDownload() }
-                    } label: {
-                        HStack {
-                            Image(systemName: "arrow.down.circle")
-                            Text("Download")
-                        }
                     }
-                    .buttonStyle(.borderedProminent)
                     .disabled(isDownloading || !canUseModel)
                 } else if isLoaded {
-                    // Unload button
-                    Button {
+                    actionButton(label: "Unload", icon: "eject", style: .regular) {
                         Task { await onUnload() }
-                    } label: {
-                        HStack {
-                            Image(systemName: "eject")
-                            Text("Unload")
-                        }
                     }
-                    .buttonStyle(.bordered)
 
-                    // Streaming toggle
                     if model.streamingNative {
-                        Toggle("Live Streaming", isOn: $realTimeStreaming)
+                        Toggle("Live", isOn: $realTimeStreaming)
                             .toggleStyle(.switch)
-                            .help("Stream transcription to cursor position in real-time")
-                            .onChange(of: realTimeStreaming) { _, newValue in
-                                onStreamingChanged(newValue)
-                            }
-                    } else {
-                        Toggle("Streaming", isOn: $realTimeStreaming)
-                            .toggleStyle(.switch)
-                            .help("Not optimized - re-transcribes entire buffer each time")
+                            .controlSize(.mini)
+                            .font(.system(size: 10))
                             .onChange(of: realTimeStreaming) { _, newValue in
                                 onStreamingChanged(newValue)
                             }
                     }
                 } else {
-                    // Load button
-                    Button {
+                    actionButton(label: "Load", icon: "play.fill", style: .prominent) {
                         Task { await onLoad() }
-                    } label: {
-                        HStack {
-                            Image(systemName: "play.fill")
-                            Text("Load Model")
-                        }
                     }
-                    .buttonStyle(.borderedProminent)
                     .disabled(isLoading || !model.downloaded || !canUseModel)
                 }
 
                 Spacer()
 
-                // Right side: Loading/Downloading indicators and delete button
-                HStack(spacing: 12) {
-                    // Loading indicator
-                    if isLoading {
-                        HStack(spacing: 4) {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                            Text("Loading...")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
+                // Loading/downloading indicators
+                if isLoading {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                }
 
-                    // Downloading indicator with animated shimmer bar
-                    if isDownloading {
-                        HStack(spacing: 6) {
-                            AnimatedDownloadingBar()
-                                .frame(width: 60, height: 6)
-                            Text("Downloading...")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
+                if isDownloading {
+                    AnimatedDownloadingBar()
+                        .frame(width: 40, height: 4)
+                }
 
-                    // Delete button (only for downloaded, non-loaded models)
-                    if model.downloaded && !isLoaded {
-                        Button {
-                            showingDeleteConfirmation = true
-                        } label: {
-                            Image(systemName: "trash")
-                                .foregroundColor(.red)
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Delete downloaded model")
+                // Delete button
+                if model.downloaded && !isLoaded {
+                    Button {
+                        showingDeleteConfirmation = true
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.red.opacity(0.7))
                     }
+                    .buttonStyle(.plain)
                 }
             }
 
-            // Streaming info/warning
+            // Streaming info
             if isLoaded && realTimeStreaming {
-                HStack(spacing: 6) {
-                    if model.streamingNative {
-                        // Streaming-native model - info message
-                        Image(systemName: "info.circle.fill")
-                            .foregroundColor(.blue)
-                        Text("Cache-aware streaming: each audio chunk is processed once for optimal performance")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    } else {
-                        // Non-streaming model - warning
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.orange)
-                        Text("Simulated streaming: re-transcribes entire buffer each time. Use Nemotron Streaming for better performance.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                HStack(spacing: 4) {
+                    Image(systemName: model.streamingNative ? "info.circle" : "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(model.streamingNative ? .blue : .orange)
+                    Text(model.streamingNative
+                        ? "Cache-aware streaming active"
+                        : "Simulated streaming — use Nemotron for better performance")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
-                .padding(.top, 4)
             }
         }
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color(NSColor.controlBackgroundColor))
-                .shadow(color: Color.black.opacity(0.1), radius: 2, x: 0, y: 1)
-        )
+        .padding(14)
+        .background(.thinMaterial, in: .rect(cornerRadius: 14, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(isLoaded ? Color.green.opacity(0.5) : Color.secondary.opacity(0.2), lineWidth: isLoaded ? 2 : 1)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(
+                    isLoaded ? Color.green.opacity(0.4) : .white.opacity(0.06),
+                    lineWidth: isLoaded ? 1.5 : 0.5
+                )
         )
+        .scaleEffect(isHovered ? 1.01 : 1.0)
+        .scaleEffect(cardAppeared ? 1.0 : 0.95)
+        .offset(y: cardAppeared ? 0 : 8)
+        .animation(.easeOut(duration: 0.15), value: isHovered)
+        .animation(.spring(duration: 0.4, bounce: 0.15), value: cardAppeared)
+        .onHover { isHovered = $0 }
+        .onAppear {
+            // Pop-in animation
+            if !cardAppeared {
+                cardAppeared = true
+            }
+        }
         .confirmationDialog("Delete Model", isPresented: $showingDeleteConfirmation) {
             Button("Delete \(model.displayName)", role: .destructive) {
                 Task { await onDelete() }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will permanently delete the downloaded model files. You can download it again later.")
+            Text("This will permanently delete the downloaded model files.")
         }
+    }
+
+    // MARK: - Sub-components
+
+    private func statusDot(color: Color, label: String) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(label)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(color)
+        }
+    }
+
+    private func badge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.12), in: Capsule())
+    }
+
+    private func specLabel(icon: String, text: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 9))
+            Text(text)
+                .font(.system(size: 10))
+        }
+        .foregroundStyle(.secondary)
+    }
+
+    private func miniBar(label: String, value: Double, color: Color) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .frame(width: 46, alignment: .leading)
+
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.secondary.opacity(0.12))
+                        .frame(height: 3)
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(color.opacity(0.7))
+                        .frame(width: geometry.size.width * value, height: 3)
+                }
+            }
+            .frame(height: 3)
+        }
+    }
+
+    private enum ActionStyle { case prominent, regular }
+
+    private func actionButton(label: String, icon: String, style: ActionStyle, tint: Color = .accentColor, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 9, weight: .medium))
+                Text(label)
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundStyle(style == .prominent ? .white : .primary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                style == .prominent
+                    ? AnyShapeStyle(tint)
+                    : AnyShapeStyle(.quaternary)
+            )
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Summary Runtime Card
+
+struct SummaryRuntimeCard: View {
+    let installed: Bool
+    let ready: Bool
+    let isInstalling: Bool
+    let progress: Double
+    let statusMessage: String
+    let onInstall: () -> Void
+    let onRemove: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.orange)
+
+                Text("Summary Runtime")
+                    .font(.system(size: 13, weight: .medium))
+
+                Spacer()
+
+                if installed {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(ready ? .green : .orange)
+                            .frame(width: 6, height: 6)
+                        Text(ready ? "Ready" : "Not Ready")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(ready ? .green : .orange)
+                    }
+                }
+            }
+
+            if isInstalling {
+                VStack(spacing: 6) {
+                    ProgressView(value: progress)
+                        .tint(.orange)
+                    Text(statusMessage)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+            } else if installed {
+                HStack {
+                    Text("Runs Gemma summaries in a separate worker process.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Remove") {
+                        onRemove()
+                    }
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.red.opacity(0.8))
+                    .buttonStyle(.plain)
+                }
+            } else {
+                HStack {
+                    Text("Required for Gemma session summaries (~3 GB)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(action: onInstall) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.down.circle")
+                                .font(.system(size: 10))
+                            Text("Install")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(.orange, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(14)
+        .background(.thinMaterial, in: .rect(cornerRadius: 12, style: .continuous))
+    }
+}
+
+// MARK: - Summary Model Card
+
+struct SummaryModelCard: View {
+    let model: SummaryModelInfoResponse
+    let isDownloading: Bool
+    let downloadProgress: Double
+    let runtimeInstalled: Bool
+    let onDownload: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(model.displayName)
+                            .font(.system(size: 13, weight: .semibold))
+                        if model.recommended {
+                            Text("Recommended")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.orange)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.orange.opacity(0.12), in: Capsule())
+                        }
+                    }
+                    Text(model.provider)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+
+                if model.downloaded {
+                    Button(action: onDelete) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.red.opacity(0.7))
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button(action: onDownload) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.down.circle")
+                                .font(.system(size: 9))
+                            Text(isDownloading ? "Downloading..." : "Download")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.accentColor, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!runtimeInstalled || isDownloading)
+                }
+            }
+
+            // Specs row
+            HStack(spacing: 12) {
+                specLabel(icon: "text.word.spacing", text: "\(model.contextTokens.formatted()) ctx")
+                specLabel(icon: "memorychip", text: "\(String(format: "%.1f", Double(model.residentModelRamMB) / 1024.0)) GB RAM")
+                specLabel(icon: "arrow.down.circle", text: "\(String(format: "%.1f", Double(model.downloadSizeMB) / 1024.0)) GB")
+            }
+
+            if isDownloading {
+                ProgressView(value: downloadProgress)
+                    .tint(.accentColor)
+            }
+        }
+        .padding(14)
+        .background(.thinMaterial, in: .rect(cornerRadius: 12, style: .continuous))
+    }
+
+    private func specLabel(icon: String, text: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 9))
+            Text(text)
+                .font(.system(size: 10))
+        }
+        .foregroundStyle(.secondary)
     }
 }
 
 // MARK: - Language Grid View
 
-/// Grid view for displaying supported languages
 struct LanguageGridView: View {
     let languages: [String]
 
@@ -925,23 +1191,20 @@ struct LanguageGridView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Supported Languages")
-                .font(.caption)
-                .fontWeight(.medium)
-                .foregroundColor(.secondary)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
 
             LazyVGrid(columns: columns, spacing: 6) {
                 ForEach(languages, id: \.self) { language in
                     Text(language)
-                        .font(.caption2)
+                        .font(.system(size: 10))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(Color.secondary.opacity(0.1))
-                        .cornerRadius(4)
+                        .background(.quaternary, in: .rect(cornerRadius: 4))
                 }
             }
         }
         .padding(10)
-        .background(Color(NSColor.windowBackgroundColor))
-        .cornerRadius(8)
+        .background(.thinMaterial, in: .rect(cornerRadius: 8, style: .continuous))
     }
 }

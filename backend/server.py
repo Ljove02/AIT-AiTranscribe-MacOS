@@ -69,6 +69,7 @@ import queue
 import asyncio
 from typing import Optional
 from contextlib import asynccontextmanager
+from collections import deque
 from pathlib import Path
 
 # Model management
@@ -85,6 +86,22 @@ from model_manager import (
     delete_model,
     check_nemo_available,
     is_nemo_model,
+)
+from summary_manager import (
+    SUMMARY_MODELS,
+    get_all_models_info as get_all_summary_models_info,
+    get_model_info as get_summary_model_info,
+    get_runtime_status as get_summary_runtime_status,
+    download_summary_model,
+    delete_summary_model,
+    get_summary_setup_resource_path,
+    get_summary_python_path,
+    get_summary_worker_resource_path,
+    get_summary_model_dir,
+    get_summary_file_name,
+    should_quantize_kv_cache,
+    estimate_summary_memory,
+    normalize_summary_request,
 )
 
 # Audio processing
@@ -118,6 +135,10 @@ PORT = 8765         # The port number (like a door number for the server)
 asr_model = None
 model_device = None
 current_model_id = None  # Which model is loaded (e.g., "parakeet-v2")
+
+# Summary worker state
+active_summary_process = None
+active_summary_cancel_requested = False
 
 # Audio recorder instance
 from recorder import AudioRecorder, list_audio_devices, get_default_input_device
@@ -186,6 +207,52 @@ class MessageResponse(BaseModel):
     """Simple message response."""
     message: str
     success: bool
+
+
+class SummaryRuntimeResponse(BaseModel):
+    installed: bool
+    ready: bool
+    venv_path: str
+    python_path: Optional[str]
+    worker_path: Optional[str]
+    requirements_path: Optional[str]
+    mlx_vlm_available: bool
+
+
+class SummaryModelInfo(BaseModel):
+    id: str
+    display_name: str
+    provider: str
+    engine: str
+    quantization: str
+    context_tokens: int
+    download_size_mb: int
+    resident_model_ram_mb: int
+    downloaded: bool
+    recommended: bool
+    path: Optional[str]
+    model_url: Optional[str] = None
+    kv_bytes_per_token_default: int
+    kv_bytes_per_token_quantized: int
+
+
+class SummaryPresetRequest(BaseModel):
+    preset_id: str
+    display_name: str
+    file_name: str
+    system_prompt: str
+    target_words: int
+    max_output_tokens: int
+
+
+class SessionSummarizeRequest(BaseModel):
+    session_dir: str
+    model_id: str
+    presets: list[SummaryPresetRequest]
+
+
+class SummaryRuntimeInstallRequest(BaseModel):
+    python_path: Optional[str] = None
 
 
 class AudioDeviceInfo(BaseModel):
@@ -748,7 +815,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="AiTranscribe API",
     description="Speech-to-text transcription service using NVIDIA Nemotron",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan
 )
 
@@ -850,6 +917,87 @@ async def list_models() -> list[ModelInfo]:
         ))
 
     return result
+
+
+@app.get("/summary/runtime/status", response_model=SummaryRuntimeResponse)
+async def get_summary_runtime() -> SummaryRuntimeResponse:
+    status = get_summary_runtime_status()
+    return SummaryRuntimeResponse(**status.__dict__)
+
+
+@app.post("/summary/runtime/install", response_model=MessageResponse)
+async def install_summary_runtime(request: SummaryRuntimeInstallRequest = None) -> MessageResponse:
+    setup_script = get_summary_setup_resource_path()
+    if setup_script is None or not setup_script.exists():
+        raise HTTPException(status_code=404, detail="Summary setup script not found")
+
+    python_path = request.python_path if request and request.python_path else sys.executable
+    venv_path = get_summary_python_path().parent.parent
+
+    try:
+        result = _subprocess.run(
+            [python_path, str(setup_script), str(venv_path)],
+            capture_output=True,
+            text=True,
+            timeout=7200,
+        )
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail=result.stderr or result.stdout or "Install failed")
+        return MessageResponse(message="Summary runtime installed", success=True)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/summary/models", response_model=list[SummaryModelInfo])
+async def list_summary_models() -> list[SummaryModelInfo]:
+    result = []
+    for info in get_all_summary_models_info():
+        result.append(SummaryModelInfo(**info))
+    return result
+
+
+@app.get("/summary/models/{model_id}", response_model=SummaryModelInfo)
+async def get_summary_model(model_id: str) -> SummaryModelInfo:
+    if model_id not in SUMMARY_MODELS:
+        raise HTTPException(status_code=404, detail=f"Summary model not found: {model_id}")
+    return SummaryModelInfo(**get_summary_model_info(model_id))
+
+
+@app.post("/summary/models/{model_id}/download")
+async def download_summary_model_endpoint(model_id: str):
+    if model_id not in SUMMARY_MODELS:
+        raise HTTPException(status_code=404, detail=f"Summary model not found: {model_id}")
+
+    async def progress_generator():
+        for update in download_summary_model(model_id):
+            yield f"data: {json.dumps(update)}\n\n"
+
+    return StreamingResponse(
+        progress_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.delete("/summary/models/{model_id}", response_model=MessageResponse)
+async def delete_summary_model_endpoint(model_id: str) -> MessageResponse:
+    if model_id not in SUMMARY_MODELS:
+        raise HTTPException(status_code=404, detail=f"Summary model not found: {model_id}")
+
+    if active_summary_process is not None:
+        raise HTTPException(status_code=400, detail="Cannot delete summary model while a summary is running")
+
+    deleted = delete_summary_model(model_id)
+    return MessageResponse(
+        message=f"Summary model {model_id} deleted" if deleted else f"Summary model {model_id} was not downloaded",
+        success=deleted,
+    )
 
 
 # ============================================================================
@@ -1699,6 +1847,228 @@ async def session_cancel_transcription():
     return MessageResponse(message="Transcription cancellation requested", success=True)
 
 
+@app.post("/session/summarize")
+async def session_summarize(request: SessionSummarizeRequest):
+    global active_summary_process, active_summary_cancel_requested
+
+    if request.model_id not in SUMMARY_MODELS:
+        raise HTTPException(status_code=404, detail=f"Summary model not found: {request.model_id}")
+
+    if not request.presets:
+        raise HTTPException(status_code=400, detail="At least one summary preset is required")
+
+    try:
+        normalized_presets = [normalize_summary_request(preset.model_dump()) for preset in request.presets]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    runtime_status = get_summary_runtime_status()
+    if not runtime_status.installed:
+        raise HTTPException(status_code=503, detail="Summary runtime not installed")
+    if runtime_status.worker_path is None or runtime_status.python_path is None:
+        raise HTTPException(status_code=503, detail="Summary runtime is incomplete")
+
+    sessions_base = get_sessions_dir()
+    session_path = sessions_base / request.session_dir
+    if not session_path.exists():
+        raise HTTPException(status_code=404, detail=f"Session directory not found: {request.session_dir}")
+
+    transcription_path = session_path / "transcription.txt"
+    if not transcription_path.exists():
+        raise HTTPException(status_code=404, detail="Session transcription not found")
+
+    model_path = get_summary_model_dir(request.model_id)
+    if not model_path.exists():
+        raise HTTPException(status_code=404, detail="Summary model is not downloaded")
+
+    if active_summary_process is not None:
+        raise HTTPException(status_code=400, detail="Another summary is already running")
+
+    transcript_text = transcription_path.read_text(encoding="utf-8")
+    word_count = len(transcript_text.split())
+    peak_output_tokens = max(preset["max_output_tokens"] for preset in normalized_presets)
+    quantize_kv = should_quantize_kv_cache(request.model_id, word_count, peak_output_tokens)
+    memory_estimate = estimate_summary_memory(
+        request.model_id,
+        word_count,
+        reserved_output_tokens=peak_output_tokens,
+        quantized=quantize_kv,
+    )
+    context_limit = SUMMARY_MODELS[request.model_id]["context_tokens"]
+    if memory_estimate["required_context_tokens"] > context_limit:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Transcript is too large for {request.model_id}: "
+                f"{memory_estimate['required_context_tokens']} > {context_limit} context tokens"
+            ),
+        )
+
+    async def event_generator():
+        global active_summary_process, active_summary_cancel_requested
+        event_queue: queue.Queue = queue.Queue()
+        _SENTINEL = object()
+        active_summary_cancel_requested = False
+        stderr_lines: deque[str] = deque(maxlen=20)
+        terminal_event_seen = False
+        requests_file_path = None
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as request_file:
+            json.dump({"presets": normalized_presets}, request_file)
+            requests_file_path = request_file.name
+
+        command = [
+            runtime_status.python_path,
+            runtime_status.worker_path,
+            "--model-path",
+            str(model_path),
+            "--transcription-file",
+            str(transcription_path),
+            "--requests-file",
+            requests_file_path,
+            "--word-count",
+            str(word_count),
+        ]
+        if quantize_kv:
+            command.extend(
+                [
+                    "--kv-bits",
+                    "8",
+                    "--kv-quant-scheme",
+                    "turboquant",
+                    "--kv-group-size",
+                    "64",
+                    "--quantized-kv-start",
+                    "0",
+                ]
+            )
+
+        process = None
+        process = _subprocess.Popen(
+            command,
+            stdout=_subprocess.PIPE,
+            stderr=_subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        active_summary_process = process
+
+        def _pump_stdout():
+            try:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event_queue.put(json.loads(line))
+                    except json.JSONDecodeError:
+                        event_queue.put({"event": "error", "message": f"Invalid worker output: {line}"})
+                        break
+            finally:
+                event_queue.put(_SENTINEL)
+
+        def _pump_stderr():
+            try:
+                assert process.stderr is not None
+                for line in process.stderr:
+                    line = line.strip()
+                    if line:
+                        stderr_lines.append(line)
+                        print(f"[summary-worker] {line}")
+            except Exception:
+                pass
+
+        threading.Thread(target=_pump_stdout, daemon=True).start()
+        threading.Thread(target=_pump_stderr, daemon=True).start()
+
+        try:
+            initial = {
+                "event": "preparing_runtime",
+                "model_id": request.model_id,
+                "preset_ids": [preset["preset_id"] for preset in normalized_presets],
+                "total_presets": len(normalized_presets),
+                "memory_estimate": memory_estimate,
+            }
+            yield f"data: {json.dumps(initial)}\n\n"
+
+            while True:
+                try:
+                    event = event_queue.get_nowait()
+                except queue.Empty:
+                    await asyncio.sleep(0.1)
+                    if process.poll() is not None and event_queue.empty():
+                        if not terminal_event_seen:
+                            if active_summary_cancel_requested:
+                                terminal_event_seen = True
+                                yield f"data: {json.dumps({'event': 'cancelled'})}\n\n"
+                            else:
+                                terminal_event_seen = True
+                                message = f"Summary worker exited unexpectedly (code {process.returncode})"
+                                if stderr_lines:
+                                    message = f"{message}: {stderr_lines[-1]}"
+                                yield f"data: {json.dumps({'event': 'error', 'message': message})}\n\n"
+                        break
+                    continue
+
+                if event is _SENTINEL:
+                    break
+
+                yield f"data: {json.dumps(event)}\n\n"
+                event_name = event.get("event")
+                if event_name == "done":
+                    _save_session_summary(
+                        session_path=session_path,
+                        preset_id=event.get("preset_id") or "",
+                        model_id=request.model_id,
+                        full_text=event.get("text", ""),
+                        done_event=event,
+                    )
+                if event_name in {"batch_complete", "error", "cancelled"}:
+                    terminal_event_seen = True
+                if event_name in {"error", "cancelled"}:
+                    break
+        finally:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except Exception:
+                    process.kill()
+            active_summary_process = None
+            if requests_file_path and os.path.exists(requests_file_path):
+                try:
+                    os.unlink(requests_file_path)
+                except OSError:
+                    pass
+            active_summary_cancel_requested = False
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/session/cancel-summary", response_model=MessageResponse)
+async def session_cancel_summary() -> MessageResponse:
+    global active_summary_process, active_summary_cancel_requested
+
+    if active_summary_process is None:
+        return MessageResponse(message="No active summary to cancel", success=False)
+
+    active_summary_cancel_requested = True
+    try:
+        active_summary_process.terminate()
+    except Exception:
+        pass
+    return MessageResponse(message="Summary cancellation requested", success=True)
+
+
 @app.post("/session/estimate", response_model=None)
 async def session_estimate(request: EstimateBatchesRequest):
     """
@@ -1784,6 +2154,7 @@ async def session_delete(session_dir: str, request: SessionDeleteRequest = None)
         transcription_file = session_path / "transcription.txt"
         if transcription_file.exists():
             transcription_file.unlink()
+        _clear_session_summaries(session_path)
         _update_session_metadata(session_path, {"has_transcription": False})
 
     return MessageResponse(message=f"Session updated: {session_dir}", success=True)
@@ -1828,6 +2199,7 @@ def _save_session_transcription(session_path: Path, full_text: str, done_event: 
     # Save transcription text
     transcription_path = session_path / "transcription.txt"
     transcription_path.write_text(full_text, encoding="utf-8")
+    _clear_session_summaries(session_path)
 
     # Update metadata
     updates = {
@@ -1839,6 +2211,95 @@ def _save_session_transcription(session_path: Path, full_text: str, done_event: 
     }
     _update_session_metadata(session_path, updates)
     print(f"Session transcription saved: {transcription_path}")
+
+
+def _save_session_summary(
+    session_path: Path,
+    preset_id: str,
+    model_id: str,
+    full_text: str,
+    done_event: dict,
+):
+    summary_file_name = done_event.get("file_name") or get_summary_file_name(preset_id)
+    summary_path = session_path / summary_file_name
+    summary_path.write_text(full_text, encoding="utf-8")
+
+    metadata_path = session_path / "metadata.json"
+    current_metadata = {}
+    if metadata_path.exists():
+        try:
+            with open(metadata_path) as file:
+                current_metadata = json.load(file)
+        except Exception:
+            current_metadata = {}
+
+    summaries = current_metadata.get("summaries", {}) or {}
+    summaries[preset_id] = {
+        "has_summary": True,
+        "status": "completed",
+        "status_message": None,
+        "file_name": summary_file_name,
+        "model_id": model_id,
+        "model_name": SUMMARY_MODELS[model_id]["display_name"],
+        "preset_display_name": done_event.get("display_name"),
+        "word_count": done_event.get("output_word_count", len(full_text.split())),
+        "target_word_count": done_event.get("target_words"),
+        "max_output_tokens": done_event.get("max_output_tokens"),
+        "processing_time_seconds": done_event.get("processing_time_seconds", 0),
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+    _update_session_metadata(session_path, {"summaries": summaries})
+    print(f"Session summary saved: {summary_path}")
+
+
+def _clear_session_summaries(session_path: Path):
+    metadata_path = session_path / "metadata.json"
+    current_metadata = {}
+    if metadata_path.exists():
+        try:
+            with open(metadata_path) as file:
+                current_metadata = json.load(file)
+        except Exception:
+            current_metadata = {}
+
+    summaries = {}
+    current_summaries = current_metadata.get("summaries", {}) or {}
+    default_presets = {
+        "general": ("General Summary", "summary-general.md"),
+        "meeting_notes": ("Meeting Notes", "summary-meeting-notes.md"),
+        "action_items": ("Action Items", "summary-action-items.md"),
+        "technical": ("Technical Summary", "summary-technical.md"),
+    }
+
+    for preset_id, default_data in default_presets.items():
+        current_summaries.setdefault(
+            preset_id,
+            {
+                "file_name": default_data[1],
+                "preset_display_name": default_data[0],
+            },
+        )
+
+    for preset_id, metadata in current_summaries.items():
+        summary_path = session_path / metadata.get("file_name", get_summary_file_name(preset_id))
+        if summary_path.exists():
+            summary_path.unlink()
+        summaries[preset_id] = {
+            "has_summary": False,
+            "status": "idle",
+            "status_message": None,
+            "file_name": metadata.get("file_name", get_summary_file_name(preset_id)),
+            "model_id": None,
+            "model_name": None,
+            "preset_display_name": metadata.get("preset_display_name"),
+            "word_count": None,
+            "target_word_count": None,
+            "max_output_tokens": None,
+            "processing_time_seconds": None,
+            "generated_at": None,
+        }
+    _update_session_metadata(session_path, {"summaries": summaries})
 
 
 def _update_session_metadata(session_path: Path, updates: dict):

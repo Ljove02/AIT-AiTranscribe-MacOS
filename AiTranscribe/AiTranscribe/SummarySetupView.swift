@@ -1,67 +1,25 @@
 /*
- NemoSetupView.swift
- ===================
+ SummarySetupView.swift
+ ======================
 
- UI for installing NeMo support.
+ UI for installing the Summary runtime (MLX + Gemma).
 
- This is presented as a sheet when the user wants to enable NeMo models
- (Parakeet, Nemotron). It shows:
- - Information about NeMo (~3GB download)
- - Python requirement notice
- - Progress steps with checkmarks
- - Cancel button
- - Error display with retry
+ Presented as a sheet when the user clicks the Summarization pill.
+ Shows runtime status, install/remove actions, and progress.
+ Matches the app's glass-material aesthetic.
  */
 
 import SwiftUI
 
-struct NemoSetupView: View {
+struct SummarySetupView: View {
     @EnvironmentObject var appState: AppState
-    @EnvironmentObject var backendManager: BackendManager
-    @ObservedObject var setupManager: NemoSetupManager
+    @ObservedObject var setupManager: SummarySetupManager
     @Environment(\.dismiss) var dismiss
 
-    /// Whether to automatically start installation on appear
-    var autoStart: Bool = false
-
-    /// Callback when installation completes
-    var onComplete: (() -> Void)?
-
-    /// Python info fetched off the main thread (avoids Process in view body)
+    /// Python info fetched off the main thread
     @State private var pythonInfo: (path: String, version: String)?
     @State private var pythonChecked = false
-
-    private var nemoModelIsLoaded: Bool {
-        guard let loadedId = appState.loadedModelId else { return false }
-        return appState.availableModels.first(where: { $0.id == loadedId })?.nemoRequired == true
-    }
-
-    private var nemoInstalled: Bool {
-        setupManager.currentStep == .complete || appState.nemoAvailable || appState.nemoVenvExists || nemoModelIsLoaded
-    }
-
-    private var nemoReady: Bool {
-        setupManager.currentStep == .complete || appState.nemoAvailable || nemoModelIsLoaded
-    }
-
-    private var detectedNemoVersion: String? {
-        appState.nemoVersion ?? setupManager.installedNemoVersion
-    }
-
-    private var installSourceDescription: String {
-        if appState.nemoVenvExists {
-            return setupManager.nemoVenvPath.path
-        }
-
-        switch appState.backendMode {
-        case "nemo_venv":
-            return "Detected in the dedicated NeMo runtime."
-        case "development":
-            return "Detected in the current development Python environment."
-        default:
-            return "Detected in the current backend environment."
-        }
-    }
+    @State private var showRemoveConfirmation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -74,15 +32,12 @@ struct NemoSetupView: View {
             ScrollView {
                 VStack(spacing: 20) {
                     if setupManager.isInstalling || setupManager.currentStep == .complete {
-                        // Installation progress
                         installationProgressView
                     } else if let error = setupManager.error {
-                        // Error state
                         errorView(error)
-                    } else if nemoInstalled {
+                    } else if appState.summaryRuntimeInstalled {
                         installedView
                     } else {
-                        // Pre-installation info
                         preInstallationView
                     }
                 }
@@ -91,31 +46,16 @@ struct NemoSetupView: View {
 
             Divider()
 
-            // Footer with action buttons
+            // Footer
             footerSection
         }
         .frame(width: 500, height: 450)
         .task {
-            // Run Python check off the body getter — Process.waitUntilExit()
-            // on the main thread inside a view body causes a crash.
-            let infoTask = Task.detached { [setupManager] in
+            let info = await Task.detached { [setupManager] in
                 setupManager.findPython()
-            }
-
-            if !setupManager.isInstalling {
-                await appState.checkNemoStatus()
-                if let version = appState.nemoVersion {
-                    setupManager.installedNemoVersion = version
-                }
-            }
-
-            pythonInfo = await infoTask.value
+            }.value
+            pythonInfo = info
             pythonChecked = true
-        }
-        .onAppear {
-            if autoStart && !setupManager.isInstalling {
-                startInstallation()
-            }
         }
     }
 
@@ -123,17 +63,16 @@ struct NemoSetupView: View {
 
     private var headerSection: some View {
         HStack(spacing: 16) {
-            // Icon
-            Image(systemName: "cpu")
+            Image(systemName: "sparkles")
                 .font(.system(size: 36))
-                .foregroundStyle(.blue.gradient)
+                .foregroundStyle(.orange.gradient)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Install NeMo Support")
+                Text("Summary Runtime")
                     .font(.title2)
                     .fontWeight(.semibold)
 
-                Text("Enable NVIDIA Parakeet & Nemotron models")
+                Text("MLX-powered local summarization")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
             }
@@ -141,6 +80,85 @@ struct NemoSetupView: View {
             Spacer()
         }
         .padding(20)
+    }
+
+    // MARK: - Installed View
+
+    private var installedView: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            // Status
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Status", systemImage: "checkmark.shield")
+                    .font(.headline)
+
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(appState.summaryRuntimeReady ? .green : .orange)
+                        .frame(width: 8, height: 8)
+                    Text(appState.summaryRuntimeReady ? "Runtime is ready" : "Runtime installed but not active")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.leading, 8)
+            }
+
+            Divider()
+
+            // Info
+            VStack(alignment: .leading, spacing: 12) {
+                Label("About", systemImage: "info.circle")
+                    .font(.headline)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    bulletPoint("Runs Gemma models locally via MLX")
+                    bulletPoint("Generates session summaries on-device")
+                    bulletPoint("No data leaves your Mac")
+                }
+                .padding(.leading, 8)
+            }
+
+            Divider()
+
+            // Location
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Installation location", systemImage: "folder")
+                    .font(.headline)
+
+                Text(setupManager.summaryVenvPath.path)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .textSelection(.enabled)
+            }
+
+            Divider()
+
+            // Remove option
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Remove Runtime", systemImage: "trash")
+                    .font(.headline)
+                    .foregroundStyle(.red)
+
+                Text("This will delete the virtual environment and all installed packages. Downloaded models are stored separately.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Button("Remove Runtime") {
+                    showRemoveConfirmation = true
+                }
+                .foregroundStyle(.red)
+                .font(.system(size: 12, weight: .medium))
+                .padding(.leading, 8)
+                .confirmationDialog("Remove Summary Runtime?", isPresented: $showRemoveConfirmation) {
+                    Button("Remove", role: .destructive) {
+                        setupManager.removeRuntime()
+                        Task { await appState.fetchSummaryRuntimeStatus() }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This will remove the summary runtime environment. You can reinstall it later.")
+                }
+            }
+        }
     }
 
     // MARK: - Pre-Installation View
@@ -153,9 +171,9 @@ struct NemoSetupView: View {
                     .font(.headline)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    bulletPoint("PyTorch - Deep learning framework")
-                    bulletPoint("NeMo Toolkit - NVIDIA's ASR framework")
-                    bulletPoint("Dependencies - Audio processing libraries")
+                    bulletPoint("MLX - Apple Silicon ML framework")
+                    bulletPoint("MLX-LM - Language model inference")
+                    bulletPoint("Dependencies - Tokenizers & utilities")
                 }
                 .padding(.leading, 8)
 
@@ -175,18 +193,17 @@ struct NemoSetupView: View {
                 Label("Requirements", systemImage: "checklist")
                     .font(.headline)
 
-                // Python status
                 pythonStatusView
             }
 
             Divider()
 
-            // Where it will be installed
+            // Installation location
             VStack(alignment: .leading, spacing: 8) {
                 Label("Installation location", systemImage: "folder")
                     .font(.headline)
 
-                Text(setupManager.nemoVenvPath.path)
+                Text(setupManager.summaryVenvPath.path)
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .textSelection(.enabled)
@@ -196,66 +213,12 @@ struct NemoSetupView: View {
 
     private func bulletPoint(_ text: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Text("•")
+            Text("\u{2022}")
                 .foregroundColor(.secondary)
             Text(text)
                 .foregroundColor(.secondary)
         }
         .font(.subheadline)
-    }
-
-    // MARK: - Installed View
-
-    private var installedView: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            VStack(alignment: .leading, spacing: 12) {
-                Label("Status", systemImage: "checkmark.shield")
-                    .font(.headline)
-
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(nemoReady ? .green : .orange)
-                        .frame(width: 8, height: 8)
-
-                    Text(nemoReady ? "NeMo is ready" : "NeMo is installed but not active")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.leading, 8)
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 12) {
-                Label("About", systemImage: "info.circle")
-                    .font(.headline)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    bulletPoint("Enables NVIDIA Parakeet and Nemotron models")
-                    bulletPoint("Runs locally on your Mac")
-                    bulletPoint("Keeps transcription data on-device")
-                }
-                .padding(.leading, 8)
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                Label(appState.nemoVenvExists ? "Installation location" : "Detection source", systemImage: "folder")
-                    .font(.headline)
-
-                Text(installSourceDescription)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-
-                if let version = detectedNemoVersion {
-                    Text("Version: \(version)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
     }
 
     private var pythonStatusView: some View {
@@ -274,7 +237,7 @@ struct NemoSetupView: View {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.red)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Python 3.9+ not found")
+                    Text("Python 3.10+ not found")
                         .foregroundStyle(.red)
                     Link("Download from python.org", destination: URL(string: "https://www.python.org/downloads/")!)
                         .font(.caption)
@@ -291,7 +254,7 @@ struct NemoSetupView: View {
         VStack(spacing: 24) {
             // Step indicators
             VStack(alignment: .leading, spacing: 16) {
-                ForEach(NemoSetupStep.allCases.filter { $0 != .idle && $0 != .error }, id: \.self) { step in
+                ForEach(SummarySetupStep.allCases.filter { $0 != .idle && $0 != .error }, id: \.self) { step in
                     stepRow(step)
                 }
             }
@@ -301,6 +264,7 @@ struct NemoSetupView: View {
                 VStack(spacing: 8) {
                     ProgressView(value: setupManager.progress)
                         .progressViewStyle(.linear)
+                        .tint(.orange)
 
                     Text(setupManager.statusMessage)
                         .font(.caption)
@@ -323,16 +287,16 @@ struct NemoSetupView: View {
                         .font(.system(size: 48))
                         .foregroundColor(.green)
 
-                    Text("NeMo installed successfully!")
+                    Text("Summary runtime installed!")
                         .font(.headline)
 
-                    if let version = setupManager.installedNemoVersion {
-                        Text("Version: \(version)")
+                    if let mlxVersion = setupManager.installedMLXVersion {
+                        Text("MLX: \(mlxVersion)")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
 
-                    Text("NVIDIA Parakeet and Nemotron models are now available.")
+                    Text("You can now download and use summarization models.")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
@@ -342,19 +306,16 @@ struct NemoSetupView: View {
         }
     }
 
-    private func stepRow(_ step: NemoSetupStep) -> some View {
+    private func stepRow(_ step: SummarySetupStep) -> some View {
         HStack(spacing: 12) {
-            // Status icon
             stepIcon(for: step)
                 .frame(width: 24)
 
-            // Step name
-            Text(step.displayName)
+            Text(step.rawValue)
                 .foregroundColor(stepTextColor(for: step))
 
             Spacer()
 
-            // Spinner for current step
             if setupManager.currentStep == step && setupManager.isInstalling {
                 ProgressView()
                     .scaleEffect(0.7)
@@ -363,28 +324,25 @@ struct NemoSetupView: View {
     }
 
     @ViewBuilder
-    private func stepIcon(for step: NemoSetupStep) -> some View {
-        let stepOrder = NemoSetupStep.allCases.filter { $0 != .idle && $0 != .error }
+    private func stepIcon(for step: SummarySetupStep) -> some View {
+        let stepOrder = SummarySetupStep.allCases.filter { $0 != .idle && $0 != .error }
         let currentIndex = stepOrder.firstIndex(of: setupManager.currentStep) ?? 0
         let stepIndex = stepOrder.firstIndex(of: step) ?? 0
 
         if setupManager.currentStep == .complete || stepIndex < currentIndex {
-            // Completed
             Image(systemName: "checkmark.circle.fill")
                 .foregroundColor(.green)
         } else if stepIndex == currentIndex && setupManager.isInstalling {
-            // Current
             Image(systemName: "circle.fill")
-                .foregroundColor(.blue)
+                .foregroundColor(.orange)
         } else {
-            // Pending
             Image(systemName: "circle")
                 .foregroundColor(.secondary)
         }
     }
 
-    private func stepTextColor(for step: NemoSetupStep) -> Color {
-        let stepOrder = NemoSetupStep.allCases.filter { $0 != .idle && $0 != .error }
+    private func stepTextColor(for step: SummarySetupStep) -> Color {
+        let stepOrder = SummarySetupStep.allCases.filter { $0 != .idle && $0 != .error }
         let currentIndex = stepOrder.firstIndex(of: setupManager.currentStep) ?? 0
         let stepIndex = stepOrder.firstIndex(of: step) ?? 0
 
@@ -396,7 +354,7 @@ struct NemoSetupView: View {
 
     // MARK: - Error View
 
-    private func errorView(_ error: NemoSetupError) -> some View {
+    private func errorView(_ error: SummarySetupError) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 48))
@@ -416,6 +374,7 @@ struct NemoSetupView: View {
                 startInstallation()
             }
             .buttonStyle(.borderedProminent)
+            .tint(.orange)
         }
         .padding()
     }
@@ -424,10 +383,9 @@ struct NemoSetupView: View {
 
     private var footerSection: some View {
         HStack {
-            // Cancel button
             Button("Cancel") {
                 if setupManager.isInstalling {
-                    setupManager.cancel()
+                    setupManager.cancelInstall()
                 }
                 dismiss()
             }
@@ -435,26 +393,26 @@ struct NemoSetupView: View {
 
             Spacer()
 
-            // Action button
             if setupManager.currentStep == .complete {
                 Button("Done") {
-                    onComplete?()
+                    Task { await appState.fetchSummaryRuntimeStatus() }
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.orange)
                 .keyboardShortcut(.defaultAction)
-            } else if nemoInstalled {
+            } else if appState.summaryRuntimeInstalled {
                 Button("Done") {
-                    onComplete?()
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             } else if !setupManager.isInstalling && setupManager.error == nil {
-                Button("Install NeMo") {
+                Button("Install Runtime") {
                     startInstallation()
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.orange)
                 .keyboardShortcut(.defaultAction)
                 .disabled(pythonInfo == nil && pythonChecked)
             }
@@ -467,18 +425,12 @@ struct NemoSetupView: View {
     private func startInstallation() {
         Task {
             do {
-                try await setupManager.installNemo()
-
-                // Switch backend to NeMo mode
-                await backendManager.switchToNemoMode()
-
-                // Refresh app state
-                await appState.checkNemoStatus()
-                await appState.fetchAvailableModels()
-
+                try await setupManager.installRuntime()
+                await appState.fetchSummaryRuntimeStatus()
+                await appState.fetchSummaryModels()
             } catch {
-                if let nemoError = error as? NemoSetupError {
-                    setupManager.error = nemoError
+                if let summaryError = error as? SummarySetupError {
+                    setupManager.error = summaryError
                 } else {
                     setupManager.error = .unknown(error)
                 }
@@ -487,11 +439,9 @@ struct NemoSetupView: View {
     }
 }
 
-
 // MARK: - Preview
 
 #Preview {
-    NemoSetupView(setupManager: NemoSetupManager())
+    SummarySetupView(setupManager: SummarySetupManager())
         .environmentObject(AppState())
-        .environmentObject(BackendManager())
 }

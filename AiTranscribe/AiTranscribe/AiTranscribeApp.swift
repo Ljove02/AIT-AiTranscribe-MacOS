@@ -33,6 +33,7 @@ struct AiTranscribeApp: App {
     @ObservedObject private var appState = AppState.shared
     @ObservedObject private var sessionManager = SessionManager.shared
     @ObservedObject private var backendManager = BackendManager.shared
+    @ObservedObject private var updateChecker = UpdateChecker.shared
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     @State private var hotkeysRegistered = false
@@ -46,38 +47,47 @@ struct AiTranscribeApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("AIT", systemImage: menuBarIcon) {
+        MenuBarExtra {
             MenuBarView()
                 .environmentObject(appState)
                 .environmentObject(backendManager)
                 .environmentObject(sessionManager)
                 .task {
                     if !hotkeysRegistered {
-                        HotkeyManager.shared.setup(appState: appState)
+                        HotkeyManager.shared.setup(appState: appState, sessionManager: sessionManager)
                         hotkeysRegistered = true
                     }
                     requestMicrophonePermissionAtLaunch()
                 }
                 .onChange(of: appState.isRecording) { _, _ in }
+        } label: {
+            menuBarLabel
         }
 
-        Settings {
+        .menuBarExtraStyle(.window)
+
+        Window("AiTranscribe Settings", id: "settings") {
             SettingsView()
                 .environmentObject(appState)
                 .environmentObject(backendManager)
                 .environmentObject(sessionManager)
+                .environmentObject(updateChecker)
+                .task {
+                    await updateChecker.checkForUpdates()
+                }
         }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultSize(width: 1080, height: 740)
     }
 
-    @MainActor private var menuBarIcon: String {
+    @MainActor @ViewBuilder private var menuBarLabel: some View {
         if sessionManager.isSessionRecording {
-            return "record.circle"
+            Label("AIT", systemImage: "bubble.left.and.bubble.right.fill")
         } else if appState.isRecording {
-            return "waveform.circle.fill"
-        } else if appState.isModelLoaded {
-            return "mic.circle.fill"
+            Label("AIT", systemImage: "sensor.radiowaves.left.and.right.fill")
         } else {
-            return "mic.circle"
+            Label("AIT", image: "MenuBarIcon")
         }
     }
 

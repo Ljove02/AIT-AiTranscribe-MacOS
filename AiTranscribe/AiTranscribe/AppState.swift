@@ -54,6 +54,12 @@ class AppState: ObservableObject {
     /// Available models from backend
     @Published var availableModels: [ModelInfoResponse] = []
 
+    /// Available summarization models from backend
+    @Published var availableSummaryModels: [SummaryModelInfoResponse] = []
+
+    /// User-editable summary presets (built-ins + custom)
+    @Published var summaryPresetDefinitions: [SummaryPresetDefinition] = SummaryPresetLibrary.load()
+
     /// Is the model currently loading?
     @Published var isModelLoading: Bool = false
 
@@ -65,6 +71,12 @@ class AppState: ObservableObject {
 
     /// Download progress (0.0 to 1.0)
     @Published var downloadProgress: Double = 0.0
+
+    /// Which summary model is currently being downloaded
+    @Published var downloadingSummaryModelId: String? = nil
+
+    /// Summary model download progress (0.0 to 1.0)
+    @Published var summaryDownloadProgress: Double = 0.0
 
     /// Is currently recording audio?
     @Published var isRecording: Bool = false
@@ -103,6 +115,7 @@ class AppState: ObservableObject {
     @Published var historyPage: Int = 0
     @Published var hasMoreHistory: Bool = true
     @Published var isLoadingMoreHistory: Bool = false
+    @Published var totalHistoryCount: Int = 0
 
     // =========================================================================
     // NEMO STATE
@@ -122,6 +135,15 @@ class AppState: ObservableObject {
 
     /// NeMo setup manager for installation UI
     let nemoSetupManager = NemoSetupManager()
+
+    /// Summary runtime installer
+    let summarySetupManager = SummarySetupManager()
+
+    /// Whether the summary runtime exists on disk
+    @Published var summaryRuntimeInstalled: Bool = false
+
+    /// Whether the summary runtime is ready for use
+    @Published var summaryRuntimeReady: Bool = false
 
     // =========================================================================
     // AUDIO DUCKING SETTINGS
@@ -215,6 +237,10 @@ class AppState: ObservableObject {
         
         // Setup recording indicator
         recordingIndicator.setup(appState: self)
+
+        nemoVenvExists = nemoSetupManager.checkNemoVenvExists()
+        summaryRuntimeInstalled = summarySetupManager.checkSummaryVenvExists()
+        summaryPresetDefinitions = SummaryPresetLibrary.load()
 
         // Note: checkServerStatus() is now called from AiTranscribeApp
         // after the backend has started, to avoid connection errors
@@ -385,7 +411,7 @@ class AppState: ObservableObject {
     /// Load a specific page of history
     func loadHistoryPage(page: Int) async {
         let entries = await historyManager.loadPage(page: page)
-        
+
         if page == 0 {
             // First page - replace all
             transcriptionHistory = entries
@@ -393,11 +419,14 @@ class AppState: ObservableObject {
             // Subsequent page - append
             transcriptionHistory.append(contentsOf: entries)
         }
-        
+
         // Update pagination state
         historyPage = page
         hasMoreHistory = entries.count == 20  // If we got a full page, there might be more
         isLoadingMoreHistory = false
+
+        // Refresh total count
+        totalHistoryCount = await historyManager.getTotalCount()
     }
     
     /// Load next page (for infinite scroll)
@@ -417,8 +446,10 @@ class AppState: ObservableObject {
     func addToHistory(_ entry: TranscriptionEntry) {
         // Add to beginning (newest first)
         transcriptionHistory.insert(entry, at: 0)
-        
-        // Save to JSON via HistoryManager
+        totalHistoryCount += 1
+
+        // Save to JSON + index the new entry
+        historyManager.indexEntry(entry)
         Task {
             await historyManager.save(entry)
         }
@@ -427,28 +458,54 @@ class AppState: ObservableObject {
     /// Delete entry from history
     func deleteFromHistory(_ entry: TranscriptionEntry) {
         transcriptionHistory.removeAll { $0.id == entry.id }
-        
-        // Delete from JSON via HistoryManager
+        totalHistoryCount = max(0, totalHistoryCount - 1)
+
+        historyManager.removeFromIndex(ids: [entry.id])
         Task {
             await historyManager.delete(id: entry.id)
         }
     }
-    
+
     /// Delete multiple entries
     func deleteFromHistory(ids: Set<UUID>) {
+        let removedCount = transcriptionHistory.filter { ids.contains($0.id) }.count
         transcriptionHistory.removeAll { ids.contains($0.id) }
-        
-        // Delete from JSON via HistoryManager
+        totalHistoryCount = max(0, totalHistoryCount - removedCount)
+
+        historyManager.removeFromIndex(ids: ids)
         Task {
             await historyManager.delete(ids: ids)
         }
     }
-    
+
+    /// Whether the semantic search index is built
+    var isHistoryIndexed: Bool { historyManager.isIndexed }
+
+    /// Build the semantic search index (user-triggered)
+    func buildHistoryIndex() async {
+        await historyManager.buildSearchIndex()
+    }
+
+    /// Search history — uses semantic search if indexed, text search otherwise
+    func searchHistory(query: String) async -> [TranscriptionEntry] {
+        if historyManager.isIndexed {
+            return historyManager.semanticSearch(query: query)
+        } else {
+            return await historyManager.textSearch(query: query)
+        }
+    }
+
+    /// Load all history entries (for stats computation)
+    func loadAllHistoryEntries() async -> [TranscriptionEntry] {
+        await historyManager.loadAllEntries()
+    }
+
     /// Clear all history
     func clearHistory() {
         transcriptionHistory = []
-        
-        // Clear from JSON via HistoryManager
+        totalHistoryCount = 0
+
+        historyManager.clearIndex()
         Task {
             await historyManager.clearAll()
         }
@@ -491,6 +548,8 @@ class AppState: ObservableObject {
 
                 // Fetch available models
                 await fetchAvailableModels()
+                await fetchSummaryModels()
+                await fetchSummaryRuntimeStatus()
 
                 // Also fetch available devices
                 await fetchAudioDevices()
@@ -523,6 +582,116 @@ class AppState: ObservableObject {
             }
         } catch {
             print("Failed to fetch models: \(error)")
+        }
+    }
+
+    func fetchSummaryRuntimeStatus() async {
+        do {
+            let status = try await apiClient.getSummaryRuntimeStatus()
+            summaryRuntimeInstalled = status.installed
+            summaryRuntimeReady = status.ready
+        } catch {
+            summaryRuntimeInstalled = summarySetupManager.checkSummaryVenvExists()
+            summaryRuntimeReady = false
+            print("Failed to fetch summary runtime status: \(error)")
+        }
+    }
+
+    func fetchSummaryModels() async {
+        do {
+            availableSummaryModels = try await apiClient.listSummaryModels()
+        } catch {
+            print("Failed to fetch summary models: \(error)")
+        }
+    }
+
+    func setPreferredSummaryModel(_ modelId: String) {
+        UserDefaults.standard.set(modelId, forKey: "preferredSummaryModelId")
+    }
+
+    var preferredSummaryModelId: String? {
+        UserDefaults.standard.string(forKey: "preferredSummaryModelId")
+    }
+
+    func reloadSummaryPresets() {
+        summaryPresetDefinitions = SummaryPresetLibrary.load()
+    }
+
+    func saveSummaryPresets(_ presets: [SummaryPresetDefinition]) {
+        SummaryPresetLibrary.save(presets)
+        summaryPresetDefinitions = SummaryPresetLibrary.load()
+    }
+
+    func upsertSummaryPreset(_ preset: SummaryPresetDefinition) {
+        var presets = summaryPresetDefinitions
+        if let index = presets.firstIndex(where: { $0.id == preset.id }) {
+            presets[index] = preset
+        } else {
+            presets.append(preset)
+        }
+        saveSummaryPresets(presets)
+    }
+
+    func deleteSummaryPreset(id: String) {
+        let updated = summaryPresetDefinitions.filter { $0.id != id || $0.isBuiltIn }
+        saveSummaryPresets(updated)
+    }
+
+    func resetBuiltInSummaryPreset(id: String) {
+        guard let defaultPreset = SummaryPresetLibrary.defaultDefinition(for: id) else { return }
+        var presets = summaryPresetDefinitions
+        if let index = presets.firstIndex(where: { $0.id == id }) {
+            presets[index] = defaultPreset
+        } else {
+            presets.append(defaultPreset)
+        }
+        saveSummaryPresets(presets)
+    }
+
+    func downloadSummaryModel(modelId: String) async -> Bool {
+        downloadingSummaryModelId = modelId
+        summaryDownloadProgress = 0
+        statusMessage = "Downloading summary model..."
+
+        var failed = false
+        do {
+            try await apiClient.downloadSummaryModel(modelId: modelId) { event in
+                switch event.status {
+                case "downloading":
+                    self.summaryDownloadProgress = event.progress ?? 0
+                    if let downloaded = event.downloadedMB, let total = event.totalMB {
+                        self.statusMessage = "Downloading summary model... \(downloaded)/\(total) MB"
+                    }
+                case "complete":
+                    self.summaryDownloadProgress = 1
+                    self.statusMessage = "Summary model downloaded"
+                case "error":
+                    failed = true
+                    self.statusMessage = event.message ?? "Summary model download failed"
+                default:
+                    break
+                }
+            }
+            await fetchSummaryModels()
+        } catch {
+            failed = true
+            statusMessage = "Summary model download failed: \(error.localizedDescription)"
+        }
+
+        downloadingSummaryModelId = nil
+        summaryDownloadProgress = 0
+        return !failed
+    }
+
+    func deleteSummaryModel(modelId: String) async {
+        statusMessage = "Deleting summary model..."
+        do {
+            let response = try await apiClient.deleteSummaryModel(modelId: modelId)
+            statusMessage = response.message
+            await fetchSummaryModels()
+        } catch {
+            statusMessage = "Failed to delete summary model"
+            print("Delete summary model error: \(error)")
         }
     }
 
@@ -719,10 +888,7 @@ class AppState: ObservableObject {
     /// Refresh local NeMo venv state (without backend call)
     func refreshNemoVenvState() {
         let exists = nemoSetupManager.checkNemoVenvExists()
-        // Defer publishing to next run loop to prevent publishing during view updates
-        DispatchQueue.main.async { [weak self] in
-            self?.nemoVenvExists = exists
-        }
+        nemoVenvExists = exists
     }
 
     /// Check if a specific model can be loaded (has required dependencies)

@@ -42,58 +42,102 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 
 struct SettingsSidebar: View {
     @Binding var selectedSection: SettingsSection
+    let isExpanded: Bool
+    @State private var hoveredSection: SettingsSection?
+
+    private var sidebarWidth: CGFloat { isExpanded ? 200 : 52 }
 
     var body: some View {
         VStack(spacing: 0) {
-            // App icon at top
+            // App branding
+            sidebarHeader
+                .padding(.top, 10)
+                .padding(.bottom, 14)
+
+            // Navigation items
+            VStack(spacing: 3) {
+                ForEach(SettingsSection.allCases) { section in
+                    SidebarItem(
+                        section: section,
+                        isSelected: selectedSection == section,
+                        isHovered: hoveredSection == section,
+                        isExpanded: isExpanded
+                    )
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            selectedSection = section
+                        }
+                    }
+                    .onHover { hovering in
+                        hoveredSection = hovering ? section : nil
+                    }
+                }
+            }
+            .padding(.horizontal, isExpanded ? 10 : 6)
+
+            Spacer()
+
+            // Version badge
+            if isExpanded {
+                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.2")")
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundColor(.white.opacity(0.45))
+                    .padding(.vertical, 3)
+                    .padding(.horizontal, 9)
+                    .background(.white.opacity(0.08), in: .capsule)
+                    .padding(.bottom, 14)
+                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            } else {
+                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.2")")
+                    .font(.system(size: 8, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.25))
+                    .padding(.bottom, 14)
+                    .transition(.opacity)
+            }
+        }
+        .frame(width: sidebarWidth)
+        .background(
+            Color(nsColor: .windowBackgroundColor).opacity(0.45)
+        )
+        .clipShape(
+            UnevenRoundedRectangle(
+                topLeadingRadius: 0,
+                bottomLeadingRadius: 0,
+                bottomTrailingRadius: 0,
+                topTrailingRadius: 14
+            )
+        )
+    }
+
+    private var sidebarHeader: some View {
+        HStack(spacing: 8) {
             Group {
                 if let nsImage = loadAppIconFromBundle() {
                     Image(nsImage: nsImage)
                         .resizable()
                         .scaledToFit()
-                        .frame(width: 48, height: 48)
                 } else {
                     Image(systemName: "mic.circle.fill")
                         .resizable()
                         .scaledToFit()
-                        .frame(width: 48, height: 48)
                         .foregroundStyle(.blue.gradient)
                 }
             }
-            .padding(.top, 20)
-            .padding(.bottom, 4)
+            .frame(width: 24, height: 24)
+            .clipShape(.rect(cornerRadius: 6, style: .continuous))
 
-            Text("AI-Transcribe")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(.primary)
-                .padding(.bottom, 16)
+            if isExpanded {
+                Text("AI-Transcribe")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .transition(.opacity.combined(with: .move(edge: .leading)))
 
-            // Navigation items
-            VStack(spacing: 2) {
-                ForEach(SettingsSection.allCases) { section in
-                    SidebarItem(
-                        section: section,
-                        isSelected: selectedSection == section
-                    )
-                    .onTapGesture {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            selectedSection = section
-                        }
-                    }
-                }
+                Spacer()
             }
-            .padding(.horizontal, 12)
-
-            Spacer()
-
-            // Version at bottom
-            Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.5")")
-                .font(.caption2)
-                .foregroundColor(.secondary.opacity(0.6))
-                .padding(.bottom, 16)
         }
-        .frame(width: 200)
-        .background(Color(NSColor.controlBackgroundColor))
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, isExpanded ? 14 : 0)
     }
 }
 
@@ -102,27 +146,43 @@ struct SettingsSidebar: View {
 struct SidebarItem: View {
     let section: SettingsSection
     let isSelected: Bool
+    let isHovered: Bool
+    let isExpanded: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: isExpanded ? 10 : 0) {
             Image(systemName: section.icon)
-                .font(.system(size: 14))
-                .foregroundColor(isSelected ? .accentColor : .secondary)
-                .frame(width: 20)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(isSelected ? .white : .secondary)
+                .frame(width: 22, height: 22)
 
-            Text(section.label)
-                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-                .foregroundColor(isSelected ? .accentColor : .primary)
+            if isExpanded {
+                Text(section.label)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? .white : .primary)
+                    .transition(.opacity.combined(with: .move(edge: .leading)))
 
-            Spacer()
+                Spacer()
+            }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
-        )
-        .contentShape(Rectangle())
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, isExpanded ? 10 : 0)
+        .padding(.vertical, 7)
+        .background(itemBackground)
+        .clipShape(.rect(cornerRadius: 10, style: .continuous))
+        .contentShape(.rect(cornerRadius: 10))
+        .help(isExpanded ? "" : section.label)
+    }
+
+    @ViewBuilder
+    private var itemBackground: some View {
+        if isSelected {
+            Color.accentColor
+        } else if isHovered {
+            Color.primary.opacity(0.06)
+        } else {
+            Color.clear
+        }
     }
 }
 

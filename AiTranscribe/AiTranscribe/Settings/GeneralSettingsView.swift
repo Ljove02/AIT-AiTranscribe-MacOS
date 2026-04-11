@@ -5,125 +5,200 @@ import AVFoundation
 
 struct GeneralSettingsView: View {
     @EnvironmentObject var appState: AppState
+    let hasAnimated: Bool
+    let onAnimated: () -> Void
 
-    /// Auto-paste after transcription completes (simulates Cmd+V)
     @AppStorage("autoPasteAfterTranscription") private var autoPasteAfterTranscription = false
-
-    /// Auto-start recording on app launch
-    @AppStorage("autoLoadModel") private var autoLoadModel = true
-
-    /// Play sound when recording starts/stops
     @AppStorage("playSounds") private var playSounds = true
-
-    /// Recording indicator position
     @AppStorage("indicatorPosition") private var indicatorPosition = "topCenter"
 
+    // Init from hasAnimated so the very first frame is correct — no jump
+    @State private var appeared: Bool
+
+    init(hasAnimated: Bool, onAnimated: @escaping () -> Void) {
+        self.hasAnimated = hasAnimated
+        self.onAnimated = onAnimated
+        _appeared = State(initialValue: hasAnimated)
+    }
+
     var body: some View {
-        Form {
-            Section("Transcription") {
-                Toggle("Auto-paste after transcription", isOn: $autoPasteAfterTranscription)
-                    .help("Transcribed text is copied to clipboard. When enabled, it also pastes automatically at cursor position.")
-                    .onChange(of: autoPasteAfterTranscription) { _, newValue in
-                        if newValue {
-                            appState.checkAccessibilityPermissionsIfNeeded()
+        ScrollView {
+            VStack(spacing: 0) {
+                // ── Title Header ─────────────────────────────────
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("General")
+                            .font(.system(size: 22, weight: .bold, design: .rounded))
+
+                        Text("5 options")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .staggerIn(index: 0, appeared: appeared)
+
+                // Transcription section
+                Group {
+                    SettingsSectionHeader(title: "Transcription")
+
+                    SettingsRow(
+                        title: "Auto-paste after transcription",
+                        description: "Transcribed text is copied to clipboard. When enabled, it also pastes automatically at cursor position."
+                    ) {
+                        Toggle("", isOn: $autoPasteAfterTranscription)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .onChange(of: autoPasteAfterTranscription) { _, newValue in
+                                if newValue {
+                                    appState.checkAccessibilityPermissionsIfNeeded()
+                                }
+                            }
+                    }
+                }
+                .staggerIn(index: 1, appeared: appeared)
+
+                SettingsDivider()
+                    .staggerIn(index: 2, appeared: appeared)
+
+                // Recording Indicator section
+                Group {
+                    SettingsSectionHeader(title: "Recording Indicator")
+
+                    SettingsRow(
+                        title: "Position",
+                        description: "Where the recording indicator appears on screen."
+                    ) {
+                        Picker("", selection: $indicatorPosition) {
+                            ForEach(RecordingIndicatorController.ScreenPosition.allCases, id: \.rawValue) { pos in
+                                Text(pos.displayName).tag(pos.rawValue)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 140)
+                        .onChange(of: indicatorPosition) { _, newValue in
+                            if let pos = RecordingIndicatorController.ScreenPosition(rawValue: newValue) {
+                                appState.recordingIndicator.setPosition(pos)
+                            }
                         }
                     }
-            }
+                }
+                .staggerIn(index: 3, appeared: appeared)
 
-            Section("Recording Indicator") {
-                Picker("Position", selection: $indicatorPosition) {
-                    ForEach(RecordingIndicatorController.ScreenPosition.allCases, id: \.rawValue) { pos in
-                        Text(pos.displayName).tag(pos.rawValue)
+                SettingsDivider()
+                    .staggerIn(index: 4, appeared: appeared)
+
+                // Feedback section
+                Group {
+                    SettingsSectionHeader(title: "Feedback")
+
+                    SettingsRow(
+                        title: "Play sounds",
+                        description: "Play audio feedback when recording starts and stops."
+                    ) {
+                        Toggle("", isOn: $playSounds)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
                     }
                 }
-                .onChange(of: indicatorPosition) { _, newValue in
-                    if let pos = RecordingIndicatorController.ScreenPosition(rawValue: newValue) {
-                        appState.recordingIndicator.setPosition(pos)
+                .staggerIn(index: 5, appeared: appeared)
+
+                SettingsDivider()
+                    .staggerIn(index: 6, appeared: appeared)
+
+                // Audio section
+                Group {
+                    SettingsSectionHeader(title: "Audio")
+
+                    AudioDuckingSettings()
+                }
+                .staggerIn(index: 7, appeared: appeared)
+
+                SettingsDivider()
+                    .staggerIn(index: 8, appeared: appeared)
+
+                // Permissions section
+                Group {
+                    SettingsSectionHeader(title: "Permissions")
+
+                    SettingsRow(
+                        title: "Microphone Access",
+                        description: microphoneDescription
+                    ) {
+                        microphoneStatusBadge
+                    }
+
+                    if microphoneStatus != .authorized {
+                        SettingsRow(
+                            title: "Request Permission",
+                            description: "If the app doesn't appear in Microphone settings, click this first."
+                        ) {
+                            Button("Request") {
+                                requestMicrophonePermission()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                    }
+
+                    SettingsRow(
+                        title: "System Settings",
+                        description: "Open macOS Privacy & Security to manage microphone access."
+                    ) {
+                        Button("Open") {
+                            openMicrophoneSettings()
+                        }
+                        .controlSize(.small)
                     }
                 }
+                .staggerIn(index: 9, appeared: appeared)
+
+                // Bottom spacing
+                Spacer(minLength: 20)
             }
-
-            Section("Startup") {
-                Toggle("Load model on app launch", isOn: $autoLoadModel)
-            }
-
-            Section("Feedback") {
-                Toggle("Play sounds", isOn: $playSounds)
-            }
-
-            Section("Audio") {
-                AudioDuckingSettings()
-            }
-
-            Section("Permissions") {
-                // Microphone permission status
-                HStack {
-                    Text("Microphone Access")
-                    Spacer()
-                    microphoneStatusView
-                }
-
-                // Request permission button (only show if not determined or denied)
-                if microphoneStatus != .authorized {
-                    Button("Request Microphone Permission") {
-                        requestMicrophonePermission()
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-
-                // Open System Settings button
-                Button("Open Microphone Settings...") {
-                    openMicrophoneSettings()
-                }
-
-                Text("If the app doesn't appear in Microphone settings, click 'Request Microphone Permission' first, then check again.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
+            .padding(.horizontal, 28)
+            .padding(.top, 8)
         }
-        .formStyle(.grouped)
-        .padding()
+        .scrollIndicators(.automatic)
+        .task(id: "stagger") {
+            guard !hasAnimated else { return }
+            try? await Task.sleep(for: .milliseconds(80))
+            appeared = true
+            onAnimated()
+        }
     }
 
     // MARK: - Microphone Permission
 
-    /// Current microphone authorization status
     private var microphoneStatus: AVAuthorizationStatus {
         AVCaptureDevice.authorizationStatus(for: .audio)
     }
 
-    /// View showing microphone permission status
-    @ViewBuilder
-    private var microphoneStatusView: some View {
+    private var microphoneDescription: String {
         switch microphoneStatus {
         case .authorized:
-            HStack(spacing: 4) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-                Text("Granted")
-                    .foregroundColor(.green)
-            }
+            return "Microphone access is granted."
         case .denied, .restricted:
-            HStack(spacing: 4) {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.red)
-                Text("Denied")
-                    .foregroundColor(.red)
-            }
+            return "Microphone access was denied. Enable it in System Settings."
         case .notDetermined:
-            HStack(spacing: 4) {
-                Image(systemName: "questionmark.circle.fill")
-                    .foregroundColor(.orange)
-                Text("Not Requested")
-                    .foregroundColor(.orange)
-            }
+            return "Microphone permission has not been requested yet."
         @unknown default:
-            Text("Unknown")
-                .foregroundColor(.secondary)
+            return "Unknown status."
         }
     }
 
-    /// Request microphone permission - this triggers the system dialog
+    private var microphoneStatusBadge: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(microphoneStatus == .authorized ? .green : (microphoneStatus == .notDetermined ? .orange : .red))
+                .frame(width: 8, height: 8)
+
+            Text(microphoneStatus == .authorized ? "Granted" : (microphoneStatus == .notDetermined ? "Not Requested" : "Denied"))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(microphoneStatus == .authorized ? .green : (microphoneStatus == .notDetermined ? .orange : .red))
+        }
+    }
+
     private func requestMicrophonePermission() {
         AVCaptureDevice.requestAccess(for: .audio) { granted in
             DispatchQueue.main.async {
@@ -136,17 +211,95 @@ struct GeneralSettingsView: View {
         }
     }
 
-    /// Open System Settings > Privacy & Security > Microphone
     private func openMicrophoneSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
             NSWorkspace.shared.open(url)
         }
     }
+}
 
-    /// Open System Settings > Privacy & Security > Accessibility
-    private func openAccessibilitySettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-            NSWorkspace.shared.open(url)
+// MARK: - Reusable Settings Components
+
+/// Section header — small caps title above a group of rows
+struct SettingsSectionHeader: View {
+    let title: String
+
+    var body: some View {
+        HStack {
+            Text(title.uppercased())
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .tracking(0.8)
+            Spacer()
         }
+        .padding(.top, 20)
+        .padding(.bottom, 8)
+    }
+}
+
+/// A single settings row: title + description on the left, control on the right
+struct SettingsRow<Control: View>: View {
+    let title: String
+    let description: String
+    @ViewBuilder let control: Control
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.primary)
+
+                Text(description)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer()
+
+            control
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .background(.thinMaterial, in: .rect(cornerRadius: 10, style: .continuous))
+        .padding(.vertical, 2)
+    }
+}
+
+/// Transparent divider between sections
+struct SettingsDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(.white.opacity(0.06))
+            .frame(height: 0.5)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Staggered Appear Modifier
+
+/// Cascading slide-up animation for settings rows.
+/// Uses offset + clip only (no opacity) — opacity breaks material compositing
+/// and causes system controls (Toggle, Picker, Slider) to flash black.
+struct StaggerInModifier: ViewModifier {
+    let index: Int
+    let appeared: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .offset(y: appeared ? 0 : 16)
+            .animation(
+                .spring(duration: 0.4, bounce: 0.12).delay(Double(index) * 0.05),
+                value: appeared
+            )
+    }
+}
+
+extension View {
+    func staggerIn(index: Int, appeared: Bool) -> some View {
+        modifier(StaggerInModifier(index: index, appeared: appeared))
     }
 }

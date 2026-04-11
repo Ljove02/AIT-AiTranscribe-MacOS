@@ -1,0 +1,7 @@
+# Summary runtime dependencies for AiTranscribe
+# Installed into ~/Library/Application Support/AiTranscribe/summary-venv
+
+huggingface_hub>=0.32.0
+mlx>=0.29.0
+mlx-vlm>=0.4.4
+psutil>=5.9.0
