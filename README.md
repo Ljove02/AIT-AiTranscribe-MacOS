@@ -8,7 +8,7 @@ A powerful macOS menu bar application for local speech-to-text transcription. Ru
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Swift](https://img.shields.io/badge/Swift-5.9+-orange)
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
-![Version](https://img.shields.io/badge/version-0.1.5-purple)
+![Version](https://img.shields.io/badge/version-0.2.0-purple)
 ![Stars](https://img.shields.io/github/stars/Ljove02/AIT-AiTranscribe-MacOS)
 
 ---

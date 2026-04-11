@@ -551,6 +551,105 @@ class APIClient {
         try checkResponse(response)
         return try decoder.decode(SessionEstimateResponse.self, from: data)
     }
+
+    // MARK: - Summary Runtime & Models
+
+    func getSummaryRuntimeStatus() async throws -> SummaryRuntimeStatusResponse {
+        return try await get("/summary/runtime/status")
+    }
+
+    func listSummaryModels() async throws -> [SummaryModelInfoResponse] {
+        return try await get("/summary/models")
+    }
+
+    func downloadSummaryModel(modelId: String, onProgress: @escaping (DownloadProgressEvent) -> Void) async throws {
+        let url = baseURL.appendingPathComponent("/summary/models/\(modelId)/download")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 3600
+
+        let (asyncBytes, response) = try await session.bytes(for: request)
+        try checkResponse(response)
+
+        for try await line in asyncBytes.lines {
+            if line.hasPrefix("data: ") {
+                let jsonString = String(line.dropFirst(6))
+                if let data = jsonString.data(using: .utf8),
+                   let event = try? decoder.decode(DownloadProgressEvent.self, from: data) {
+                    await MainActor.run {
+                        onProgress(event)
+                    }
+                }
+            }
+        }
+    }
+
+    func deleteSummaryModel(modelId: String) async throws -> MessageResponse {
+        let url = baseURL.appendingPathComponent("/summary/models/\(modelId)")
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        let (data, response) = try await session.data(for: request)
+        try checkResponse(response)
+        return try decoder.decode(MessageResponse.self, from: data)
+    }
+
+    func summarizeSession(
+        sessionDir: String,
+        modelId: String,
+        presets: [SummaryGenerationPresetRequest],
+        onEvent: @escaping (SessionSummaryEvent) -> Void
+    ) async throws {
+        let url = baseURL.appendingPathComponent("/session/summarize")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 7200
+
+        let body: [String: Any] = [
+            "session_dir": sessionDir,
+            "model_id": modelId,
+            "presets": try presets.map { preset in
+                let data = try encoder.encode(preset)
+                return try JSONSerialization.jsonObject(with: data)
+            },
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (asyncBytes, response) = try await session.bytes(for: request)
+        try checkResponse(response)
+
+        var sawTerminalEvent = false
+        for try await line in asyncBytes.lines {
+            if line.hasPrefix("data: ") {
+                let jsonString = String(line.dropFirst(6))
+                if let data = jsonString.data(using: .utf8),
+                   let event = try? decoder.decode(SessionSummaryEvent.self, from: data) {
+                    if ["batch_complete", "error", "cancelled"].contains(event.event) {
+                        sawTerminalEvent = true
+                    }
+                    await MainActor.run {
+                        onEvent(event)
+                    }
+                }
+            }
+        }
+
+        if !sawTerminalEvent {
+            throw NSError(
+                domain: "AiTranscribe.APIClient",
+                code: -102,
+                userInfo: [NSLocalizedDescriptionKey: "Summary stream ended unexpectedly."]
+            )
+        }
+    }
+
+    func cancelSessionSummary() async throws -> MessageResponse {
+        return try await post("/session/cancel-summary")
+    }
 }
 
 
@@ -758,6 +857,125 @@ struct SessionTranscriptionEvent: Codable {
         case batchesCompleted = "batches_completed"
         case chunkDuration = "chunk_duration"
         case totalAudioSeconds = "total_audio_seconds"
+    }
+}
+
+struct SummaryRuntimeStatusResponse: Codable {
+    let installed: Bool
+    let ready: Bool
+    let venvPath: String
+    let pythonPath: String?
+    let workerPath: String?
+    let requirementsPath: String?
+    let mlxVlmAvailable: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case installed, ready
+        case venvPath = "venv_path"
+        case pythonPath = "python_path"
+        case workerPath = "worker_path"
+        case requirementsPath = "requirements_path"
+        case mlxVlmAvailable = "mlx_vlm_available"
+    }
+}
+
+struct SummaryModelInfoResponse: Codable, Identifiable {
+    let id: String
+    let displayName: String
+    let provider: String
+    let engine: String
+    let quantization: String
+    let contextTokens: Int
+    let downloadSizeMB: Int
+    let residentModelRamMB: Int
+    let downloaded: Bool
+    let recommended: Bool
+    let path: String?
+    let modelUrl: String?
+    let kvBytesPerTokenDefault: Int
+    let kvBytesPerTokenQuantized: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, provider, engine, quantization, downloaded, recommended, path
+        case displayName = "display_name"
+        case contextTokens = "context_tokens"
+        case downloadSizeMB = "download_size_mb"
+        case residentModelRamMB = "resident_model_ram_mb"
+        case modelUrl = "model_url"
+        case kvBytesPerTokenDefault = "kv_bytes_per_token_default"
+        case kvBytesPerTokenQuantized = "kv_bytes_per_token_quantized"
+    }
+}
+
+struct SummaryMemoryEstimateResponse: Codable, Equatable {
+    let estimatedPromptTokens: Int
+    let estimatedTranscriptTokens: Int
+    let reservedOutputTokens: Int
+    let requiredContextTokens: Int
+    let contextUtilization: Double
+    let residentModelRamMB: Int
+    let estimatedKVCacheRamMB: Int
+    let estimatedTotalRamMB: Int
+    let physicalRamMB: Int
+    let memoryBudgetMB: Int
+    let willQuantizeKV: Bool
+    let fitsMemoryBudget: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case contextUtilization = "context_utilization"
+        case estimatedPromptTokens = "estimated_prompt_tokens"
+        case estimatedTranscriptTokens = "estimated_transcript_tokens"
+        case reservedOutputTokens = "reserved_output_tokens"
+        case requiredContextTokens = "required_context_tokens"
+        case residentModelRamMB = "resident_model_ram_mb"
+        case estimatedKVCacheRamMB = "estimated_kv_cache_ram_mb"
+        case estimatedTotalRamMB = "estimated_total_ram_mb"
+        case physicalRamMB = "physical_ram_mb"
+        case memoryBudgetMB = "memory_budget_mb"
+        case willQuantizeKV = "will_quantize_kv"
+        case fitsMemoryBudget = "fits_memory_budget"
+    }
+}
+
+struct SessionSummaryEvent: Codable {
+    let event: String
+    let presetId: String?
+    let presetIds: [String]?
+    let displayName: String?
+    let fileName: String?
+    let modelId: String?
+    let modelName: String?
+    let text: String?
+    let message: String?
+    let memoryEstimate: SummaryMemoryEstimateResponse?
+    let kvQuantized: Bool?
+    let kvBits: Double?
+    let kvQuantScheme: String?
+    let processingTimeSeconds: Double?
+    let outputWordCount: Int?
+    let targetWords: Int?
+    let maxOutputTokens: Int?
+    let batchIndex: Int?
+    let totalPresets: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case event, text, message
+        case presetId = "preset_id"
+        case presetIds = "preset_ids"
+        case displayName = "display_name"
+        case fileName = "file_name"
+        case modelId = "model_id"
+        case modelName = "model_name"
+        case memoryEstimate = "memory_estimate"
+        case kvQuantized = "kv_quantized"
+        case kvBits = "kv_bits"
+        case kvQuantScheme = "kv_quant_scheme"
+        case processingTimeSeconds = "processing_time_seconds"
+        case outputWordCount = "output_word_count"
+        case targetWords = "target_words"
+        case maxOutputTokens = "max_output_tokens"
+        case batchIndex = "batch_index"
+        case totalPresets = "total_presets"
     }
 }
 

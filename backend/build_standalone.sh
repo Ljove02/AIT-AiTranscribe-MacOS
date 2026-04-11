@@ -127,6 +127,11 @@ if [ -f "dist/AiTranscribeServer" ]; then
     # Also copy the setup script for NeMo installation
     echo "Copying NeMo setup script..."
     cp "setup_nemo_venv.py" "$RESOURCES_DIR/"
+    echo "Copying summary runtime setup files..."
+    cp "setup_summary_venv.py" "$RESOURCES_DIR/"
+    cp "requirements-summary.txt" "$RESOURCES_DIR/"
+    cp "summary_worker.py" "$RESOURCES_DIR/"
+    cp "summary_manager.py" "$RESOURCES_DIR/"
 
     echo ""
     echo "========================================"

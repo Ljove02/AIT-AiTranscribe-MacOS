@@ -4,11 +4,10 @@
 
  A small floating window that shows when recording is active.
  Features:
- - Circular design with concentric rings
- - RECORDING: Rings pulse OUTWARD from center when speaking
- - TRANSCRIBING: Rings pulse INWARD toward center (implode effect)
- - Dark center (#0C0D10)
- - Glass UI background (Apple material effect)
+ - Glassy capsule with layered glass depth (top highlight, bottom shadow)
+ - RECORDING: Side-wave arcs pulse outward from the core when speaking
+ - TRANSCRIBING: Three dots expand/contract with slow rotation
+ - All animations driven by TimelineView (GPU-synced, no Timer jank)
  - Drag-and-snap to 8 positions (corners, centers, middle sides)
  - Glassy placeholders appear during drag showing snap targets
  - Magnetic snap when close to a position
@@ -38,123 +37,57 @@ struct RecordingIndicatorView: View {
     /// Smoothed volume level (for gradual transitions)
     @State private var smoothedVolume: CGFloat = 0
 
-    /// Individual ring phases for OUTWARD pulse (0 to 1, controls expansion + fade) - max 2 rings
-    @State private var ringPhases: [CGFloat] = [0, 0]
-
-    /// Timer for continuous ring animation
-    @State private var animationTimer: Timer?
-
     /// Appear/disappear animation state
     @State private var appearScale: CGFloat = 1.0
     @State private var appearOpacity: Double = 1.0
     @State private var hasAppeared: Bool = false
 
-    /// Transcription dots animation phase (0 to 1, controls expand/contract cycle)
-    @State private var dotsPhase: CGFloat = 0
-
     /// Whether to show the transcription dots animation
     @State private var showTranscriptionDots: Bool = false
 
-    /// Start time for smooth dots animation
-    @State private var dotsAnimationStartTime: Date = Date()
+    /// Start time for GPU-synced animations
+    @State private var animationStartTime: Date = Date()
+
+    /// Wave spawn timestamps — each entry is when a wave was born
+    @State private var waveSpawnTimes: [Date] = []
 
     /// Detect light/dark mode
     @Environment(\.colorScheme) private var colorScheme
 
-    /// Core circle color (#0C0D10)
-    private let coreColor = Color(red: 12/255, green: 13/255, blue: 16/255)
-
-    /// Ring color
-    private let ringColor = Color(white: 0.55)
-
-    /// Core circle size (smaller, more compact)
+    /// Core circle size
     private let coreSize: CGFloat = 22
 
-    /// Maximum ring expansion from core
-    private let maxRingExpansion: CGFloat = 14
+    /// Wave arc parameters
+    private let waveLifetime: Double = 1.3     // faster expansion
+    private let maxWaveOffset: CGFloat = 11    // fade well before capsule edge
+    private let volumeThreshold: CGFloat = 0.10
 
     var body: some View {
-        ZStack {
-            // OUTWARD pulsing rings (during recording/speaking) - max 2 rings
-            if !controller.isTranscribing {
-                ForEach(0..<2, id: \.self) { index in
-                    let phase = ringPhases[index]
-                    // Ring expands from core size outward
-                    let ringDiameter = coreSize + 4 + phase * maxRingExpansion
+        TimelineView(.animation(minimumInterval: nil, paused: false)) { timeline in
+            let now = timeline.date
 
-                    Circle()
-                        .stroke(ringColor.opacity(ringOpacity(for: phase)), lineWidth: 1.2)
-                        .frame(width: ringDiameter, height: ringDiameter)
+            ZStack {
+                // Side-wave arcs (recording mode)
+                if !showTranscriptionDots {
+                    waveArcs(now: now)
+                }
+
+                // Core circle — layered glass effect
+                coreCircle
+
+                // Transcription dots
+                if showTranscriptionDots {
+                    transcriptionDots(now: now)
                 }
             }
-
-            // Core circle — simulated glass look without .glassEffect() to avoid
-            // rectangular behind-window blur sampling artifact in borderless windows
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: colorScheme == .dark
-                            ? [Color(white: 0.40, opacity: 0.85), Color(white: 0.18, opacity: 0.9)]
-                            : [Color(white: 0.75, opacity: 0.9), Color(white: 0.55, opacity: 0.85)],
-                        center: .topLeading,
-                        startRadius: 0,
-                        endRadius: coreSize
-                    )
-                )
-                .frame(width: coreSize, height: coreSize)
-                .overlay(
-                    Circle()
-                        .stroke(
-                            colorScheme == .dark
-                                ? Color.white.opacity(0.3)
-                                : Color.black.opacity(0.15),
-                            lineWidth: 0.5
-                        )
-                )
-
-            // Transcription dots animation
-            // 3 dots that expand from center to triangle, then contract back
-            // Using TimelineView for GPU-synchronized smooth animation
-            if showTranscriptionDots {
-                TimelineView(.animation) { timeline in
-                    let phase = computeDotsPhase(from: timeline.date)
-                    ZStack {
-                        ForEach(0..<3, id: \.self) { index in
-                            Circle()
-                                .fill(Color.white)
-                                .frame(width: 3, height: 3)
-                                .offset(transcriptionDotOffsetSmooth(for: index, phase: phase))
-                        }
-                    }
-                    .frame(width: coreSize, height: coreSize)
-                    .rotationEffect(.degrees(Double(phase) * 180), anchor: .center)
-                }
-            }
+            .frame(width: 64, height: 36)
+            .background(glassBackground)
+            .overlay(glassStroke)
+            .scaleEffect(appearScale)
+            .opacity(appearOpacity)
         }
-        .frame(width: 64, height: 36)
-        .background(
-            Capsule()
-                .fill(
-                    colorScheme == .dark
-                        ? Color(white: 0.15, opacity: 0.65)
-                        : Color(white: 0.92, opacity: 0.85)
-                )
-        )
-        .overlay(
-            Capsule()
-                .stroke(
-                    colorScheme == .dark
-                        ? Color.white.opacity(0.15)
-                        : Color.black.opacity(0.1),
-                    lineWidth: 0.5
-                )
-        )
-        // Appear/disappear animation
-        .scaleEffect(appearScale)
-        .opacity(appearOpacity)
         .onAppear {
-            startAnimationLoop()
-            // Animate in: small dot -> full size (only on first appear)
+            animationStartTime = Date()
             if !hasAppeared {
                 appearScale = 0.3
                 appearOpacity = 0
@@ -168,26 +101,29 @@ struct RecordingIndicatorView: View {
             }
         }
         .onDisappear {
-            stopAnimationLoop()
             hasAppeared = false
+            waveSpawnTimes.removeAll()
         }
         .onChange(of: controller.currentVolume) { _, newVolume in
             if !controller.isTranscribing {
                 updateSmoothedVolume(newVolume)
+                spawnWaveIfNeeded()
             }
         }
         .onChange(of: controller.isTranscribing) { _, isTranscribing in
             if isTranscribing {
-                // Start transcription dots animation
-                startTranscriptionDots()
+                waveSpawnTimes.removeAll()
+                smoothedVolume = 0
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    animationStartTime = Date()
+                    showTranscriptionDots = true
+                }
             } else {
-                // Stop transcription dots
-                stopTranscriptionDots()
+                showTranscriptionDots = false
             }
         }
         .onChange(of: controller.isDisappearing) { _, isDisappearing in
             if isDisappearing {
-                // Animate out: full size -> small dot and fade
                 withAnimation(.easeInOut(duration: 0.3)) {
                     appearScale = 0.3
                     appearOpacity = 0
@@ -196,161 +132,222 @@ struct RecordingIndicatorView: View {
         }
     }
 
-    /// Opacity for OUTWARD rings - fades out as ring expands
-    private func ringOpacity(for phase: CGFloat) -> Double {
-        // Fade in quickly, then fade out as it expands
-        if phase < 0.15 {
-            return Double(phase) * 4  // Quick fade in
-        } else {
-            return Double(max(0, 0.6 - (phase - 0.15) * 0.7))  // Gradual fade out
+    // MARK: - Glass Background
+
+    private var glassBackground: some View {
+        Capsule()
+            .fill(
+                colorScheme == .dark
+                    ? Color(white: 0.12, opacity: 0.72)
+                    : Color(white: 0.92, opacity: 0.85)
+            )
+            .overlay(
+                // Inner highlight — top edge glow for glass depth
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: colorScheme == .dark
+                                ? [Color.white.opacity(0.12), Color.clear]
+                                : [Color.white.opacity(0.5), Color.clear],
+                            startPoint: .top,
+                            endPoint: .center
+                        )
+                    )
+            )
+            .overlay(
+                // Subtle inner shadow at bottom
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.clear, Color.black.opacity(colorScheme == .dark ? 0.2 : 0.06)],
+                            startPoint: .center,
+                            endPoint: .bottom
+                        )
+                    )
+            )
+    }
+
+    private var glassStroke: some View {
+        Capsule()
+            .stroke(
+                LinearGradient(
+                    colors: colorScheme == .dark
+                        ? [Color.white.opacity(0.25), Color.white.opacity(0.06)]
+                        : [Color.white.opacity(0.6), Color.black.opacity(0.08)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                ),
+                lineWidth: 0.5
+            )
+    }
+
+    // MARK: - Core Circle
+
+    private var coreCircle: some View {
+        Circle()
+            .fill(
+                RadialGradient(
+                    colors: colorScheme == .dark
+                        ? [Color(white: 0.45, opacity: 0.9), Color(white: 0.2, opacity: 0.95)]
+                        : [Color(white: 0.80, opacity: 0.95), Color(white: 0.58, opacity: 0.9)],
+                    center: .topLeading,
+                    startRadius: 0,
+                    endRadius: coreSize
+                )
+            )
+            .frame(width: coreSize, height: coreSize)
+            .overlay(
+                // Glass highlight on core
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.white.opacity(colorScheme == .dark ? 0.25 : 0.4), Color.clear],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: coreSize * 0.6, height: coreSize * 0.4)
+                    .offset(x: -2, y: -3)
+                    .blur(radius: 1.5)
+            )
+            .overlay(
+                Circle()
+                    .stroke(
+                        LinearGradient(
+                            colors: colorScheme == .dark
+                                ? [Color.white.opacity(0.35), Color.white.opacity(0.08)]
+                                : [Color.white.opacity(0.6), Color.black.opacity(0.1)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 0.5
+                    )
+            )
+    }
+
+    // MARK: - Side Wave Arcs
+
+    @ViewBuilder
+    private func waveArcs(now: Date) -> some View {
+        let liveWaves = waveSpawnTimes.filter { now.timeIntervalSince($0) < waveLifetime }
+
+        ForEach(Array(liveWaves.enumerated()), id: \.offset) { _, spawnTime in
+            let age = now.timeIntervalSince(spawnTime)
+            let progress = CGFloat(age / waveLifetime)
+
+            let opacity = progress < 0.25
+                ? Double(progress / 0.25) * 0.35
+                : Double(max(0, 0.35 * (1 - (progress - 0.25) / 0.75)))
+
+            // All waves use the same radius (= core circle radius), just offset outward
+            let waveOffset = 5 + progress * maxWaveOffset
+            let arcColor = colorScheme == .dark
+                ? Color.white.opacity(opacity)
+                : Color.black.opacity(opacity * 0.6)
+
+            // Arc grows as it travels: starts at 80% of coreSize, grows to 140%
+            let growFactor = 0.8 + progress * 0.6
+            let arcSize = coreSize * growFactor
+
+            // Right  )
+            SemiCircleArc()
+                .stroke(arcColor, style: StrokeStyle(lineWidth: 0.8, lineCap: .round))
+                .frame(width: arcSize, height: arcSize)
+                .offset(x: waveOffset)
+
+            // Left  (
+            SemiCircleArc()
+                .stroke(arcColor, style: StrokeStyle(lineWidth: 0.8, lineCap: .round))
+                .frame(width: arcSize, height: arcSize)
+                .scaleEffect(x: -1)
+                .offset(x: -waveOffset)
         }
     }
 
-    /// Calculate dot offset for transcription animation (legacy timer-based)
-    /// Dots expand from center (0) to triangle position, then contract back
-    private func transcriptionDotOffset(for index: Int) -> CGSize {
-        let maxRadius: CGFloat = 3.5  // Max distance from center - smaller, tighter triangle
+    // MARK: - Transcription Dots (original — TimelineView driven)
 
-        // Use sin to create smooth expand/contract: 0 → max → 0
-        // dotsPhase goes 0 to 1, sin(phase * π) gives 0 → 1 → 0
-        let expandFactor = CoreGraphics.sin(dotsPhase * .pi)
-        let currentRadius = maxRadius * expandFactor
+    @ViewBuilder
+    private func transcriptionDots(now: Date) -> some View {
+        let elapsed = now.timeIntervalSince(animationStartTime)
+        let cycleDuration: Double = 1.2
+        let phase = CGFloat(elapsed.truncatingRemainder(dividingBy: cycleDuration) / cycleDuration)
 
-        // Each dot is 120 degrees apart, starting at top (-90 degrees)
-        let angle = CGFloat(Double(index) * 120 - 90) * .pi / 180
-
-        return CGSize(
-            width: CoreGraphics.cos(angle) * currentRadius,
-            height: CoreGraphics.sin(angle) * currentRadius
-        )
-    }
-
-    /// Compute continuous phase (0 to 1) from current time for smooth animation
-    private func computeDotsPhase(from date: Date) -> CGFloat {
-        let elapsed = date.timeIntervalSince(dotsAnimationStartTime)
-        let cycleDuration: Double = 1.2  // Seconds per full expand/contract cycle
-        let phase = elapsed.truncatingRemainder(dividingBy: cycleDuration) / cycleDuration
-        return CGFloat(phase)
-    }
-
-    /// Calculate dot offset with explicit phase parameter (for TimelineView)
-    private func transcriptionDotOffsetSmooth(for index: Int, phase: CGFloat) -> CGSize {
-        let maxRadius: CGFloat = 3.5
-
-        // Use sin for smooth expand/contract: 0 → max → 0
         let expandFactor = CoreGraphics.sin(phase * .pi)
+        let maxRadius: CGFloat = 3.5
         let currentRadius = maxRadius * expandFactor
 
-        // Each dot is 120 degrees apart, starting at top (-90 degrees)
-        let angle = CGFloat(Double(index) * 120 - 90) * .pi / 180
-
-        return CGSize(
-            width: CoreGraphics.cos(angle) * currentRadius,
-            height: CoreGraphics.sin(angle) * currentRadius
-        )
+        ZStack {
+            ForEach(0..<3, id: \.self) { index in
+                let angle = CGFloat(Double(index) * 120 - 90) * .pi / 180
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 3, height: 3)
+                    .offset(
+                        x: CoreGraphics.cos(angle) * currentRadius,
+                        y: CoreGraphics.sin(angle) * currentRadius
+                    )
+            }
+        }
+        .frame(width: coreSize, height: coreSize)
+        .rotationEffect(.degrees(Double(phase) * 180), anchor: .center)
     }
 
-    /// Smooth the incoming volume for gradual transitions
+    // MARK: - Volume & Wave Spawning
+
     private func updateSmoothedVolume(_ volume: Double) {
-        // Noise gate: ignore very low ambient noise
-        // Raised from 0.004 to 0.008 to match AudioRecorder's sensitivity reduction
         let noiseGate: Double = 0.008
         let gatedVolume = volume > noiseGate ? volume - noiseGate : 0
-
-        // Reduced amplification to match AudioRecorder (3x instead of 200x)
-        // AudioRecorder now sends pre-scaled values, so we just need gentle boosting
         let amplified = min(1.0, gatedVolume * 100.0)
 
-        // Smooth: fast attack, FASTER decay (was 0.85, now 0.70 for quicker stop)
         let newSmoothed: CGFloat
         if CGFloat(amplified) > smoothedVolume {
-            newSmoothed = smoothedVolume * 0.3 + CGFloat(amplified) * 0.7  // Fast attack
+            newSmoothed = smoothedVolume * 0.3 + CGFloat(amplified) * 0.7
         } else {
-            newSmoothed = smoothedVolume * 0.70 + CGFloat(amplified) * 0.30  // Faster decay - stops quicker
+            newSmoothed = smoothedVolume * 0.70 + CGFloat(amplified) * 0.30
         }
         smoothedVolume = newSmoothed
     }
 
-    /// Start the continuous animation loop for ring pulsing
-    private func startAnimationLoop() {
-        // 60fps for smooth animation
-        animationTimer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { _ in
-            if showTranscriptionDots {
-                updateTranscriptionDots()
-            } else {
-                updateOutwardRingPhases()
-            }
-        }
-        if let timer = animationTimer {
-            RunLoop.main.add(timer, forMode: .common)
-        }
-    }
+    private func spawnWaveIfNeeded() {
+        guard smoothedVolume > volumeThreshold else { return }
 
-    private func stopAnimationLoop() {
-        animationTimer?.invalidate()
-        animationTimer = nil
-    }
+        let now = Date()
 
-    /// Update outward ring phases - one constant pulsing ring when speaking
-    private func updateOutwardRingPhases() {
-        let speed: CGFloat = 0.02  // How fast rings expand (halved for 60fps)
-        let threshold: CGFloat = 0.10  // Reduced from 0.15 to match new sensitivity (less reactive)
+        // Prune dead waves
+        waveSpawnTimes.removeAll { now.timeIntervalSince($0) >= waveLifetime }
 
-        // Update existing rings
-        for i in 0..<2 {
-            if ringPhases[i] > 0 {
-                // Ring is active - continue expanding until it fades out
-                ringPhases[i] = ringPhases[i] + speed
-                if ringPhases[i] >= 1.0 {
-                    ringPhases[i] = 0  // Reset when fully expanded
-                }
-            }
+        // Minimum 0.5s between waves
+        if let lastSpawn = waveSpawnTimes.last, now.timeIntervalSince(lastSpawn) < 0.5 {
+            return
         }
 
-        // Trigger ONE constant ring when speaking (regardless of volume intensity)
-        if smoothedVolume > threshold {
-            // Always keep exactly one ring active when speaking
-            let activeRings = ringPhases.filter { $0 > 0 }.count
-
-            // Start new ring only if none are active
-            if activeRings == 0 {
-                ringPhases[0] = 0.01  // Start first ring slot
-            }
+        // Max 2 concurrent waves
+        if waveSpawnTimes.count < 2 {
+            waveSpawnTimes.append(now)
         }
     }
+}
 
-    /// Start the transcription dots animation
-    private func startTranscriptionDots() {
-        // Reset outward rings
-        for i in 0..<2 {
-            ringPhases[i] = 0
-        }
-        smoothedVolume = 0
+// MARK: - Semi-Circle Arc Shape
 
-        // Show dots after a brief delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            dotsAnimationStartTime = Date()  // Record start time for smooth animation
-            showTranscriptionDots = true
-            dotsPhase = 0
-        }
-    }
-
-    /// Stop the transcription dots animation
-    private func stopTranscriptionDots() {
-        showTranscriptionDots = false
-        dotsPhase = 0
-    }
-
-    /// Update transcription dots - phase controls expand/contract cycle with rotation
-    private func updateTranscriptionDots() {
-        guard showTranscriptionDots else { return }
-
-        let speed: CGFloat = 0.012  // Smooth, slower animation
-
-        dotsPhase += speed
-        if dotsPhase >= 1.0 {
-            dotsPhase = 0  // Reset for next cycle
-        }
+/// Draws the right half of a circle `)` — a 180-degree arc from top to bottom.
+/// The arc's size matches the frame, so frame(width: 22, height: 22) gives
+/// an arc with the same curvature as a 22pt diameter circle.
+struct SemiCircleArc: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let radius = rect.height / 2
+        // Trimmed semicircle: 40% cut from top and bottom
+        // Full semi = -90° to +90° (180°), trimmed = -54° to +54° (108°)
+        path.addArc(
+            center: center,
+            radius: radius,
+            startAngle: .degrees(-54),
+            endAngle: .degrees(54),
+            clockwise: false
+        )
+        return path
     }
 }
 
@@ -781,8 +778,7 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
         // Update on main thread
         DispatchQueue.main.async { [weak self] in
             self?.currentVolume = volume
-            // Force window to redraw — on macOS 26, SwiftUI's reactive update
-            // pipeline can fail silently (caught by DisplayCycleFix).
+            // Force window to redraw
             self?.window?.display()
         }
     }

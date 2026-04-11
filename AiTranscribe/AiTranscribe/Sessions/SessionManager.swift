@@ -69,6 +69,306 @@ enum SessionStatus: Codable, Equatable {
 
 // MARK: - Session Model
 
+enum SessionSummaryPreset: String, CaseIterable, Codable, Identifiable {
+    case general
+    case meetingNotes = "meeting_notes"
+    case actionItems = "action_items"
+    case technical
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .general: return "General Summary"
+        case .meetingNotes: return "Meeting Notes"
+        case .actionItems: return "Action Items"
+        case .technical: return "Technical Summary"
+        }
+    }
+
+    var fileName: String {
+        switch self {
+        case .general: return "summary-general.md"
+        case .meetingNotes: return "summary-meeting-notes.md"
+        case .actionItems: return "summary-action-items.md"
+        case .technical: return "summary-technical.md"
+        }
+    }
+
+    var storageKey: String {
+        switch self {
+        case .general: return "general"
+        case .meetingNotes: return "meeting-notes"
+        case .actionItems: return "action-items"
+        case .technical: return "technical"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .general: return "text.alignleft"
+        case .meetingNotes: return "person.3.sequence"
+        case .actionItems: return "checklist"
+        case .technical: return "desktopcomputer"
+        }
+    }
+
+    var defaultInstructions: String {
+        switch self {
+        case .general:
+            return """
+            You are a precise summarization assistant.
+            Summarize the transcript in the same language as the transcript.
+            Prefer depth over brevity and write a readable, informative summary instead of a terse recap.
+            Return Markdown with these sections:
+            Overview
+            Key points
+            Notable details
+            """
+        case .meetingNotes:
+            return """
+            You are a meeting-notes assistant.
+            Turn the transcript into polished meeting notes in the same language as the transcript.
+            Keep decisions, open questions, and next steps explicit.
+            Return Markdown with these sections:
+            Overview
+            Decisions
+            Open questions
+            Next steps
+            """
+        case .actionItems:
+            return """
+            You extract execution-ready action items from transcripts.
+            Write in the same language as the transcript.
+            Keep owners, deadlines, dependencies, and blockers explicit when the transcript gives enough signal.
+            Return Markdown with these sections:
+            Action items
+            Follow-ups
+            Risks or blockers
+            """
+        case .technical:
+            return """
+            You are a technical summarization assistant.
+            Focus on architecture, implementation details, APIs, systems behavior, technical tradeoffs, bugs, and follow-up engineering work.
+            Write in the same language as the transcript and keep technical terminology intact.
+            Return Markdown with these sections:
+            Technical overview
+            Key implementation details
+            Risks or edge cases
+            Recommended follow-up
+            """
+        }
+    }
+
+    var defaultDefinition: SummaryPresetDefinition {
+        SummaryPresetDefinition(
+            id: rawValue,
+            displayName: displayName,
+            instructions: defaultInstructions,
+            storageKey: storageKey,
+            symbolName: symbolName,
+            isBuiltIn: true
+        )
+    }
+}
+
+enum SummaryLengthOption: String, CaseIterable, Codable, Identifiable {
+    case short
+    case medium
+    case long
+    case custom
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .short: return "Short"
+        case .medium: return "Medium"
+        case .long: return "Long"
+        case .custom: return "Custom"
+        }
+    }
+
+    var defaultWordTarget: Int {
+        switch self {
+        case .short: return 240
+        case .medium: return 520
+        case .long: return 900
+        case .custom: return 1100
+        }
+    }
+}
+
+struct SummaryPresetDefinition: Codable, Equatable, Identifiable {
+    var id: String
+    var displayName: String
+    var instructions: String
+    var storageKey: String
+    var symbolName: String
+    var isBuiltIn: Bool
+
+    var fileName: String {
+        "summary-\(storageKey).md"
+    }
+}
+
+enum SummaryPresetLibrary {
+    static let storageKey = "summaryPresetDefinitionsV1"
+
+    static var builtIns: [SummaryPresetDefinition] {
+        SessionSummaryPreset.allCases.map(\.defaultDefinition)
+    }
+
+    static func load() -> [SummaryPresetDefinition] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let presets = try? JSONDecoder().decode([SummaryPresetDefinition].self, from: data),
+              !presets.isEmpty else {
+            return builtIns
+        }
+        return mergeWithBuiltIns(presets)
+    }
+
+    static func save(_ presets: [SummaryPresetDefinition]) {
+        guard let data = try? JSONEncoder().encode(mergeWithBuiltIns(presets)) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+    }
+
+    static func mergeWithBuiltIns(_ presets: [SummaryPresetDefinition]) -> [SummaryPresetDefinition] {
+        var byId = Dictionary(uniqueKeysWithValues: presets.map { ($0.id, $0) })
+        for preset in builtIns where byId[preset.id] == nil {
+            byId[preset.id] = preset
+        }
+
+        return byId.values.sorted { lhs, rhs in
+            if lhs.isBuiltIn != rhs.isBuiltIn {
+                return lhs.isBuiltIn && !rhs.isBuiltIn
+            }
+            return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+        }
+    }
+
+    static func defaultDefinition(for id: String) -> SummaryPresetDefinition? {
+        builtIns.first(where: { $0.id == id })
+    }
+
+    static func makeCustomPreset(name: String, instructions: String) -> SummaryPresetDefinition {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayName = trimmedName.isEmpty ? "Custom Summary" : trimmedName
+        let normalizedInstructions = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        return SummaryPresetDefinition(
+            id: "custom-\(UUID().uuidString.lowercased())",
+            displayName: displayName,
+            instructions: normalizedInstructions,
+            storageKey: "custom-\(UUID().uuidString.prefix(8).lowercased())",
+            symbolName: "slider.horizontal.3",
+            isBuiltIn: false
+        )
+    }
+}
+
+struct SummaryGenerationPresetRequest: Codable, Equatable, Identifiable {
+    var id: String { presetId }
+    let presetId: String
+    let displayName: String
+    let fileName: String
+    let systemPrompt: String
+    let targetWords: Int
+    let maxOutputTokens: Int
+
+    enum CodingKeys: String, CodingKey {
+        case presetId = "preset_id"
+        case displayName = "display_name"
+        case fileName = "file_name"
+        case systemPrompt = "system_prompt"
+        case targetWords = "target_words"
+        case maxOutputTokens = "max_output_tokens"
+    }
+
+    static func make(from preset: SummaryPresetDefinition, targetWords: Int) -> SummaryGenerationPresetRequest {
+        let clampedTarget = max(120, min(targetWords, 4000))
+        let tokenBudget = max(256, Int(ceil(Double(clampedTarget) * 1.45)))
+        return SummaryGenerationPresetRequest(
+            presetId: preset.id,
+            displayName: preset.displayName,
+            fileName: preset.fileName,
+            systemPrompt: preset.instructions,
+            targetWords: clampedTarget,
+            maxOutputTokens: tokenBudget
+        )
+    }
+}
+
+struct SessionSummaryMetadata: Codable, Equatable {
+    var hasSummary: Bool
+    var status: String
+    var statusMessage: String?
+    var fileName: String
+    var modelId: String?
+    var modelName: String?
+    var presetDisplayName: String?
+    var wordCount: Int?
+    var targetWordCount: Int?
+    var maxOutputTokens: Int?
+    var processingTimeSeconds: Double?
+    var generatedAt: Date?
+    var text: String?
+
+    enum CodingKeys: String, CodingKey {
+        case hasSummary = "has_summary"
+        case status
+        case statusMessage = "status_message"
+        case fileName = "file_name"
+        case modelId = "model_id"
+        case modelName = "model_name"
+        case presetDisplayName = "preset_display_name"
+        case wordCount = "word_count"
+        case targetWordCount = "target_word_count"
+        case maxOutputTokens = "max_output_tokens"
+        case processingTimeSeconds = "processing_time_seconds"
+        case generatedAt = "generated_at"
+    }
+
+    static func empty(for preset: SessionSummaryPreset) -> SessionSummaryMetadata {
+        empty(
+            displayName: preset.displayName,
+            fileName: preset.fileName
+        )
+    }
+
+    static func empty(
+        displayName: String,
+        fileName: String
+    ) -> SessionSummaryMetadata {
+        SessionSummaryMetadata(
+            hasSummary: false,
+            status: "idle",
+            statusMessage: nil,
+            fileName: fileName,
+            modelId: nil,
+            modelName: nil,
+            presetDisplayName: displayName,
+            wordCount: nil,
+            targetWordCount: nil,
+            maxOutputTokens: nil,
+            processingTimeSeconds: nil,
+            generatedAt: nil,
+            text: nil
+        )
+    }
+
+    static func defaultMap() -> [String: SessionSummaryMetadata] {
+        Dictionary(uniqueKeysWithValues: SummaryPresetLibrary.builtIns.map {
+            (
+                $0.id,
+                .empty(
+                    displayName: $0.displayName,
+                    fileName: $0.fileName
+                )
+            )
+        })
+    }
+}
+
 /// A single recording session with its metadata
 struct Session: Identifiable, Codable, Equatable {
     let id: UUID
@@ -85,6 +385,7 @@ struct Session: Identifiable, Codable, Equatable {
     var transcriptionTime: TimeInterval?
     var wordCount: Int?
     var status: SessionStatus
+    var summaries: [String: SessionSummaryMetadata]
 
     /// The directory name used for storage (based on date)
     var directoryName: String {
@@ -105,6 +406,7 @@ struct Session: Identifiable, Codable, Equatable {
         self.hasAudio = false
         self.hasTranscription = false
         self.status = .idle
+        self.summaries = SessionSummaryMetadata.defaultMap()
 
         // Auto-generate name from date if not provided
         if let name = name {
@@ -130,6 +432,18 @@ struct BatchProgress: Equatable {
     var textSoFar: String?
 }
 
+struct SessionSummaryProgress: Equatable {
+    var activePresetId: String
+    var selectedPresetIds: [String]
+    var completedPresetIds: [String]
+    var stage: String
+    var partialText: String?
+    var memoryEstimate: SummaryMemoryEstimateResponse?
+    var kvQuantized: Bool?
+    var currentIndex: Int
+    var totalPresets: Int
+}
+
 // MARK: - Session Metadata (for JSON persistence)
 
 /// The metadata.json structure stored in each session directory
@@ -148,6 +462,7 @@ private struct SessionMetadata: Codable {
     var wordCount: Int?
     var status: String
     var statusMessage: String?
+    var summaries: [String: SessionSummaryMetadata]?
 
     init(from session: Session) {
         self.id = session.id.uuidString
@@ -163,6 +478,7 @@ private struct SessionMetadata: Codable {
         self.batchCount = session.batchCount
         self.transcriptionTimeSeconds = session.transcriptionTime
         self.wordCount = session.wordCount
+        self.summaries = session.summaries
 
         switch session.status {
         case .idle: self.status = "idle"; self.statusMessage = nil
@@ -188,6 +504,7 @@ private struct SessionMetadata: Codable {
         session.batchCount = batchCount
         session.transcriptionTime = transcriptionTimeSeconds
         session.wordCount = wordCount
+        session.summaries = summaries ?? SessionSummaryMetadata.defaultMap()
 
         switch status {
         case "recording": session.status = .recording
@@ -229,6 +546,12 @@ class SessionManager: ObservableObject {
     /// ID of the session currently being transcribed
     @Published var currentTranscribingSessionId: UUID? = nil
 
+    /// ID of the session currently being summarized
+    @Published var currentSummarizingSessionId: UUID? = nil
+
+    /// Current summary progress
+    @Published var summaryProgress: SessionSummaryProgress? = nil
+
     // MARK: - Recording
 
     /// The session recorder that handles mic + system audio capture
@@ -262,6 +585,8 @@ class SessionManager: ObservableObject {
 
     init() {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = .iso8601
     }
 
     // MARK: - Session CRUD
@@ -304,6 +629,27 @@ class SessionManager: ObservableObject {
             if session.hasTranscription, let text = try? String(contentsOf: transcriptionURL, encoding: .utf8) {
                 session.transcriptionText = text
                 session.wordCount = text.split(separator: " ").count
+            }
+
+            session.summaries = SessionSummaryMetadata.defaultMap().merging(session.summaries) { _, persisted in
+                persisted
+            }
+
+            for (presetId, metadata) in session.summaries {
+                let summaryURL = dirURL.appendingPathComponent(metadata.fileName)
+                guard fileManager.fileExists(atPath: summaryURL.path),
+                      let text = try? String(contentsOf: summaryURL, encoding: .utf8) else {
+                    continue
+                }
+
+                var loadedMetadata = metadata
+                loadedMetadata.hasSummary = true
+                if loadedMetadata.presetDisplayName == nil {
+                    loadedMetadata.presetDisplayName = SummaryPresetLibrary.defaultDefinition(for: presetId)?.displayName
+                        ?? presetId.replacingOccurrences(of: "_", with: " ").capitalized
+                }
+                loadedMetadata.text = text
+                session.summaries[presetId] = loadedMetadata
             }
 
             // Reset stale recording/transcribing states (app may have crashed)
@@ -362,6 +708,15 @@ class SessionManager: ObservableObject {
         sessions[index].fileSize = 0
         saveMetadata(for: sessions[index])
         print("SessionManager: Deleted audio for session '\(sessions[index].name)'")
+    }
+
+    /// Bulk clear transcriptions for selected sessions
+    func bulkResetTranscription(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            resetTranscription(id: id)
+        }
+        print("SessionManager: Bulk cleared transcription for \(ids.count) sessions")
     }
 
     /// Bulk delete audio files
@@ -436,6 +791,40 @@ class SessionManager: ObservableObject {
     /// Get the transcription file URL for a session
     func getTranscriptionURL(for session: Session) -> URL {
         return getSessionDirectory(for: session).appendingPathComponent("transcription.txt")
+    }
+
+    /// Get the summary file URL for a session summary file
+    func getSummaryURL(for session: Session, fileName: String) -> URL {
+        return getSessionDirectory(for: session).appendingPathComponent(fileName)
+    }
+
+    /// Update the text of an existing summary (user edit).
+    func updateSummaryText(sessionId: UUID, presetId: String, text: String) {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }),
+              var meta = sessions[index].summaries[presetId] else { return }
+        meta.text = text
+        meta.wordCount = text.split(separator: " ").count
+        sessions[index].summaries[presetId] = meta
+        saveSummaryText(for: sessions[index], fileName: meta.fileName, text: text)
+        saveMetadata(for: sessions[index])
+    }
+
+    /// Delete stored transcription and all related summaries.
+    func resetTranscription(id: UUID) {
+        guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
+
+        let transcriptionURL = getTranscriptionURL(for: sessions[index])
+        try? fileManager.removeItem(at: transcriptionURL)
+
+        sessions[index].hasTranscription = false
+        sessions[index].transcriptionText = nil
+        sessions[index].wordCount = nil
+        sessions[index].batchCount = nil
+        sessions[index].transcriptionTime = nil
+        sessions[index].status = .idle
+
+        clearSummaries(sessionIndex: index)
+        saveMetadata(for: sessions[index])
     }
 
     // MARK: - Session Recording
@@ -553,6 +942,8 @@ class SessionManager: ObservableObject {
         let session = sessions[index]
         let sessionDir = session.directoryName
 
+        clearSummaries(sessionIndex: index)
+
         // Update state
         sessions[index].status = .transcribing
         sessions[index].modelUsed = modelId
@@ -603,6 +994,79 @@ class SessionManager: ObservableObject {
                         : "Cancel request failed")
                     saveMetadata(for: sessions[index])
                 }
+            }
+        }
+    }
+
+    func startSummary(
+        sessionId: UUID,
+        modelId: String,
+        presetRequests: [SummaryGenerationPresetRequest],
+        apiClient: APIClient
+    ) {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        guard sessions[index].hasTranscription, sessions[index].transcriptionText?.isEmpty == false else {
+            return
+        }
+        guard let firstPreset = presetRequests.first else { return }
+
+        let modelName = appState?.availableSummaryModels.first(where: { $0.id == modelId })?.displayName
+        let selectedPresetIds = presetRequests.map(\.presetId)
+        for request in presetRequests {
+            var metadata = sessions[index].summaries[request.presetId]
+                ?? .empty(displayName: request.displayName, fileName: request.fileName)
+            metadata.status = request.presetId == firstPreset.presetId ? "preparing" : "queued"
+            metadata.statusMessage = nil
+            metadata.fileName = request.fileName
+            metadata.modelId = modelId
+            metadata.modelName = modelName
+            metadata.presetDisplayName = request.displayName
+            metadata.targetWordCount = request.targetWords
+            metadata.maxOutputTokens = request.maxOutputTokens
+            sessions[index].summaries[request.presetId] = metadata
+        }
+
+        currentSummarizingSessionId = sessionId
+        summaryProgress = SessionSummaryProgress(
+            activePresetId: firstPreset.presetId,
+            selectedPresetIds: selectedPresetIds,
+            completedPresetIds: [],
+            stage: "Preparing runtime",
+            partialText: sessions[index].summaries[firstPreset.presetId]?.text,
+            memoryEstimate: nil,
+            kvQuantized: nil,
+            currentIndex: 1,
+            totalPresets: presetRequests.count
+        )
+        saveMetadata(for: sessions[index])
+
+        let sessionDir = sessions[index].directoryName
+        Task {
+            do {
+                try await apiClient.summarizeSession(
+                    sessionDir: sessionDir,
+                    modelId: modelId,
+                    presets: presetRequests
+                ) { [weak self] event in
+                    self?.handleSummaryEvent(event, sessionId: sessionId)
+                }
+            } catch {
+                markSummaryRunFailed(sessionId: sessionId, message: error.localizedDescription)
+                currentSummarizingSessionId = nil
+                summaryProgress = nil
+            }
+        }
+    }
+
+    func cancelSummary(apiClient: APIClient) {
+        guard let sessionId = currentSummarizingSessionId else { return }
+
+        Task {
+            _ = try? await apiClient.cancelSessionSummary()
+            await MainActor.run {
+                markSummaryRunCancelled(sessionId: sessionId, message: "Cancelled by user")
+                currentSummarizingSessionId = nil
+                summaryProgress = nil
             }
         }
     }
@@ -669,7 +1133,207 @@ class SessionManager: ObservableObject {
         }
     }
 
+    private func handleSummaryEvent(_ event: SessionSummaryEvent, sessionId: UUID) {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+
+        let activePresetId = event.presetId ?? summaryProgress?.activePresetId
+        var summary = activePresetId.flatMap { sessions[index].summaries[$0] }
+
+        switch event.event {
+        case "preparing_runtime":
+            summaryProgress?.stage = "Preparing runtime"
+            summaryProgress?.memoryEstimate = event.memoryEstimate
+            summaryProgress?.kvQuantized = event.memoryEstimate?.willQuantizeKV
+
+        case "batch_started":
+            if let presetIds = event.presetIds, !presetIds.isEmpty {
+                summaryProgress?.selectedPresetIds = presetIds
+            }
+            if let totalPresets = event.totalPresets {
+                summaryProgress?.totalPresets = totalPresets
+            }
+
+        case "preset_started":
+            guard let presetId = activePresetId else { return }
+            let displayName = event.displayName
+                ?? sessions[index].summaries[presetId]?.presetDisplayName
+                ?? SummaryPresetLibrary.defaultDefinition(for: presetId)?.displayName
+                ?? presetId
+            let fileName = event.fileName
+                ?? sessions[index].summaries[presetId]?.fileName
+                ?? "summary-\(presetId).md"
+
+            var startedSummary = sessions[index].summaries[presetId]
+                ?? .empty(displayName: displayName, fileName: fileName)
+            startedSummary.status = "preparing"
+            startedSummary.statusMessage = nil
+            startedSummary.fileName = fileName
+            startedSummary.presetDisplayName = displayName
+            startedSummary.targetWordCount = event.targetWords ?? startedSummary.targetWordCount
+            startedSummary.maxOutputTokens = event.maxOutputTokens ?? startedSummary.maxOutputTokens
+            sessions[index].summaries[presetId] = startedSummary
+
+            summaryProgress?.activePresetId = presetId
+            summaryProgress?.stage = "Preparing \(displayName)"
+            summaryProgress?.partialText = startedSummary.text
+            summaryProgress?.currentIndex = event.batchIndex ?? summaryProgress?.currentIndex ?? 1
+            summaryProgress?.totalPresets = event.totalPresets ?? summaryProgress?.totalPresets ?? 1
+
+        case "loading_model":
+            summaryProgress?.stage = "Loading model"
+
+        case "generating":
+            guard let presetId = activePresetId else { return }
+            var generatingSummary = summary
+                ?? .empty(
+                    displayName: event.displayName
+                        ?? SummaryPresetLibrary.defaultDefinition(for: presetId)?.displayName
+                        ?? presetId,
+                    fileName: event.fileName ?? "summary-\(presetId).md"
+                )
+            generatingSummary.status = "generating"
+            generatingSummary.statusMessage = nil
+            sessions[index].summaries[presetId] = generatingSummary
+            summaryProgress?.stage = "Generating \(generatingSummary.presetDisplayName ?? "summary")"
+            summaryProgress?.activePresetId = presetId
+            summaryProgress?.currentIndex = event.batchIndex ?? summaryProgress?.currentIndex ?? 1
+            summaryProgress?.totalPresets = event.totalPresets ?? summaryProgress?.totalPresets ?? 1
+            summaryProgress?.kvQuantized = event.kvQuantized
+
+        case "partial":
+            guard let presetId = activePresetId else { return }
+            var partialSummary = summary
+                ?? .empty(
+                    displayName: event.displayName
+                        ?? SummaryPresetLibrary.defaultDefinition(for: presetId)?.displayName
+                        ?? presetId,
+                    fileName: event.fileName ?? "summary-\(presetId).md"
+                )
+            partialSummary.text = event.text
+            partialSummary.status = "generating"
+            sessions[index].summaries[presetId] = partialSummary
+            summaryProgress?.partialText = event.text
+            summaryProgress?.activePresetId = presetId
+
+        case "done":
+            guard let presetId = activePresetId else { return }
+            var doneSummary = summary
+                ?? .empty(
+                    displayName: event.displayName
+                        ?? SummaryPresetLibrary.defaultDefinition(for: presetId)?.displayName
+                        ?? presetId,
+                    fileName: event.fileName ?? "summary-\(presetId).md"
+                )
+            doneSummary.hasSummary = true
+            doneSummary.status = "completed"
+            doneSummary.statusMessage = nil
+            doneSummary.modelId = event.modelId ?? doneSummary.modelId
+            doneSummary.modelName = event.modelName ?? doneSummary.modelName
+            doneSummary.presetDisplayName = event.displayName ?? doneSummary.presetDisplayName
+            doneSummary.wordCount = event.outputWordCount ?? event.text?.split(separator: " ").count
+            doneSummary.targetWordCount = event.targetWords ?? doneSummary.targetWordCount
+            doneSummary.maxOutputTokens = event.maxOutputTokens ?? doneSummary.maxOutputTokens
+            doneSummary.processingTimeSeconds = event.processingTimeSeconds
+            doneSummary.generatedAt = Date()
+            doneSummary.text = event.text
+            sessions[index].summaries[presetId] = doneSummary
+            saveSummaryText(for: sessions[index], fileName: doneSummary.fileName, text: event.text ?? "")
+            saveMetadata(for: sessions[index])
+            if summaryProgress?.completedPresetIds.contains(presetId) == false {
+                summaryProgress?.completedPresetIds.append(presetId)
+            }
+            summaryProgress?.partialText = event.text
+            summaryProgress?.activePresetId = presetId
+            summaryProgress?.currentIndex = event.batchIndex ?? summaryProgress?.currentIndex ?? 1
+            summaryProgress?.totalPresets = event.totalPresets ?? summaryProgress?.totalPresets ?? 1
+            summaryProgress?.stage = "Saved \(doneSummary.presetDisplayName ?? "summary")"
+
+        case "error":
+            if let presetId = activePresetId {
+                var failedSummary = summary
+                    ?? .empty(
+                        displayName: event.displayName
+                            ?? SummaryPresetLibrary.defaultDefinition(for: presetId)?.displayName
+                            ?? presetId,
+                        fileName: event.fileName ?? "summary-\(presetId).md"
+                    )
+                failedSummary.status = "failed"
+                failedSummary.statusMessage = event.message ?? "Unknown error"
+                sessions[index].summaries[presetId] = failedSummary
+                saveMetadata(for: sessions[index])
+            }
+            currentSummarizingSessionId = nil
+            summaryProgress = nil
+
+        case "cancelled":
+            markSummaryRunCancelled(sessionId: sessionId, message: "Cancelled by user")
+            currentSummarizingSessionId = nil
+            summaryProgress = nil
+
+        case "batch_complete":
+            currentSummarizingSessionId = nil
+            summaryProgress = nil
+
+        default:
+            break
+        }
+    }
+
     // MARK: - Private Helpers
+
+    private func saveSummaryText(for session: Session, fileName: String, text: String) {
+        let summaryURL = getSummaryURL(for: session, fileName: fileName)
+        try? text.write(to: summaryURL, atomically: true, encoding: .utf8)
+    }
+
+    private func clearSummaries(sessionIndex: Int) {
+        let session = sessions[sessionIndex]
+        for metadata in sessions[sessionIndex].summaries.values {
+            let summaryURL = getSummaryURL(for: session, fileName: metadata.fileName)
+            try? fileManager.removeItem(at: summaryURL)
+        }
+        sessions[sessionIndex].summaries = SessionSummaryMetadata.defaultMap()
+    }
+
+    private func markSummaryRunFailed(sessionId: UUID, message: String) {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        let selectedPresetIds = summaryProgress?.selectedPresetIds ?? []
+        let completedPresetIds = Set(summaryProgress?.completedPresetIds ?? [])
+
+        for presetId in selectedPresetIds where !completedPresetIds.contains(presetId) {
+            var metadata = sessions[index].summaries[presetId]
+                ?? .empty(
+                    displayName: SummaryPresetLibrary.defaultDefinition(for: presetId)?.displayName
+                        ?? presetId.replacingOccurrences(of: "_", with: " ").capitalized,
+                    fileName: SummaryPresetLibrary.defaultDefinition(for: presetId)?.fileName
+                        ?? "summary-\(presetId).md"
+                )
+            metadata.status = "failed"
+            metadata.statusMessage = message
+            sessions[index].summaries[presetId] = metadata
+        }
+        saveMetadata(for: sessions[index])
+    }
+
+    private func markSummaryRunCancelled(sessionId: UUID, message: String) {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        let selectedPresetIds = summaryProgress?.selectedPresetIds ?? []
+        let completedPresetIds = Set(summaryProgress?.completedPresetIds ?? [])
+
+        for presetId in selectedPresetIds where !completedPresetIds.contains(presetId) {
+            var metadata = sessions[index].summaries[presetId]
+                ?? .empty(
+                    displayName: SummaryPresetLibrary.defaultDefinition(for: presetId)?.displayName
+                        ?? presetId.replacingOccurrences(of: "_", with: " ").capitalized,
+                    fileName: SummaryPresetLibrary.defaultDefinition(for: presetId)?.fileName
+                        ?? "summary-\(presetId).md"
+                )
+            metadata.status = "cancelled"
+            metadata.statusMessage = message
+            sessions[index].summaries[presetId] = metadata
+        }
+        saveMetadata(for: sessions[index])
+    }
 
     private func saveMetadata(for session: Session) {
         let metadata = SessionMetadata(from: session)

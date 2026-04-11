@@ -15,6 +15,7 @@
  */
 
 import Foundation
+import NaturalLanguage
 
 /// Manages transcription history storage in JSON format
 final class HistoryManager {
@@ -127,8 +128,134 @@ final class HistoryManager {
         }
     }
     
+    // MARK: - Semantic Search (Cached Index)
+
+    /// Pre-computed embedding vectors keyed by entry ID.
+    /// Built on user request, updated incrementally on save.
+    private var embeddingIndex: [UUID: [Double]] = [:]
+    private var indexedEntryCache: [UUID: TranscriptionEntry] = [:]
+    private(set) var isIndexed = false
+    private let sentenceEmbedding = NLEmbedding.sentenceEmbedding(for: .english)
+
+    /// Build or refresh the embedding index from all entries on disk.
+    /// Call explicitly when user requests indexing.
+    func buildSearchIndex() async {
+        let allEntries = await loadAllEntries()
+
+        var newCache: [UUID: TranscriptionEntry] = [:]
+        for entry in allEntries { newCache[entry.id] = entry }
+        indexedEntryCache = newCache
+
+        guard let embedding = sentenceEmbedding else {
+            // No embedding model — semantic search won't work but text search will
+            isIndexed = true
+            return
+        }
+
+        var newIndex: [UUID: [Double]] = [:]
+        for entry in allEntries {
+            // Reuse existing vector if already computed
+            if let existing = embeddingIndex[entry.id] {
+                newIndex[entry.id] = existing
+            } else {
+                let sample = String(entry.text.prefix(500))
+                if let vector = embedding.vector(for: sample) {
+                    newIndex[entry.id] = vector
+                }
+            }
+        }
+
+        embeddingIndex = newIndex
+        isIndexed = true
+    }
+
+    /// Add a single entry to the index (call after saving a new entry).
+    func indexEntry(_ entry: TranscriptionEntry) {
+        indexedEntryCache[entry.id] = entry
+        guard let embedding = sentenceEmbedding else { return }
+        let sample = String(entry.text.prefix(500))
+        if let vector = embedding.vector(for: sample) {
+            embeddingIndex[entry.id] = vector
+        }
+    }
+
+    /// Remove entries from the index.
+    func removeFromIndex(ids: Set<UUID>) {
+        for id in ids {
+            embeddingIndex.removeValue(forKey: id)
+            indexedEntryCache.removeValue(forKey: id)
+        }
+    }
+
+    /// Clear the entire index.
+    func clearIndex() {
+        embeddingIndex.removeAll()
+        indexedEntryCache.removeAll()
+        isIndexed = false
+    }
+
+    /// Basic keyword search across ALL entries (no embedding needed).
+    func textSearch(query: String, limit: Int = 50) async -> [TranscriptionEntry] {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return [] }
+
+        let allEntries = await loadAllEntries()
+        return Array(allEntries.filter {
+            $0.text.localizedCaseInsensitiveContains(trimmed)
+        }.prefix(limit))
+    }
+
+    /// Semantic search using the cached index. Requires `buildSearchIndex()` first.
+    /// Text matches appear first, then semantic matches, deduplicated.
+    func semanticSearch(query: String, limit: Int = 50) -> [TranscriptionEntry] {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, isIndexed else { return [] }
+
+        let allEntries = Array(indexedEntryCache.values)
+        guard !allEntries.isEmpty else { return [] }
+
+        // 1. Text matches (always first)
+        let textMatches = allEntries.filter {
+            $0.text.localizedCaseInsensitiveContains(trimmed)
+        }
+        let textMatchIds = Set(textMatches.map(\.id))
+
+        // 2. Semantic matches from cached vectors — only the query vector is computed
+        var semanticMatches: [TranscriptionEntry] = []
+
+        if let embedding = sentenceEmbedding,
+           let queryVector = embedding.vector(for: trimmed) {
+
+            var scored: [(entry: TranscriptionEntry, score: Double)] = []
+
+            for (id, entryVector) in embeddingIndex where !textMatchIds.contains(id) {
+                let similarity = Self.cosineSimilarity(queryVector, entryVector)
+                if similarity > 0.3, let entry = indexedEntryCache[id] {
+                    scored.append((entry, similarity))
+                }
+            }
+
+            scored.sort { $0.score > $1.score }
+            semanticMatches = scored.prefix(limit).map(\.entry)
+        }
+
+        return Array((textMatches + semanticMatches).prefix(limit))
+    }
+
+    private static func cosineSimilarity(_ a: [Double], _ b: [Double]) -> Double {
+        guard a.count == b.count, !a.isEmpty else { return 0 }
+        var dot = 0.0, magA = 0.0, magB = 0.0
+        for i in a.indices {
+            dot += a[i] * b[i]
+            magA += a[i] * a[i]
+            magB += b[i] * b[i]
+        }
+        let denom = sqrt(magA) * sqrt(magB)
+        return denom > 0 ? dot / denom : 0
+    }
+
     // MARK: - Private Methods
-    
+
     private func saveEntries(_ entries: [TranscriptionEntry]) async {
         do {
             let data = try encoder.encode(entries)

@@ -55,6 +55,8 @@
 		1E1391042F1FF2900070C41D /* FIXES_SUMMARY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = FIXES_SUMMARY.md; sourceTree = "<group>"; };
 		1E1391052F1FF2900070C41D /* HistoryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryManager.swift; sourceTree = "<group>"; };
 		1E1391062F1FF2900070C41D /* HotkeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotkeyManager.swift; sourceTree = "<group>"; };
+		AD1667E2702453765445FB74 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
+		0A9193528DBC719FF7C64D4F /* UpdateWindowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateWindowView.swift; sourceTree = "<group>"; };
 		1E1391072F1FF2900070C41D /* Icon-iOS-Default-256x256@1x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Icon-iOS-Default-256x256@1x.png"; sourceTree = "<group>"; };
 		1E1391082F1FF2900070C41D /* IMPLEMENTATION_CHECKLIST.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = IMPLEMENTATION_CHECKLIST.md; sourceTree = "<group>"; };
 		1E1391092F1FF2900070C41D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -210,6 +212,7 @@
 				1E13920B2F20A00B0070C41D /* FloatingIndicatorWindow.swift */,
 				1E1391052F1FF2900070C41D /* HistoryManager.swift */,
 				1E1391062F1FF2900070C41D /* HotkeyManager.swift */,
+				AD1667E2702453765445FB74 /* UpdateChecker.swift */,
 				1E1391072F1FF2900070C41D /* Icon-iOS-Default-256x256@1x.png */,
 				1E1391082F1FF2900070C41D /* IMPLEMENTATION_CHECKLIST.md */,
 				1E1391092F1FF2900070C41D /* Info.plist */,
@@ -329,6 +332,7 @@
 				1E1392022F20A0020070C41D /* SettingsSidebar.swift */,
 				1E1392012F20A0010070C41D /* SettingsView.swift */,
 				1E1392072F20A0070070C41D /* ShortcutsSettingsView.swift */,
+				0A9193528DBC719FF7C64D4F /* UpdateWindowView.swift */,
 			);
 			path = Settings;
 			sourceTree = "<group>";
@@ -588,7 +592,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.aitranscribe.AiTranscribe;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -637,7 +641,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.aitranscribe.AiTranscribe;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

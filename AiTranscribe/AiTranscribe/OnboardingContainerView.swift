@@ -16,8 +16,8 @@ struct OnboardingContainerView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var backendManager: BackendManager
 
-    /// Environment action to open settings
-    @Environment(\.openSettings) private var openSettings
+    /// Environment action to open windows
+    @Environment(\.openWindow) private var openWindow
     
     /// Current screen index (0-5)
     @State private var currentScreen: Int = 0
@@ -102,7 +102,7 @@ struct OnboardingContainerView: View {
 
         // Open Settings window
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            openSettings()
+            openWindow(id: "settings")
         }
     }
 }

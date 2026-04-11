@@ -33,6 +33,9 @@ class HotkeyManager {
     /// Reference to app state for triggering actions
     private var appState: AppState?
 
+    /// Reference to session manager for session hotkeys
+    private var sessionManager: SessionManager?
+
     /// Registered hotkey references (needed to unregister)
     private var hotkeyRefs: [EventHotKeyRef] = []
 
@@ -40,6 +43,8 @@ class HotkeyManager {
     private enum HotkeyID: UInt32 {
         case toggleRecording = 1
         case cancelRecording = 2
+        case toggleSession = 3
+        case stopSession = 4
     }
 
     /// Event handler reference
@@ -47,9 +52,10 @@ class HotkeyManager {
 
     private init() {}
 
-    /// Setup the hotkey manager with app state
-    func setup(appState: AppState) {
+    /// Setup the hotkey manager with app state and session manager
+    func setup(appState: AppState, sessionManager: SessionManager? = nil) {
         self.appState = appState
+        self.sessionManager = sessionManager
         registerHotkeys()
     }
 
@@ -76,6 +82,22 @@ class HotkeyManager {
         } else {
             // Default: Control+K
             registerHotkey(id: .cancelRecording, keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(controlKey))
+        }
+
+        // Session recording shortcuts
+        let sessionToggleShortcut = UserDefaults.standard.string(forKey: "toggleSessionShortcut") ?? "⌃⇧R"
+        let sessionStopShortcut = UserDefaults.standard.string(forKey: "stopSessionShortcut") ?? "⌃⇧S"
+
+        if let (keyCode, modifiers) = parseShortcut(sessionToggleShortcut) {
+            registerHotkey(id: .toggleSession, keyCode: keyCode, modifiers: modifiers)
+        } else {
+            registerHotkey(id: .toggleSession, keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(controlKey) | UInt32(shiftKey))
+        }
+
+        if let (keyCode, modifiers) = parseShortcut(sessionStopShortcut) {
+            registerHotkey(id: .stopSession, keyCode: keyCode, modifiers: modifiers)
+        } else {
+            registerHotkey(id: .stopSession, keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(controlKey) | UInt32(shiftKey))
         }
     }
 
@@ -220,6 +242,14 @@ class HotkeyManager {
             handleCancelRecording()
             return noErr
 
+        case HotkeyID.toggleSession.rawValue:
+            handleToggleSession()
+            return noErr
+
+        case HotkeyID.stopSession.rawValue:
+            handleStopSession()
+            return noErr
+
         default:
             return OSStatus(eventNotHandledErr)
         }
@@ -246,6 +276,32 @@ class HotkeyManager {
         Task { @MainActor in
             if appState.isRecording {
                 await appState.cancelRecording()
+            }
+        }
+    }
+
+    /// Handle start session recording hotkey
+    private func handleToggleSession() {
+        guard let appState = appState, let sessionManager = sessionManager else { return }
+
+        Task { @MainActor in
+            if sessionManager.isSessionRecording {
+                await sessionManager.stopSessionRecording()
+            } else {
+                await sessionManager.startSessionRecording(
+                    micDeviceId: appState.selectedDeviceId
+                )
+            }
+        }
+    }
+
+    /// Handle stop session recording hotkey
+    private func handleStopSession() {
+        guard let sessionManager = sessionManager else { return }
+
+        Task { @MainActor in
+            if sessionManager.isSessionRecording {
+                await sessionManager.stopSessionRecording()
             }
         }
     }

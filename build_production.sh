@@ -21,7 +21,7 @@ set -e  # Exit on error
 # Get the directory where this script is located (works even when called from different directory)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$SCRIPT_DIR"
-VERSION="0.1.5"
+VERSION="0.2.0"
 APP_NAME="AiTranscribe"
 SKIP_BACKEND=false
 
@@ -51,6 +51,64 @@ print_warning() {
 
 print_error() {
     echo -e "${RED}✗ $1${NC}"
+}
+
+sync_backend_support_files() {
+    local resources_dir="AiTranscribe/AiTranscribe/Resources"
+    local nemo_script="backend/setup_nemo_venv.py"
+    local nemo_reqs="backend/requirements-nemo.txt"
+    local summary_script="backend/setup_summary_venv.py"
+    local summary_reqs="backend/requirements-summary.txt"
+    local summary_worker="backend/summary_worker.py"
+
+    if [ ! -d "$resources_dir" ]; then
+        print_error "Resources directory not found at $resources_dir"
+        exit 1
+    fi
+
+    if [ -f "$nemo_script" ]; then
+        cp "$nemo_script" "$resources_dir/"
+        print_success "NeMo setup script copied to Resources"
+    else
+        print_warning "NeMo setup script not found at $nemo_script"
+    fi
+
+    if [ -f "$nemo_reqs" ]; then
+        cp "$nemo_reqs" "$resources_dir/"
+        print_success "NeMo requirements copied to Resources"
+    else
+        print_warning "NeMo requirements not found at $nemo_reqs"
+    fi
+
+    if [ -f "$summary_script" ]; then
+        cp "$summary_script" "$resources_dir/"
+        print_success "Summary setup script copied to Resources"
+    else
+        print_warning "Summary setup script not found at $summary_script"
+    fi
+
+    if [ -f "$summary_reqs" ]; then
+        cp "$summary_reqs" "$resources_dir/"
+        print_success "Summary requirements copied to Resources"
+    else
+        print_warning "Summary requirements not found at $summary_reqs"
+    fi
+
+    if [ -f "$summary_worker" ]; then
+        cp "$summary_worker" "$resources_dir/"
+        print_success "Summary worker copied to Resources"
+    else
+        print_warning "Summary worker not found at $summary_worker"
+    fi
+
+    for pyfile in server.py model_manager.py recorder.py batch_transcriber.py summary_manager.py; do
+        if [ -f "backend/$pyfile" ]; then
+            cp "backend/$pyfile" "$resources_dir/"
+            print_success "Copied $pyfile to Resources"
+        else
+            print_warning "$pyfile not found in backend/"
+        fi
+    done
 }
 
 # Parse arguments
@@ -130,37 +188,9 @@ else
     BACKEND_SIZE=$(du -h "$BACKEND_PATH" | cut -f1)
     print_success "Backend built successfully (${BACKEND_SIZE})"
 
-    # Copy NeMo setup script and requirements to Resources
-    NEMO_SCRIPT="backend/setup_nemo_venv.py"
-    NEMO_REQS="backend/requirements-nemo.txt"
-    RESOURCES_DIR="AiTranscribe/AiTranscribe/Resources"
-
-    if [ -f "$NEMO_SCRIPT" ]; then
-        cp "$NEMO_SCRIPT" "$RESOURCES_DIR/"
-        print_success "NeMo setup script copied to Resources"
-    else
-        print_warning "NeMo setup script not found at $NEMO_SCRIPT"
-    fi
-
-    if [ -f "$NEMO_REQS" ]; then
-        cp "$NEMO_REQS" "$RESOURCES_DIR/"
-        print_success "NeMo requirements copied to Resources"
-    else
-        print_warning "NeMo requirements not found at $NEMO_REQS"
-    fi
-
-    # Copy backend Python files for NeMo mode (runs server.py with NeMo venv)
-    for pyfile in server.py model_manager.py recorder.py batch_transcriber.py; do
-        if [ -f "backend/$pyfile" ]; then
-            cp "backend/$pyfile" "$RESOURCES_DIR/"
-            print_success "Copied $pyfile to Resources"
-        else
-            print_warning "$pyfile not found in backend/"
-        fi
-    done
-
     # Copy whisper-cli binary (whisper.cpp Metal GPU transcription)
     WHISPER_CLI="backend/bin/whisper-cli"
+    RESOURCES_DIR="AiTranscribe/AiTranscribe/Resources"
     if [ -f "$WHISPER_CLI" ]; then
         cp "$WHISPER_CLI" "$RESOURCES_DIR/"
         chmod +x "$RESOURCES_DIR/whisper-cli"
@@ -171,6 +201,9 @@ else
         echo "  Build it with: git clone https://github.com/ggml-org/whisper.cpp /tmp/whisper.cpp && cd /tmp/whisper.cpp && cmake -B build && cmake --build build -j --config Release && cp build/bin/whisper-cli $(pwd)/backend/bin/"
     fi
 fi
+
+print_header "Syncing Backend Support Files"
+sync_backend_support_files
 
 # =============================================================================
 # Step 2: Build Xcode Project
@@ -246,6 +279,27 @@ if [ -f "$BUNDLED_NEMO_REQS" ]; then
 else
     print_warning "NeMo requirements NOT found in app bundle!"
     echo "NeMo model installation may not work without this file."
+fi
+
+BUNDLED_SUMMARY_SCRIPT="dist/${APP_NAME}.app/Contents/Resources/setup_summary_venv.py"
+if [ -f "$BUNDLED_SUMMARY_SCRIPT" ]; then
+    print_success "Summary setup script is bundled in app"
+else
+    print_warning "Summary setup script NOT found in app bundle!"
+fi
+
+BUNDLED_SUMMARY_REQS="dist/${APP_NAME}.app/Contents/Resources/requirements-summary.txt"
+if [ -f "$BUNDLED_SUMMARY_REQS" ]; then
+    print_success "Summary requirements are bundled in app"
+else
+    print_warning "Summary requirements NOT found in app bundle!"
+fi
+
+BUNDLED_SUMMARY_WORKER="dist/${APP_NAME}.app/Contents/Resources/summary_worker.py"
+if [ -f "$BUNDLED_SUMMARY_WORKER" ]; then
+    print_success "Summary worker is bundled in app"
+else
+    print_warning "Summary worker NOT found in app bundle!"
 fi
 
 # Verify whisper-cli is in bundle
