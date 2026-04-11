@@ -50,6 +50,7 @@ struct SettingsView: View {
     @State private var animatedTabs: Set<SettingsSection> = []
     @State private var pendingHistoryEntryId: UUID? = nil
     @State private var pendingSessionId: UUID? = nil
+    @State private var pendingModelMode: ModelMode = .speechToText
     @EnvironmentObject var backendManager: BackendManager
     @EnvironmentObject var updateChecker: UpdateChecker
 
@@ -132,14 +133,19 @@ struct SettingsView: View {
                 animatedTabs.insert(.general)
             })
         case .models:
-            ModelsSettingsView(hasAnimated: animatedTabs.contains(.models), onAnimated: {
-                animatedTabs.insert(.models)
-            })
+            ModelsSettingsView(
+                hasAnimated: animatedTabs.contains(.models),
+                onAnimated: { animatedTabs.insert(.models) },
+                initialMode: pendingModelMode
+            )
+            .onAppear { pendingModelMode = .speechToText }
         case .sessions:
             SessionsSettingsView(
                 hasAnimated: animatedTabs.contains(.sessions),
                 onAnimated: { animatedTabs.insert(.sessions) },
-                onNavigateToModels: {
+                onNavigateToModels: { mode in
+                    pendingModelMode = mode
+                    animatedTabs.remove(.models)
                     withAnimation(.easeInOut(duration: 0.2)) {
                         selectedSection = .models
                     }

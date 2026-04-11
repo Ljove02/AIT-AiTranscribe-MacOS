@@ -132,7 +132,7 @@ class APIClient {
         let (data, response) = try await session.data(from: url)
 
         // Check for HTTP errors
-        try checkResponse(response)
+        try checkResponse(response, data: data, context: endpoint)
 
         // Decode JSON to Swift object
         do {
@@ -163,7 +163,7 @@ class APIClient {
 
         let (data, response) = try await session.data(for: request)
 
-        try checkResponse(response)
+        try checkResponse(response, data: data, context: endpoint)
 
         do {
             return try decoder.decode(T.self, from: data)
@@ -173,7 +173,7 @@ class APIClient {
     }
 
     /// Check if the HTTP response indicates success
-    private func checkResponse(_ response: URLResponse) throws {
+    private func checkResponse(_ response: URLResponse, data: Data? = nil, context: String? = nil) throws {
         /*
          URLResponse is generic. HTTPURLResponse has HTTP-specific info.
          We cast to access the statusCode.
@@ -189,8 +189,72 @@ class APIClient {
          - 500-599 = Server error (server's fault)
          */
         guard (200...299).contains(httpResponse.statusCode) else {
-            throw APIError.serverError("Server returned status \(httpResponse.statusCode)")
+            let message = buildServerErrorMessage(
+                statusCode: httpResponse.statusCode,
+                data: data,
+                context: context
+            )
+            print("APIClient: \(message)")
+            throw APIError.serverError(message)
         }
+    }
+
+    private func buildServerErrorMessage(statusCode: Int, data: Data?, context: String? = nil) -> String {
+        let prefix = context.map { "\($0) returned status \(statusCode)" } ?? "Server returned status \(statusCode)"
+
+        guard let data, !data.isEmpty else {
+            return prefix
+        }
+
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let detail = json["detail"] {
+            if let detailString = detail as? String, !detailString.isEmpty {
+                return "\(prefix): \(detailString)"
+            }
+
+            if let detailItems = detail as? [[String: Any]], !detailItems.isEmpty {
+                let messages = detailItems.prefix(4).map { item in
+                    let location = (item["loc"] as? [Any])?
+                        .map { String(describing: $0) }
+                        .joined(separator: ".")
+                    let description = (item["msg"] as? String)
+                        ?? (item["type"] as? String)
+                        ?? "validation error"
+                    if let location, !location.isEmpty {
+                        return "\(location): \(description)"
+                    }
+                    return description
+                }
+                return "\(prefix): \(messages.joined(separator: "; "))"
+            }
+        }
+
+        if let body = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !body.isEmpty {
+            return "\(prefix): \(body)"
+        }
+
+        return prefix
+    }
+
+    private func readErrorBody(from asyncBytes: URLSession.AsyncBytes, maxBytes: Int = 8192) async throws -> Data {
+        var bodyData = Data()
+        for try await byte in asyncBytes {
+            bodyData.append(contentsOf: [byte])
+            if bodyData.count >= maxBytes {
+                break
+            }
+        }
+        return bodyData
+    }
+
+    private func logJSONPayload(_ data: Data, label: String) {
+        guard let body = String(data: data, encoding: .utf8) else {
+            print("APIClient: \(label) payload is not valid UTF-8 (\(data.count) bytes)")
+            return
+        }
+        print("APIClient: \(label) payload: \(body)")
     }
 
 
@@ -618,9 +682,23 @@ class APIClient {
             },
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        if let httpBody = request.httpBody {
+            logJSONPayload(httpBody, label: "/session/summarize")
+        }
 
         let (asyncBytes, response) = try await session.bytes(for: request)
-        try checkResponse(response)
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200...299).contains(httpResponse.statusCode) {
+            let errorData = try await readErrorBody(from: asyncBytes)
+            let message = buildServerErrorMessage(
+                statusCode: httpResponse.statusCode,
+                data: errorData,
+                context: "/session/summarize"
+            )
+            print("APIClient: \(message)")
+            throw APIError.serverError(message)
+        }
+        try checkResponse(response, context: "/session/summarize")
 
         var sawTerminalEvent = false
         for try await line in asyncBytes.lines {

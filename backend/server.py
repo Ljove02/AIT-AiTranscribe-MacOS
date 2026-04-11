@@ -46,7 +46,9 @@ Then visit http://127.0.0.1:8765/docs to see automatic API documentation!
 # ============================================================================
 
 # FastAPI - The web framework
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -829,6 +831,21 @@ app.add_middleware(
     allow_methods=["*"],      # Allow all HTTP methods
     allow_headers=["*"],      # Allow all headers
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def log_request_validation_error(request: Request, exc: RequestValidationError):
+    body_bytes = await request.body()
+    body_text = body_bytes.decode("utf-8", errors="replace")
+    if len(body_text) > 4000:
+        body_text = f"{body_text[:4000]}... [truncated]"
+
+    print("ERROR: Request validation failed")
+    print(f"ERROR:   path={request.url.path} method={request.method}")
+    print(f"ERROR:   errors={json.dumps(exc.errors(), ensure_ascii=False)}")
+    print(f"ERROR:   body={body_text or '<empty>'}")
+
+    return await request_validation_exception_handler(request, exc)
 
 
 # ============================================================================

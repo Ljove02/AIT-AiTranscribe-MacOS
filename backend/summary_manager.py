@@ -167,28 +167,29 @@ def get_summary_model_dir(model_id: str) -> Path:
     return get_summary_models_dir() / model_id
 
 
-def get_summary_worker_resource_path() -> Optional[Path]:
-    script_dir = Path(__file__).parent
-    bundled = script_dir / "summary_worker.py"
-    if bundled.exists():
-        return bundled
+def _find_summary_resource(filename: str) -> Optional[Path]:
+    script_dir = Path(__file__).resolve().parent
+    executable_dir = Path(sys.executable).resolve().parent
+
+    for candidate in (
+        script_dir / filename,
+        executable_dir / filename,
+    ):
+        if candidate.exists():
+            return candidate
     return None
+
+
+def get_summary_worker_resource_path() -> Optional[Path]:
+    return _find_summary_resource("summary_worker.py")
 
 
 def get_summary_requirements_resource_path() -> Optional[Path]:
-    script_dir = Path(__file__).parent
-    bundled = script_dir / "requirements-summary.txt"
-    if bundled.exists():
-        return bundled
-    return None
+    return _find_summary_resource("requirements-summary.txt")
 
 
 def get_summary_setup_resource_path() -> Optional[Path]:
-    script_dir = Path(__file__).parent
-    bundled = script_dir / "setup_summary_venv.py"
-    if bundled.exists():
-        return bundled
-    return None
+    return _find_summary_resource("setup_summary_venv.py")
 
 
 def get_runtime_status() -> SummaryRuntimeStatus:
@@ -208,9 +209,10 @@ def get_runtime_status() -> SummaryRuntimeStatus:
                     str(python_path),
                     "-c",
                     (
+                        "from importlib import metadata as importlib_metadata; "
                         "import mlx_vlm, psutil; "
                         "from mlx_vlm.generate import stream_generate; "
-                        "print(mlx_vlm.__version__)"
+                        "print(importlib_metadata.version('mlx-vlm'))"
                     ),
                 ],
                 capture_output=True,

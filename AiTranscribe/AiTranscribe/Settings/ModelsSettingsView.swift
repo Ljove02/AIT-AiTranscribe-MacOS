@@ -8,12 +8,14 @@ struct ModelsSettingsView: View {
 
     let hasAnimated: Bool
     let onAnimated: () -> Void
+    let initialMode: ModelMode
 
     /// Real-time streaming toggle
     @AppStorage("realTimeStreaming") private var realTimeStreaming = false
 
     /// Current mode: speech-to-text or summarization
     @State private var selectedMode: ModelMode = .speechToText
+
 
     /// Filter for model list
     @State private var selectedFilter: ModelFilter = .all
@@ -33,9 +35,10 @@ struct ModelsSettingsView: View {
     /// Animation state — init from hasAnimated so first frame is correct
     @State private var appeared: Bool
 
-    init(hasAnimated: Bool, onAnimated: @escaping () -> Void) {
+    init(hasAnimated: Bool, onAnimated: @escaping () -> Void, initialMode: ModelMode = .speechToText) {
         self.hasAnimated = hasAnimated
         self.onAnimated = onAnimated
+        self.initialMode = initialMode
         _appeared = State(initialValue: hasAnimated)
     }
 
@@ -157,6 +160,7 @@ struct ModelsSettingsView: View {
         }
         .scrollIndicators(.automatic)
         .onAppear {
+            selectedMode = initialMode
             Task { await appState.fetchAvailableModels() }
             Task { await appState.fetchSummaryModels() }
             Task { await appState.fetchSummaryRuntimeStatus() }

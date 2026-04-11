@@ -6,7 +6,7 @@ import ScreenCaptureKit
 
 struct SessionsSettingsView: View {
     @EnvironmentObject var sessionManager: SessionManager
-    var onNavigateToModels: (() -> Void)? = nil
+    var onNavigateToModels: ((ModelMode) -> Void)? = nil
 
     let hasAnimated: Bool
     let onAnimated: () -> Void
@@ -31,7 +31,7 @@ struct SessionsSettingsView: View {
     /// Animation state
     @State private var appeared: Bool
 
-    init(hasAnimated: Bool, onAnimated: @escaping () -> Void, onNavigateToModels: (() -> Void)? = nil, initialSelectedSessionId: UUID? = nil) {
+    init(hasAnimated: Bool, onAnimated: @escaping () -> Void, onNavigateToModels: ((ModelMode) -> Void)? = nil, initialSelectedSessionId: UUID? = nil) {
         self.hasAnimated = hasAnimated
         self.onAnimated = onAnimated
         self.onNavigateToModels = onNavigateToModels

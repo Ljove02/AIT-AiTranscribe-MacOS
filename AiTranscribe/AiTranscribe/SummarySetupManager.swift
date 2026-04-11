@@ -4,6 +4,7 @@ import Combine
 enum SummarySetupError: Error, LocalizedError {
     case pythonNotFound
     case pythonVersionTooOld(found: String, required: String)
+    case pythonArchitectureUnsupported(found: String)
     case setupScriptNotFound
     case installationFailed(reason: String)
     case cancelled
@@ -15,6 +16,8 @@ enum SummarySetupError: Error, LocalizedError {
             return "Python 3 is not installed. Please install Python 3.10+ from python.org"
         case .pythonVersionTooOld(let found, let required):
             return "Python version \(found) is too old. Please install Python \(required)+"
+        case .pythonArchitectureUnsupported(let found):
+            return "Summary runtime requires Apple Silicon and a native arm64 Python. Found \(found)."
         case .setupScriptNotFound:
             return "Summary setup script not found. The app may be corrupted."
         case .installationFailed(let reason):
@@ -56,6 +59,12 @@ struct SummarySetupProgressEvent: Decodable {
     }
 }
 
+struct PythonInstallationInfo {
+    let path: String
+    let version: String
+    let machine: String
+}
+
 @MainActor
 class SummarySetupManager: ObservableObject {
     @Published var isInstalling = false
@@ -83,13 +92,17 @@ class SummarySetupManager: ObservableObject {
         summaryVenvPath.appendingPathComponent("bin").appendingPathComponent("python3")
     }
 
+    private var installationLogURL: URL {
+        Self.appSupportURL.appendingPathComponent("summary-runtime-install.log")
+    }
+
     func checkSummaryVenvExists() -> Bool {
         let exists = FileManager.default.fileExists(atPath: summaryPythonPath.path)
         summaryVenvExists = exists
         return exists
     }
 
-    func findPython() -> (path: String, version: String)? {
+    func findPython() -> PythonInstallationInfo? {
         let pythonPaths = [
             "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3",
             "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
@@ -100,19 +113,36 @@ class SummarySetupManager: ObservableObject {
             "/usr/bin/python3",
         ]
 
+        var fallback: PythonInstallationInfo?
         for path in pythonPaths {
-            guard FileManager.default.fileExists(atPath: path), let version = getPythonVersion(path) else {
+            guard FileManager.default.fileExists(atPath: path),
+                  let info = getPythonInfo(path),
+                  isPythonVersionOk(info.version) else {
                 continue
             }
-            return (path, version)
+            if info.machine == "arm64" {
+                return info
+            }
+            if fallback == nil {
+                fallback = info
+            }
         }
-        return nil
+        return fallback
     }
 
-    private func getPythonVersion(_ pythonPath: String) -> String? {
+    private func getPythonInfo(_ pythonPath: String) -> PythonInstallationInfo? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
-        process.arguments = ["--version"]
+        process.arguments = [
+            "-c",
+            """
+            import json, platform
+            print(json.dumps({
+                "version": platform.python_version(),
+                "machine": platform.machine()
+            }))
+            """,
+        ]
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -122,10 +152,15 @@ class SummarySetupManager: ObservableObject {
             try process.run()
             process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                return output
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .replacingOccurrences(of: "Python ", with: "")
+            if process.terminationStatus != 0 {
+                return nil
+            }
+            if let output = String(data: data, encoding: .utf8),
+               let jsonData = output.data(using: .utf8),
+               let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+               let version = json["version"] as? String,
+               let machine = json["machine"] as? String {
+                return PythonInstallationInfo(path: pythonPath, version: version, machine: machine)
             }
         } catch {
             return nil
@@ -137,6 +172,23 @@ class SummarySetupManager: ObservableObject {
         let components = version.split(separator: ".").compactMap { Int($0) }
         guard components.count >= 2 else { return false }
         return components[0] == 3 && components[1] >= 10
+    }
+
+    private func resetInstallationLog() {
+        let header = "Summary runtime install log\n"
+        try? header.write(to: installationLogURL, atomically: true, encoding: .utf8)
+    }
+
+    private func appendInstallationLog(_ line: String) {
+        guard let data = line.data(using: .utf8) else { return }
+        if FileManager.default.fileExists(atPath: installationLogURL.path),
+           let handle = try? FileHandle(forWritingTo: installationLogURL) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: installationLogURL)
+        }
     }
 
     private func findSetupScript() -> String? {
@@ -192,11 +244,20 @@ class SummarySetupManager: ObservableObject {
         guard isPythonVersionOk(python.version) else {
             throw SummarySetupError.pythonVersionTooOld(found: python.version, required: "3.10")
         }
+        guard python.machine == "arm64" else {
+            throw SummarySetupError.pythonArchitectureUnsupported(found: python.machine)
+        }
         guard let scriptPath = findSetupScript() else {
             throw SummarySetupError.setupScriptNotFound
         }
 
         try FileManager.default.createDirectory(at: Self.appSupportURL, withIntermediateDirectories: true)
+        resetInstallationLog()
+        appendInstallationLog("python_path=\(python.path)\n")
+        appendInstallationLog("python_version=\(python.version)\n")
+        appendInstallationLog("python_machine=\(python.machine)\n")
+        appendInstallationLog("setup_script=\(scriptPath)\n")
+        appendInstallationLog("venv_path=\(summaryVenvPath.path)\n")
 
         statusMessage = "Installing summary runtime..."
 
@@ -212,6 +273,7 @@ class SummarySetupManager: ObservableObject {
 
         try process.run()
 
+        var lastProgressEvent: SummarySetupProgressEvent?
         let stream = AsyncThrowingStream<String, Error> { continuation in
             stdout.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
@@ -226,17 +288,31 @@ class SummarySetupManager: ObservableObject {
         do {
             for try await chunk in stream {
                 for line in chunk.split(separator: "\n") {
+                    appendInstallationLog(String(line) + "\n")
                     guard let data = line.data(using: .utf8),
                           let event = try? JSONDecoder().decode(SummarySetupProgressEvent.self, from: data) else {
                         continue
                     }
+                    lastProgressEvent = event
                     update(with: event)
                 }
             }
             process.waitUntilExit()
             if process.terminationStatus != 0 {
                 let data = stderr.fileHandleForReading.readDataToEndOfFile()
-                let message = String(data: data, encoding: .utf8) ?? "Unknown error"
+                let stderrText = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !stderrText.isEmpty {
+                    appendInstallationLog(stderrText + "\n")
+                }
+                let message: String
+                if !stderrText.isEmpty {
+                    message = stderrText
+                } else if let event = lastProgressEvent {
+                    message = event.details ?? event.message
+                } else {
+                    message = "Unknown error. See \(installationLogURL.path)"
+                }
                 throw SummarySetupError.installationFailed(reason: message)
             }
         } catch let error as SummarySetupError {

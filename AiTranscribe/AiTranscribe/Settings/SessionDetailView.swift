@@ -16,7 +16,7 @@ struct SessionDetailView: View {
     @AppStorage("preferredSummaryCustomWords") private var preferredSummaryCustomWords = SummaryLengthOption.custom.defaultWordTarget
     let sessionId: UUID
     let onBack: () -> Void
-    var onNavigateToModels: (() -> Void)? = nil
+    var onNavigateToModels: ((ModelMode) -> Void)? = nil
 
     @State private var selectedModelId: String = "parakeet-v2"
     @State private var ramBudgetGB: Double = 4.0
@@ -443,7 +443,7 @@ struct SessionDetailView: View {
                         .foregroundStyle(.secondary)
                     if let onNavigateToModels {
                         capsuleButton(label: "Go to Models", icon: "arrow.right", style: .prominent) {
-                            onNavigateToModels()
+                            onNavigateToModels(.speechToText)
                         }
                     }
                 }
@@ -722,7 +722,7 @@ struct SessionDetailView: View {
                         }
                         if let onNavigateToModels {
                             capsuleButton(label: "Open Models", icon: "arrow.right", style: .regular) {
-                                onNavigateToModels()
+                                onNavigateToModels(.summarization)
                             }
                         }
                     }
@@ -741,7 +741,7 @@ struct SessionDetailView: View {
                     .foregroundStyle(.secondary)
                 if let onNavigateToModels {
                     capsuleButton(label: "Open Models", icon: "arrow.right", style: .regular) {
-                        onNavigateToModels()
+                        onNavigateToModels(.summarization)
                     }
                 }
             }
@@ -934,7 +934,7 @@ struct SessionDetailView: View {
 
                             if let model = selectedSummaryModel, !model.downloaded, let onNavigateToModels {
                                 capsuleButton(label: "Download", icon: "arrow.down.circle", style: .regular) {
-                                    onNavigateToModels()
+                                    onNavigateToModels(.summarization)
                                 }
                             }
                         }
