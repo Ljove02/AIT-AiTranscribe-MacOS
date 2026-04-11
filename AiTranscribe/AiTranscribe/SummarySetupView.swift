@@ -17,7 +17,7 @@ struct SummarySetupView: View {
     @Environment(\.dismiss) var dismiss
 
     /// Python info fetched off the main thread
-    @State private var pythonInfo: (path: String, version: String)?
+    @State private var pythonInfo: PythonInstallationInfo?
     @State private var pythonChecked = false
     @State private var showRemoveConfirmation = false
 
@@ -174,6 +174,7 @@ struct SummarySetupView: View {
                     bulletPoint("MLX - Apple Silicon ML framework")
                     bulletPoint("MLX-LM - Language model inference")
                     bulletPoint("Dependencies - Tokenizers & utilities")
+                    bulletPoint("Requires Apple Silicon, macOS 14+, and a native arm64 Python 3.10+")
                 }
                 .padding(.leading, 8)
 
@@ -228,11 +229,21 @@ struct SummarySetupView: View {
                     .scaleEffect(0.7)
                 Text("Checking Python...")
                     .foregroundStyle(.secondary)
-            } else if let python = pythonInfo {
+            } else if let python = pythonInfo, python.machine == "arm64" {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
-                Text("Python \(python.version) found")
+                Text("Python \(python.version) (arm64) found")
                     .foregroundStyle(.secondary)
+            } else if let python = pythonInfo {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.red)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Python \(python.version) found, but \(python.machine) is unsupported")
+                        .foregroundStyle(.red)
+                    Text("Summary runtime needs a native arm64 Python on Apple Silicon.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             } else {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.red)
@@ -414,7 +425,7 @@ struct SummarySetupView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
                 .keyboardShortcut(.defaultAction)
-                .disabled(pythonInfo == nil && pythonChecked)
+                .disabled(!pythonChecked || pythonInfo?.machine != "arm64")
             }
         }
         .padding(20)

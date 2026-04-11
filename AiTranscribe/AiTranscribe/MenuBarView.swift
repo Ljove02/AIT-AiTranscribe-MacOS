@@ -34,9 +34,11 @@ struct MenuBarView: View {
             controlsSection
                 .padding(.top, 10)
 
-            // ── Microphone ──
-            microphoneRow
-                .padding(.top, 8)
+            // ── Microphone (only when backend is connected) ──
+            if appState.isServerConnected {
+                microphoneRow
+                    .padding(.top, 8)
+            }
 
             // ── Footer ──
             footerBar

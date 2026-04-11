@@ -7,6 +7,7 @@ JSON progress events for the Swift frontend.
 """
 
 import json
+import platform
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,14 @@ def fail(message: str, details: str | None = None):
     if details:
         payload["details"] = details
     print(json.dumps(payload), flush=True)
+
+
+def parse_major_minor(version: str) -> tuple[int, int] | None:
+    try:
+        major, minor, *_ = [int(part) for part in version.split(".")]
+        return major, minor
+    except Exception:
+        return None
 
 
 def create_venv(venv_path: Path) -> bool:
@@ -88,15 +97,39 @@ def install_requirements(venv_path: Path, requirements_path: Path) -> bool:
     return True
 
 
+def check_environment() -> bool:
+    machine = platform.machine().lower()
+    macos_version = platform.mac_ver()[0] or "unknown"
+
+    if sys.platform != "darwin":
+        fail("Summary runtime requires macOS", f"Detected platform: {sys.platform}")
+        return False
+    if machine != "arm64":
+        fail(
+            "Summary runtime requires Apple Silicon and a native arm64 Python",
+            f"Detected Python architecture: {machine}",
+        )
+        return False
+    parsed_version = parse_major_minor(macos_version)
+    if parsed_version is not None and parsed_version < (14, 0):
+        fail(
+            "Summary runtime requires macOS 14 or newer",
+            f"Detected macOS version: {macos_version}",
+        )
+        return False
+    return True
+
+
 def verify(venv_path: Path) -> bool:
     emit("verifying", 0.9, "Verifying summary runtime...")
     python_path = venv_path / "bin" / "python3"
     script = (
+        "from importlib import metadata as importlib_metadata; "
         "import mlx, mlx_vlm, huggingface_hub, psutil; "
         "from mlx_vlm.generate import stream_generate; "
-        "print(f'mlx={mlx.__version__}'); "
-        "print(f'mlx_vlm={mlx_vlm.__version__}'); "
-        "print(f'psutil={psutil.__version__}'); "
+        "print(f'mlx={importlib_metadata.version(\"mlx\")}'); "
+        "print(f'mlx_vlm={importlib_metadata.version(\"mlx-vlm\")}'); "
+        "print(f'psutil={importlib_metadata.version(\"psutil\")}'); "
         "print(f'stream_generate={callable(stream_generate)}')"
     )
     try:
@@ -107,7 +140,12 @@ def verify(venv_path: Path) -> bool:
             timeout=180,
         )
         if result.returncode != 0:
-            fail("Summary runtime verification failed", result.stderr)
+            details = [f"Verification exited with status {result.returncode}."]
+            if result.stdout.strip():
+                details.append(f"stdout:\n{result.stdout.strip()}")
+            if result.stderr.strip():
+                details.append(f"stderr:\n{result.stderr.strip()}")
+            fail("Summary runtime verification failed", "\n\n".join(details))
             return False
         versions = {}
         for line in result.stdout.splitlines():
@@ -142,6 +180,8 @@ def main():
     emit("checking_python", 0.0, f"Checking Python version... ({sys.version_info.major}.{sys.version_info.minor})")
     if sys.version_info < (3, 10):
         fail("Python 3.10+ required for summary runtime")
+        sys.exit(1)
+    if not check_environment():
         sys.exit(1)
 
     if not create_venv(venv_path):
