@@ -10,6 +10,7 @@ A powerful macOS menu bar application for local speech-to-text transcription and
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![Version](https://img.shields.io/badge/version-0.2.0-purple)
 ![Stars](https://img.shields.io/github/stars/Ljove02/AIT-AiTranscribe-MacOS)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20this%20project-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/veljkospasic)
 
 ---
 
@@ -373,6 +374,14 @@ Contributions are welcome.
 ## License
 
 This project is licensed under the MIT License with the [Commons Clause](https://commonsclause.com/) — you can use, modify, and share the code freely, but you cannot sell it as a commercial product. See the [LICENSE](LICENSE) file for details.
+
+---
+
+## Support
+
+If you find AITranscribe useful, consider supporting the project — it helps keep development going.
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/veljkospasic)
 
 ---
 
