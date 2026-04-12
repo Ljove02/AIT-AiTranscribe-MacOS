@@ -5,7 +5,7 @@
 A powerful macOS menu bar application for local speech-to-text transcription and AI-powered summarization. Runs completely offline using state-of-the-art AI models. Your voice stays on your Mac — nothing is sent to the cloud.
 
 ![macOS](https://img.shields.io/badge/macOS-13.0+-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+![License](https://img.shields.io/badge/license-MIT%20%2B%20Commons%20Clause-green)
 ![Swift](https://img.shields.io/badge/Swift-5.9+-orange)
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![Version](https://img.shields.io/badge/version-0.2.0-purple)
@@ -372,7 +372,7 @@ Contributions are welcome.
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License with the [Commons Clause](https://commonsclause.com/) — you can use, modify, and share the code freely, but you cannot sell it as a commercial product. See the [LICENSE](LICENSE) file for details.
 
 ---
 
