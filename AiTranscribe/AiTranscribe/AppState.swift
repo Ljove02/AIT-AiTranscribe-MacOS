@@ -93,6 +93,9 @@ class AppState: ObservableObject {
     /// Last transcribed text
     @Published var lastTranscription: String = ""
 
+    /// Metadata for the most recent transcription, used by upcoming dashboard/provider work
+    @Published var lastTranscriptionUsage: TranscriptionUsageMetadata?
+
     /// Is the backend server running?
     @Published var isServerConnected: Bool = false
 
@@ -195,6 +198,13 @@ class AppState: ObservableObject {
     /// The client that talks to our Python backend
     let apiClient = APIClient()
 
+    /// Providers currently available to the app. First implementation is local-only.
+    var transcriptionProviders: [TranscriptionProviderDescriptor] {
+        [.localBackend]
+    }
+
+    private lazy var localTranscriptionProvider = LocalTranscriptionProvider(apiClient: apiClient)
+
     /// History manager for JSON storage
     private let historyManager = HistoryManager()
 
@@ -225,6 +235,9 @@ class AppState: ObservableObject {
 
     /// Swift-native audio recorder (uses AVFoundation for proper permissions)
     let audioRecorder = AudioRecorder()
+
+    /// Processes sealed basic-recording chunks while recording continues.
+    private var rollingBasicBatchSession: RollingBasicBatchSession?
 
 
     // =========================================================================
@@ -759,7 +772,15 @@ class AppState: ObservableObject {
         isModelLoading = true
         loadingModelId = modelId  // Track which model is being loaded
         statusMessage = "Loading model..."
+        defer {
+            isModelLoading = false
+            loadingModelId = nil  // Clear loading state
+        }
+
         do {
+            try await prepareBackendForModelLoad(modelId)
+            statusMessage = "Loading model..."
+
             let response = try await apiClient.loadModel(modelId: modelId)
             if response.success {
                 isModelLoaded = true
@@ -771,11 +792,76 @@ class AppState: ObservableObject {
                 statusMessage = response.message
             }
         } catch {
-            statusMessage = "Failed to load model"
+            statusMessage = "Failed to load model: \(error.localizedDescription)"
             print("Load error: \(error)")
         }
-        isModelLoading = false
-        loadingModelId = nil  // Clear loading state
+    }
+
+    private func prepareBackendForModelLoad(_ modelId: String) async throws {
+        guard let backendManager else { return }
+
+        if modelRequiresNemo(modelId) {
+            if backendManager.currentBackendMode == .nemoVenv {
+                try await ensureBackendReady(backendManager, modeName: "NeMo")
+                return
+            }
+
+            guard backendManager.nemoVenvExists else {
+                throw modelLoadError("NeMo runtime is not installed")
+            }
+
+            statusMessage = "Switching to NeMo backend..."
+            clearLoadedModelStateForBackendSwitch()
+            await backendManager.switchToNemoMode()
+            try await ensureBackendReady(backendManager, modeName: "NeMo")
+            await checkNemoStatus()
+            await fetchAvailableModels()
+            return
+        }
+
+        if backendManager.currentBackendMode == .nemoVenv {
+            statusMessage = "Switching to Whisper backend..."
+            clearLoadedModelStateForBackendSwitch()
+            await backendManager.switchToWhisperMode()
+            try await ensureBackendReady(backendManager, modeName: "Whisper")
+            await checkNemoStatus()
+            await fetchAvailableModels()
+        } else {
+            try await ensureBackendReady(backendManager, modeName: backendManager.currentBackendMode.displayName)
+        }
+    }
+
+    private func ensureBackendReady(_ backendManager: BackendManager, modeName: String) async throws {
+        if !backendManager.isRunning {
+            backendManager.start()
+        }
+
+        guard backendManager.isServerReady else {
+            await backendManager.waitForServerReady(timeout: 30.0)
+            if backendManager.isServerReady { return }
+            throw modelLoadError("\(modeName) backend is not ready")
+        }
+    }
+
+    private func clearLoadedModelStateForBackendSwitch() {
+        isModelLoaded = false
+        loadedModelId = nil
+    }
+
+    private func modelRequiresNemo(_ modelId: String) -> Bool {
+        if let model = availableModels.first(where: { $0.id == modelId }) {
+            return model.nemoRequired
+        }
+
+        return modelId.lowercased().contains("parakeet") || modelId.lowercased().contains("nemotron")
+    }
+
+    private func modelLoadError(_ message: String) -> NSError {
+        NSError(
+            domain: "AiTranscribe.AppState.ModelLoad",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: message]
+        )
     }
 
     /// Unload the ASR model
@@ -975,6 +1061,8 @@ class AppState: ObservableObject {
             return
         }
 
+        configureRollingBasicBatchingIfNeeded()
+
         // Start Swift-native recording with selected device
         if await audioRecorder.startRecording(deviceId: selectedDeviceId) {
             isRecording = true
@@ -990,6 +1078,7 @@ class AppState: ObservableObject {
             // Start polling audio recorder for volume updates
             startVolumePolling()
         } else {
+            cleanupRollingBasicBatching()
             statusMessage = "Failed to start recording"
         }
     }
@@ -1117,6 +1206,7 @@ class AppState: ObservableObject {
             isRecording = false
             statusMessage = "No audio recorded"
             recordingIndicator.hide()
+            cleanupRollingBasicBatching()
             
             // End ducking session (error path)
             if mutePlaybackDuringRecording {
@@ -1126,6 +1216,9 @@ class AppState: ObservableObject {
         }
 
         let recordedDuration = audioRecorder.duration
+        let rollingSession = rollingBasicBatchSession
+        let rollingWasUsed = rollingSession?.hasStarted == true
+        let rollingTailChunk = rollingWasUsed ? audioRecorder.finalizeRollingTailChunk() : nil
         
         // Restore volume IMMEDIATELY when recording stops (not during transcription)
         if mutePlaybackDuringRecording {
@@ -1133,17 +1226,39 @@ class AppState: ObservableObject {
         }
 
         do {
-            // Send audio data to backend for transcription with progress updates
-            let result = try await apiClient.transcribeAudioDataWithProgress(audioData) { progress, elapsed in
-                let percent = Int(progress * 100)
-                if percent > 0 {
-                    self.statusMessage = "Transcribing... \(percent)%"
-                } else {
-                    self.statusMessage = "Transcribing... (\(Int(elapsed))s)"
+            let result: TranscriptionProviderResult
+
+            if let rollingSession, rollingWasUsed {
+                statusMessage = "Finishing batches..."
+                result = try await rollingSession.finish(
+                    finalChunk: rollingTailChunk,
+                    totalDurationSeconds: recordedDuration
+                )
+            } else {
+                let request = TranscriptionRequest(
+                    audioData: audioData,
+                    recordedDurationSeconds: recordedDuration,
+                    workflow: .basic,
+                    model: currentLocalTranscriptionModel()
+                )
+
+                result = try await localTranscriptionProvider.transcribe(request) { update in
+                    let percent = Int(update.progress * 100)
+                    if let message = update.message, !message.isEmpty {
+                        self.statusMessage = message
+                    } else if percent > 0 {
+                        self.statusMessage = "Transcribing... \(percent)%"
+                    } else {
+                        self.statusMessage = "Transcribing... (\(Int(update.elapsedSeconds))s)"
+                    }
                 }
             }
+
+            cleanupRollingBasicBatching()
             isRecording = false
             lastTranscription = result.text
+            let usage = result.usage
+            lastTranscriptionUsage = usage
             statusMessage = "Ready"
 
             // Hide indicator after transcription completes
@@ -1152,10 +1267,17 @@ class AppState: ObservableObject {
             // Save to history
             let entry = TranscriptionEntry(
                 text: result.text,
-                duration: result.durationSeconds > 0 ? result.durationSeconds : recordedDuration,
+                duration: result.durationSeconds,
                 timestamp: Date(),
-                modelId: self.loadedModelId ?? "unknown",
-                modelName: self.availableModels.first { $0.id == self.loadedModelId }?.displayName ?? "Unknown"
+                modelId: result.model.id,
+                modelName: result.model.displayName,
+                providerId: result.provider.id,
+                providerName: result.provider.displayName,
+                providerSource: result.provider.source,
+                workflow: result.workflow,
+                processingTimeSeconds: result.processingTimeSeconds,
+                realtimeFactor: result.realtimeFactor,
+                estimatedCostUSD: usage.estimatedCostUSD
             )
             addToHistory(entry)
 
@@ -1175,6 +1297,7 @@ class AppState: ObservableObject {
             startIdleUnloadTimer()
 
         } catch {
+            cleanupRollingBasicBatching()
             isRecording = false
             if "\(error)".contains("timed out") || "\(error)".contains("timeout") {
                 statusMessage = "Transcription timed out - try shorter audio"
@@ -1184,6 +1307,73 @@ class AppState: ObservableObject {
             recordingIndicator.hide()
             print("Stop recording error: \(error)")
         }
+    }
+
+    private func configureRollingBasicBatchingIfNeeded() {
+        cleanupRollingBasicBatching()
+
+        guard isBasicBatchingEnabled,
+              !isStreamingMode,
+              isModelLoaded || isModelLoading || isAutoLoadingModel else {
+            return
+        }
+
+        let session = RollingBasicBatchSession(
+            apiClient: apiClient,
+            provider: .localBackend,
+            modelProvider: { [weak self] in
+                self?.currentLocalTranscriptionModel() ?? TranscriptionModelDescriptor(
+                    id: "unknown",
+                    displayName: "Unknown",
+                    providerId: TranscriptionProviderDescriptor.localBackend.id,
+                    source: .local
+                )
+            },
+            isReadyToProcess: { [weak self] in
+                self?.isModelLoaded == true && self?.isModelLoading == false
+            }
+        )
+        session.onStatusUpdate = { [weak self] message in
+            self?.statusMessage = message
+        }
+        rollingBasicBatchSession = session
+
+        print("AppState: rolling basic batching enabled (threshold=\(basicBatchingThresholdSeconds)s, modelLoaded=\(isModelLoaded), modelLoading=\(isModelLoading), autoLoading=\(isAutoLoadingModel))")
+        audioRecorder.configureRollingChunks(
+            chunkDurationSeconds: basicBatchingThresholdSeconds,
+            overlapSeconds: 3
+        ) { [weak self] chunk in
+            self?.rollingBasicBatchSession?.enqueue(chunk)
+        }
+    }
+
+    private func cleanupRollingBasicBatching() {
+        rollingBasicBatchSession?.cancel()
+        rollingBasicBatchSession = nil
+        audioRecorder.disableRollingChunks()
+    }
+
+    private var isBasicBatchingEnabled: Bool {
+        if UserDefaults.standard.object(forKey: "basicTranscriptionBatchingEnabled") == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: "basicTranscriptionBatchingEnabled")
+    }
+
+    private var basicBatchingThresholdSeconds: Double {
+        let configured = UserDefaults.standard.double(forKey: "basicTranscriptionBatchingThresholdSeconds")
+        return configured > 0 ? configured : 120
+    }
+
+    private func currentLocalTranscriptionModel() -> TranscriptionModelDescriptor {
+        let modelId = loadedModelId ?? "unknown"
+        let modelName = availableModels.first { $0.id == modelId }?.displayName ?? "Unknown"
+        return TranscriptionModelDescriptor(
+            id: modelId,
+            displayName: modelName,
+            providerId: TranscriptionProviderDescriptor.localBackend.id,
+            source: .local
+        )
     }
 
     /// Stop streaming recording
@@ -1233,6 +1423,7 @@ class AppState: ObservableObject {
         } else {
             // Cancel Swift AudioRecorder (no backend call needed)
             await audioRecorder.cancelRecording()
+            cleanupRollingBasicBatching()
         }
 
         isRecording = false

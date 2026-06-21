@@ -46,7 +46,7 @@ Then visit http://127.0.0.1:8765/docs to see automatic API documentation!
 # ============================================================================
 
 # FastAPI - The web framework
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -1385,6 +1385,98 @@ async def transcribe_stream(file: UploadFile = File(...)):
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no"
         }
+    )
+
+
+@app.post("/transcribe-batch-stream")
+async def transcribe_batch_stream(
+    file: UploadFile = File(...),
+    model_id: str = Form(DEFAULT_MODEL),
+    ram_budget_mb: int = Form(4096),
+):
+    """
+    Batch-transcribe an uploaded audio file with SSE progress updates.
+
+    This is the normal-recording counterpart to /session/transcribe: Swift uploads
+    the just-recorded WAV, the backend chunks it with BatchTranscriber, then returns
+    one combined transcript when all chunks are complete.
+    """
+    global active_batch_transcriber
+
+    if not is_model_loaded():
+        raise HTTPException(status_code=503, detail="Model not loaded. Call POST /load first.")
+
+    if active_batch_transcriber is not None:
+        raise HTTPException(status_code=409, detail="Another batch transcription is already running.")
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+            content = await file.read()
+            tmp.write(content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to save audio: {e}")
+
+    print(
+        f"Basic batch transcribe: model={model_id}, "
+        f"budget={ram_budget_mb}MB, audio={tmp_path}"
+    )
+
+    transcriber = BatchTranscriber(
+        audio_path=tmp_path,
+        model_id=model_id,
+        ram_budget_mb=ram_budget_mb,
+        transcribe_fn=transcribe_audio,
+    )
+    active_batch_transcriber = transcriber
+
+    async def event_generator():
+        global active_batch_transcriber
+        event_queue: queue.Queue = queue.Queue()
+        _SENTINEL = object()
+
+        def _run_transcription():
+            try:
+                for event in transcriber.transcribe():
+                    event_queue.put(event)
+            except Exception as e:
+                event_queue.put({"event": "error", "message": str(e)})
+            finally:
+                event_queue.put(_SENTINEL)
+
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, _run_transcription)
+
+        try:
+            while True:
+                while True:
+                    try:
+                        event = event_queue.get_nowait()
+                        break
+                    except queue.Empty:
+                        await asyncio.sleep(0.5)
+                        continue
+
+                if event is _SENTINEL:
+                    break
+
+                yield f"data: {json.dumps(event)}\n\n"
+
+                if event.get("event") in {"done", "error", "cancelled"}:
+                    break
+        finally:
+            active_batch_transcriber = None
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

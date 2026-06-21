@@ -20,6 +20,8 @@ struct MenuBarView: View {
 
     @State private var isHoveredSettings = false
     @State private var isHoveredQuit = false
+    @State private var isHistoryExpanded = false
+    @State private var copiedHistoryEntryId: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -39,6 +41,10 @@ struct MenuBarView: View {
                 microphoneRow
                     .padding(.top, 8)
             }
+
+            // ── Recent History ──
+            historySection
+                .padding(.top, 8)
 
             // ── Footer ──
             footerBar
@@ -279,6 +285,105 @@ struct MenuBarView: View {
         )
     }
 
+    // MARK: - Recent History
+
+    private var recentHistoryEntries: [TranscriptionEntry] {
+        Array(appState.transcriptionHistory.prefix(5))
+    }
+
+    private var historySection: some View {
+        VStack(spacing: 6) {
+            Button {
+                let animation: Animation = isHistoryExpanded
+                    ? .easeOut(duration: 0.10)
+                    : .easeOut(duration: 0.34)
+                withAnimation(animation) {
+                    isHistoryExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+
+                    Text("History")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.primary)
+
+                    if !recentHistoryEntries.isEmpty {
+                        Text("\(recentHistoryEntries.count)")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.white.opacity(0.06), in: Capsule())
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isHistoryExpanded ? 180 : 0))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(.white.opacity(0.04), in: .rect(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Recent transcription history")
+            .accessibilityHint(isHistoryExpanded ? "Collapse recent history" : "Show recent history")
+
+            if isHistoryExpanded {
+                if recentHistoryEntries.isEmpty {
+                    emptyHistoryView
+                        .transition(historyContentTransition)
+                } else {
+                    VStack(spacing: 5) {
+                        ForEach(recentHistoryEntries) { entry in
+                            HistoryRow(
+                                entry: entry,
+                                isCopied: copiedHistoryEntryId == entry.id
+                            ) {
+                                copyHistoryEntry(entry)
+                            }
+                        }
+                    }
+                    .transition(historyContentTransition)
+                }
+            }
+        }
+    }
+
+    private var historyContentTransition: AnyTransition {
+        .asymmetric(
+            insertion: .opacity
+                .combined(with: .scale(scale: 0.985, anchor: .top)),
+            removal: .opacity
+        )
+    }
+
+    private var emptyHistoryView: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "tray")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            Text("No recent transcriptions yet")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.white.opacity(0.025), in: .rect(cornerRadius: 8, style: .continuous))
+    }
+
     // MARK: - Footer Bar
 
     private var footerBar: some View {
@@ -397,6 +502,17 @@ struct MenuBarView: View {
         }
     }
 
+    private func copyHistoryEntry(_ entry: TranscriptionEntry) {
+        appState.copyToClipboard(entry.text)
+        copiedHistoryEntryId = entry.id
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            if copiedHistoryEntryId == entry.id {
+                copiedHistoryEntryId = nil
+            }
+        }
+    }
+
 }
 
 // MARK: - Status Chip
@@ -432,6 +548,76 @@ private struct StatusChip: View {
                 )
         )
     }
+}
+
+// MARK: - History Row
+
+private struct HistoryRow: View {
+    let entry: TranscriptionEntry
+    let isCopied: Bool
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: isCopied ? "checkmark.circle.fill" : "doc.on.doc")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isCopied ? .green : .secondary)
+                    .frame(width: 14, height: 18)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(entry.text)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+
+                    HStack(spacing: 5) {
+                        Text(entry.timestamp, formatter: Self.timestampFormatter)
+
+                        Text("•")
+
+                        Text("\(entry.wordCount) words")
+                    }
+                    .font(.system(size: 8, weight: .medium))
+                    .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(
+                isHovered
+                    ? AnyShapeStyle(.white.opacity(0.07))
+                    : AnyShapeStyle(.white.opacity(0.03)),
+                in: .rect(cornerRadius: 8, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(
+                        isCopied ? .green.opacity(0.28) : .white.opacity(isHovered ? 0.1 : 0.05),
+                        lineWidth: 0.5
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { h in
+            withAnimation(.easeOut(duration: 0.12)) { isHovered = h }
+        }
+        .accessibilityLabel("Copy transcription from \(entry.timestamp, formatter: Self.timestampFormatter)")
+        .accessibilityHint("Copies this transcription to the clipboard")
+    }
+
+    private static let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        formatter.doesRelativeDateFormatting = true
+        return formatter
+    }()
 }
 
 // MARK: - MenuBarButton
