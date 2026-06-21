@@ -11,6 +11,9 @@ struct GeneralSettingsView: View {
     @AppStorage("autoPasteAfterTranscription") private var autoPasteAfterTranscription = false
     @AppStorage("playSounds") private var playSounds = true
     @AppStorage("indicatorPosition") private var indicatorPosition = "topCenter"
+    @AppStorage("basicTranscriptionBatchingEnabled") private var basicBatchingEnabled = true
+    @AppStorage("basicTranscriptionBatchingThresholdSeconds") private var basicBatchingThresholdSeconds = 120.0
+    @AppStorage("basicTranscriptionBatchingRamBudgetMB") private var basicBatchingRamBudgetMB = 4096
 
     // Init from hasAnimated so the very first frame is correct — no jump
     @State private var appeared: Bool
@@ -30,7 +33,7 @@ struct GeneralSettingsView: View {
                         Text("General")
                             .font(.system(size: 22, weight: .bold, design: .rounded))
 
-                        Text("5 options")
+                        Text("8 options")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -61,6 +64,54 @@ struct GeneralSettingsView: View {
                 SettingsDivider()
                     .staggerIn(index: 2, appeared: appeared)
 
+                // Batch Processing section
+                Group {
+                    SettingsSectionHeader(title: "Batch Processing")
+
+                    SettingsRow(
+                        title: "Rolling batch processing",
+                        description: "Transcribe completed chunks while you keep speaking. This keeps long recordings fast when you stop."
+                    ) {
+                        Toggle("", isOn: $basicBatchingEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+
+                    SettingsRow(
+                        title: "Chunk length",
+                        description: "Shorter chunks finish sooner and use less memory. Two minutes is the validated fast default."
+                    ) {
+                        Picker("", selection: $basicBatchingThresholdSeconds) {
+                            ForEach(batchLengthPresets) { preset in
+                                Text(preset.title).tag(preset.seconds)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 168)
+                        .disabled(!basicBatchingEnabled)
+                    }
+
+                    SettingsRow(
+                        title: "Local memory budget",
+                        description: "Used by fallback post-stop batching. Rolling batches usually stay below this because chunks are small."
+                    ) {
+                        Picker("", selection: $basicBatchingRamBudgetMB) {
+                            ForEach(ramBudgetPresets) { preset in
+                                Text(preset.title).tag(preset.megabytes)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 132)
+                        .disabled(!basicBatchingEnabled)
+                    }
+
+                    batchInfoPanel
+                }
+                .staggerIn(index: 3, appeared: appeared)
+
+                SettingsDivider()
+                    .staggerIn(index: 4, appeared: appeared)
+
                 // Recording Indicator section
                 Group {
                     SettingsSectionHeader(title: "Recording Indicator")
@@ -83,10 +134,10 @@ struct GeneralSettingsView: View {
                         }
                     }
                 }
-                .staggerIn(index: 3, appeared: appeared)
+                .staggerIn(index: 5, appeared: appeared)
 
                 SettingsDivider()
-                    .staggerIn(index: 4, appeared: appeared)
+                    .staggerIn(index: 6, appeared: appeared)
 
                 // Feedback section
                 Group {
@@ -101,10 +152,10 @@ struct GeneralSettingsView: View {
                             .labelsHidden()
                     }
                 }
-                .staggerIn(index: 5, appeared: appeared)
+                .staggerIn(index: 7, appeared: appeared)
 
                 SettingsDivider()
-                    .staggerIn(index: 6, appeared: appeared)
+                    .staggerIn(index: 8, appeared: appeared)
 
                 // Audio section
                 Group {
@@ -112,10 +163,10 @@ struct GeneralSettingsView: View {
 
                     AudioDuckingSettings()
                 }
-                .staggerIn(index: 7, appeared: appeared)
+                .staggerIn(index: 9, appeared: appeared)
 
                 SettingsDivider()
-                    .staggerIn(index: 8, appeared: appeared)
+                    .staggerIn(index: 10, appeared: appeared)
 
                 // Permissions section
                 Group {
@@ -151,7 +202,7 @@ struct GeneralSettingsView: View {
                         .controlSize(.small)
                     }
                 }
-                .staggerIn(index: 9, appeared: appeared)
+                .staggerIn(index: 11, appeared: appeared)
 
                 // Bottom spacing
                 Spacer(minLength: 20)
@@ -215,6 +266,93 @@ struct GeneralSettingsView: View {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    // MARK: - Batch Settings
+
+    private struct BatchLengthPreset: Identifiable {
+        let seconds: Double
+        let title: String
+
+        var id: Double { seconds }
+    }
+
+    private struct RAMBudgetPreset: Identifiable {
+        let megabytes: Int
+        let title: String
+
+        var id: Int { megabytes }
+    }
+
+    private var batchLengthPresets: [BatchLengthPreset] {
+        [
+            BatchLengthPreset(seconds: 60, title: "1 min"),
+            BatchLengthPreset(seconds: 90, title: "1.5 min"),
+            BatchLengthPreset(seconds: 120, title: "2 min")
+        ]
+    }
+
+    private var ramBudgetPresets: [RAMBudgetPreset] {
+        [
+            RAMBudgetPreset(megabytes: 3072, title: "3 GB"),
+            RAMBudgetPreset(megabytes: 4096, title: "4 GB"),
+            RAMBudgetPreset(megabytes: 6144, title: "6 GB"),
+            RAMBudgetPreset(megabytes: 8192, title: "8 GB")
+        ]
+    }
+
+    private var batchInfoPanel: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: basicBatchingEnabled ? "bolt.horizontal.circle.fill" : "pause.circle.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(basicBatchingEnabled ? .green : .secondary)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(basicBatchingEnabled ? "Recommended for long dictation" : "Long recordings will process after you stop")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary)
+
+                Text(batchDescription)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(.thinMaterial, in: .rect(cornerRadius: 12, style: .continuous))
+        .padding(.top, 4)
+    }
+
+    private var batchDescription: String {
+        if basicBatchingEnabled {
+            return "Current setting: a new local chunk starts about every \(formattedBatchLength). Fallback memory budget: \(formattedRAMBudget)."
+        }
+
+        return "Use this only for troubleshooting. The validated default is enabled with 2-minute rolling chunks."
+    }
+
+    private var formattedBatchLength: String {
+        if basicBatchingThresholdSeconds < 60 {
+            return "\(Int(basicBatchingThresholdSeconds)) seconds"
+        }
+
+        let minutes = basicBatchingThresholdSeconds / 60
+        if minutes.rounded() == minutes {
+            return "\(Int(minutes)) minute\(minutes == 1 ? "" : "s")"
+        }
+
+        return String(format: "%.1f minutes", minutes)
+    }
+
+    private var formattedRAMBudget: String {
+        let gb = Double(basicBatchingRamBudgetMB) / 1024
+        if gb.rounded() == gb {
+            return "\(Int(gb)) GB"
+        }
+
+        return String(format: "%.1f GB", gb)
     }
 }
 
