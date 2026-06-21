@@ -305,6 +305,13 @@ public struct TranscriptionEntry: Identifiable, Codable, Equatable {
     // Extra fields for future analysis
     let modelId: String
     let modelName: String
+    let providerId: String?
+    let providerName: String?
+    let providerSource: TranscriptionProviderSource?
+    let workflow: TranscriptionWorkflow?
+    let processingTimeSeconds: Double?
+    let realtimeFactor: Double?
+    let estimatedCostUSD: Double?
     let wordCount: Int
     let wordsPerMinute: Double
     let phrasesCount: Int
@@ -317,7 +324,14 @@ public struct TranscriptionEntry: Identifiable, Codable, Equatable {
         duration: Double,
         timestamp: Date = Date(),
         modelId: String = "unknown",
-        modelName: String = "Unknown"
+        modelName: String = "Unknown",
+        providerId: String? = nil,
+        providerName: String? = nil,
+        providerSource: TranscriptionProviderSource? = nil,
+        workflow: TranscriptionWorkflow? = nil,
+        processingTimeSeconds: Double? = nil,
+        realtimeFactor: Double? = nil,
+        estimatedCostUSD: Double? = nil
     ) {
         self.id = id
         self.text = text
@@ -325,7 +339,14 @@ public struct TranscriptionEntry: Identifiable, Codable, Equatable {
         self.timestamp = timestamp
         self.modelId = modelId
         self.modelName = modelName
-        
+        self.providerId = providerId
+        self.providerName = providerName
+        self.providerSource = providerSource
+        self.workflow = workflow
+        self.processingTimeSeconds = processingTimeSeconds
+        self.realtimeFactor = realtimeFactor
+        self.estimatedCostUSD = estimatedCostUSD
+
         // Calculate extra fields
         self.wordCount = text.split(separator: " ").count
         self.phrasesCount = text.split(whereSeparator: { $0 == "." || $0 == "!" || $0 == "?" }).count

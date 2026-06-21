@@ -36,8 +36,11 @@ except ImportError:
 # CHUNK DURATION LOOKUP TABLE
 # ============================================================================
 # Maps available_ram_mb (after subtracting model RAM) to chunk_duration_seconds.
-# These are conservative defaults for parakeet-v2. Refine via benchmarking.
-# The tradeoff: more available RAM = bigger chunks = fewer batches = faster.
+# These are conservative defaults. Refine via benchmarking.
+# The current app-level cap keeps normal transcription batches predictable and
+# memory-stable while we validate batching behavior with real recordings.
+
+MAX_CHUNK_DURATION_SECONDS = 120
 
 CHUNK_DURATION_TABLE = {
     "parakeet-v2": {
@@ -120,7 +123,7 @@ def lookup_chunk_duration(available_ram_mb: int, model_id: str) -> int:
         else:
             break
 
-    return best_duration
+    return min(best_duration, MAX_CHUNK_DURATION_SECONDS)
 
 
 def convert_m4a_to_wav(m4a_path: str, wav_path: Optional[str] = None) -> str:

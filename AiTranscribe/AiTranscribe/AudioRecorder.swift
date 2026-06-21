@@ -34,6 +34,12 @@ import CoreAudio
 import AudioToolbox
 import Combine
 
+struct AudioRecorderChunk: Equatable {
+    let index: Int
+    let audioData: Data
+    let durationSeconds: Double
+}
+
 /// Records audio from the microphone using AVFoundation
 class AudioRecorder: NSObject, ObservableObject {
     private static func fourCCString(_ value: OSType) -> String {
@@ -304,6 +310,14 @@ class AudioRecorder: NSObject, ObservableObject {
     /// All recorded buffers (16kHz mono)
     private var recordedBuffers: [AVAudioPCMBuffer] = []
 
+    /// Rolling chunk state for processing long basic recordings while capture continues.
+    private var rollingChunkBuffers: [AVAudioPCMBuffer] = []
+    private var rollingChunkFrameCount: Int = 0
+    private var rollingChunkIndex: Int = 0
+    private var rollingChunkDurationSeconds: TimeInterval = 120
+    private var rollingChunkOverlapSeconds: TimeInterval = 3
+    private var onRollingChunk: ((AudioRecorderChunk) -> Void)?
+
     /// Timer for updating duration
     private var durationTimer: Timer?
 
@@ -347,6 +361,7 @@ class AudioRecorder: NSObject, ObservableObject {
 
         // Clear previous recording
         recordedBuffers.removeAll()
+        resetRollingChunkState()
         audioConverter = nil
         micGain = 2.0
         currentVolume = 0.0
@@ -419,6 +434,7 @@ class AudioRecorder: NSObject, ObservableObject {
         // Make a copy of the buffer
         guard let bufferCopy = buffer.copy() as? AVAudioPCMBuffer else { return }
         recordedBuffers.append(bufferCopy)
+        appendRollingChunkBuffer(bufferCopy)
 
         // Calculate volume (RMS)
         if let channelData = buffer.floatChannelData?[0] {
@@ -517,6 +533,7 @@ class AudioRecorder: NSObject, ObservableObject {
         isRecording = false
         currentVolume = 0.0
         recordedBuffers.removeAll()
+        disableRollingChunks()
     }
 
     private func startDurationTimer() {
@@ -585,6 +602,148 @@ class AudioRecorder: NSObject, ObservableObject {
         }
 
         return true
+    }
+
+    func configureRollingChunks(
+        chunkDurationSeconds: TimeInterval,
+        overlapSeconds: TimeInterval,
+        onChunk: @escaping (AudioRecorderChunk) -> Void
+    ) {
+        rollingChunkDurationSeconds = max(10, chunkDurationSeconds)
+        rollingChunkOverlapSeconds = max(0, min(overlapSeconds, rollingChunkDurationSeconds / 2))
+        onRollingChunk = onChunk
+        resetRollingChunkState()
+    }
+
+    func disableRollingChunks() {
+        onRollingChunk = nil
+        resetRollingChunkState()
+    }
+
+    func finalizeRollingTailChunk() -> AudioRecorderChunk? {
+        guard onRollingChunk != nil,
+              rollingChunkFrameCount > 0,
+              let format = recordingFormat,
+              let combinedBuffer = combinedBuffer(from: rollingChunkBuffers, format: format) else {
+            return nil
+        }
+
+        let duration = Double(combinedBuffer.frameLength) / sampleRate
+        let minimumTailDuration = rollingChunkIndex > 0 ? rollingChunkOverlapSeconds + 0.5 : 0.25
+        guard duration > minimumTailDuration,
+              let audioData = createWAVData(from: combinedBuffer) else {
+            return nil
+        }
+
+        return AudioRecorderChunk(
+            index: rollingChunkIndex + 1,
+            audioData: audioData,
+            durationSeconds: duration
+        )
+    }
+
+    private func resetRollingChunkState() {
+        rollingChunkBuffers.removeAll()
+        rollingChunkFrameCount = 0
+        rollingChunkIndex = 0
+    }
+
+    private func appendRollingChunkBuffer(_ buffer: AVAudioPCMBuffer) {
+        guard onRollingChunk != nil else { return }
+
+        guard let bufferCopy = buffer.copy() as? AVAudioPCMBuffer else { return }
+        rollingChunkBuffers.append(bufferCopy)
+        rollingChunkFrameCount += Int(bufferCopy.frameLength)
+
+        let chunkFrames = Int(rollingChunkDurationSeconds * sampleRate)
+        guard rollingChunkFrameCount >= chunkFrames,
+              let format = recordingFormat,
+              let combinedBuffer = combinedBuffer(from: rollingChunkBuffers, format: format),
+              let audioData = createWAVData(from: combinedBuffer) else {
+            return
+        }
+
+        rollingChunkIndex += 1
+        let duration = Double(combinedBuffer.frameLength) / sampleRate
+        let chunk = AudioRecorderChunk(
+            index: rollingChunkIndex,
+            audioData: audioData,
+            durationSeconds: duration
+        )
+
+        retainRollingOverlap(from: combinedBuffer, format: format)
+
+        if let onRollingChunk {
+            DispatchQueue.main.async {
+                onRollingChunk(chunk)
+            }
+        }
+    }
+
+    private func retainRollingOverlap(from buffer: AVAudioPCMBuffer, format: AVAudioFormat) {
+        let overlapFrames = min(Int(rollingChunkOverlapSeconds * sampleRate), Int(buffer.frameLength))
+        guard overlapFrames > 0,
+              let overlapBuffer = copyFrames(
+                from: buffer,
+                startFrame: Int(buffer.frameLength) - overlapFrames,
+                frameCount: overlapFrames,
+                format: format
+              ) else {
+            rollingChunkBuffers.removeAll()
+            rollingChunkFrameCount = 0
+            return
+        }
+
+        rollingChunkBuffers = [overlapBuffer]
+        rollingChunkFrameCount = overlapFrames
+    }
+
+    private func combinedBuffer(from buffers: [AVAudioPCMBuffer], format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let totalFrames = buffers.reduce(0) { $0 + Int($1.frameLength) }
+        guard totalFrames > 0,
+              let combinedBuffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: AVAudioFrameCount(totalFrames)
+              ),
+              let dstData = combinedBuffer.floatChannelData?[0] else {
+            return nil
+        }
+
+        var offset = 0
+        for buffer in buffers {
+            let frameCount = Int(buffer.frameLength)
+            guard frameCount > 0,
+                  let srcData = buffer.floatChannelData?[0] else {
+                continue
+            }
+            memcpy(dstData.advanced(by: offset), srcData, frameCount * MemoryLayout<Float>.size)
+            offset += frameCount
+        }
+        combinedBuffer.frameLength = AVAudioFrameCount(offset)
+        return combinedBuffer
+    }
+
+    private func copyFrames(
+        from buffer: AVAudioPCMBuffer,
+        startFrame: Int,
+        frameCount: Int,
+        format: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        guard frameCount > 0,
+              startFrame >= 0,
+              startFrame + frameCount <= Int(buffer.frameLength),
+              let srcData = buffer.floatChannelData?[0],
+              let copy = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: AVAudioFrameCount(frameCount)
+              ),
+              let dstData = copy.floatChannelData?[0] else {
+            return nil
+        }
+
+        memcpy(dstData, srcData.advanced(by: startFrame), frameCount * MemoryLayout<Float>.size)
+        copy.frameLength = AVAudioFrameCount(frameCount)
+        return copy
     }
 
     // MARK: - WAV Conversion

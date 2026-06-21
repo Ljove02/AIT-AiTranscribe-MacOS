@@ -495,6 +495,90 @@ class APIClient {
         throw APIError.serverError("Transcription stream ended unexpectedly")
     }
 
+    /// Transcribe uploaded audio through the batch pipeline.
+    /// Used by normal recordings once they are long enough to benefit from chunking.
+    func transcribeAudioDataInBatches(
+        _ wavData: Data,
+        modelId: String,
+        ramBudgetMB: Int,
+        onEvent: @escaping (SessionTranscriptionEvent) -> Void
+    ) async throws -> TranscriptionResponse {
+        let url = baseURL.appendingPathComponent("/transcribe-batch-stream")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 7200
+
+        let boundary = UUID().uuidString
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+        appendFormField(name: "model_id", value: modelId, boundary: boundary, to: &body)
+        appendFormField(name: "ram_budget_mb", value: String(ramBudgetMB), boundary: boundary, to: &body)
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
+        body.append(wavData)
+        body.append("\r\n".data(using: .utf8)!)
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+
+        request.httpBody = body
+
+        let (asyncBytes, response) = try await session.bytes(for: request)
+        try checkResponse(response, context: "/transcribe-batch-stream")
+
+        var totalAudioSeconds = 0.0
+
+        for try await line in asyncBytes.lines {
+            guard line.hasPrefix("data: ") else { continue }
+
+            let jsonString = String(line.dropFirst(6))
+            guard let data = jsonString.data(using: .utf8),
+                  let event = try? decoder.decode(SessionTranscriptionEvent.self, from: data) else {
+                continue
+            }
+
+            await MainActor.run {
+                onEvent(event)
+            }
+
+            switch event.event {
+            case "started":
+                totalAudioSeconds = event.totalAudioSeconds ?? totalAudioSeconds
+
+            case "done":
+                let processingTime = event.totalTime ?? 0
+                let realtimeFactor = processingTime > 0 && totalAudioSeconds > 0
+                    ? totalAudioSeconds / processingTime
+                    : 0
+                return TranscriptionResponse(
+                    text: event.fullText ?? "",
+                    durationSeconds: totalAudioSeconds,
+                    processingTime: processingTime,
+                    realtimeFactor: realtimeFactor
+                )
+
+            case "error":
+                throw APIError.serverError(event.message ?? "Batch transcription failed")
+
+            case "cancelled":
+                throw APIError.serverError("Batch transcription cancelled")
+
+            default:
+                break
+            }
+        }
+
+        throw APIError.serverError("Batch transcription stream ended unexpectedly")
+    }
+
+    private func appendFormField(name: String, value: String, boundary: String, to body: inout Data) {
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+        body.append("\(value)\r\n".data(using: .utf8)!)
+    }
+
 
     // MARK: - Streaming Transcription
 
