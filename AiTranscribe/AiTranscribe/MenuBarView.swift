@@ -36,9 +36,12 @@ struct MenuBarView: View {
             controlsSection
                 .padding(.top, 10)
 
-            // ── Microphone (only when backend is connected) ──
-            if appState.isServerConnected {
-                microphoneRow
+            // ── Microphone ──
+            microphoneRow
+                .padding(.top, 8)
+
+            if !visiblePolishPresets.isEmpty {
+                polishQuickSection
                     .padding(.top, 8)
             }
 
@@ -46,9 +49,6 @@ struct MenuBarView: View {
             historySection
                 .padding(.top, 8)
 
-            // ── Footer ──
-            footerBar
-                .padding(.top, 10)
         }
         .padding(14)
         .frame(width: 280)
@@ -89,6 +89,52 @@ struct MenuBarView: View {
             }
 
             Spacer()
+
+            headerActions
+        }
+    }
+
+    private var headerActions: some View {
+        HStack(spacing: 2) {
+            Button {
+                openAndFocusSettings()
+            } label: {
+                Image(systemName: "gear")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(isHoveredSettings ? .primary : .secondary)
+                    .frame(width: 24, height: 24)
+                    .background(
+                        isHoveredSettings
+                            ? AnyShapeStyle(.white.opacity(0.08))
+                            : AnyShapeStyle(.clear),
+                        in: .rect(cornerRadius: 6, style: .continuous)
+                    )
+            }
+            .buttonStyle(.plain)
+            .onHover { h in
+                withAnimation(.easeOut(duration: 0.12)) { isHoveredSettings = h }
+            }
+            .help("Settings")
+
+            Button {
+                NSApplication.shared.terminate(nil)
+            } label: {
+                Image(systemName: "power")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(isHoveredQuit ? .red : .secondary)
+                    .frame(width: 24, height: 24)
+                    .background(
+                        isHoveredQuit
+                            ? AnyShapeStyle(.red.opacity(0.1))
+                            : AnyShapeStyle(.clear),
+                        in: .rect(cornerRadius: 6, style: .continuous)
+                    )
+            }
+            .buttonStyle(.plain)
+            .onHover { h in
+                withAnimation(.easeOut(duration: 0.12)) { isHoveredQuit = h }
+            }
+            .help("Quit AiTranscribe")
         }
     }
 
@@ -109,15 +155,18 @@ struct MenuBarView: View {
     // MARK: - Controls Section
 
     private var isTranscribing: Bool {
-        appState.statusMessage.hasPrefix("Transcribing")
+        appState.isQuickTranscriptionInFlight ||
+        appState.statusMessage.hasPrefix("Transcribing") ||
+        appState.statusMessage.hasPrefix("Finishing") ||
+        appState.statusMessage.hasPrefix("Polishing")
     }
 
     private var controlsSection: some View {
         VStack(spacing: 6) {
-            if appState.isRecording {
-                recordingActiveControls
-            } else if isTranscribing {
+            if isTranscribing {
                 transcribingIndicator
+            } else if appState.isRecording {
+                recordingActiveControls
             } else if sessionManager.isSessionRecording {
                 sessionActiveControls
             } else {
@@ -164,6 +213,7 @@ struct MenuBarView: View {
                 ) {
                     Task { await appState.stopRecording() }
                 }
+                .disabled(appState.isQuickRecordingTransitioning)
 
                 MenuBarButton(
                     label: "Cancel",
@@ -172,6 +222,7 @@ struct MenuBarView: View {
                 ) {
                     Task { await appState.cancelRecording() }
                 }
+                .disabled(appState.isQuickRecordingTransitioning)
             }
         }
     }
@@ -239,7 +290,7 @@ struct MenuBarView: View {
             ) {
                 Task { await appState.startRecording() }
             }
-            .disabled(!appState.isServerConnected)
+            .disabled(!appState.isServerConnected || appState.isQuickRecordingTransitioning || appState.isQuickTranscriptionInFlight)
 
             MenuBarButton(
                 label: "Record Session",
@@ -252,32 +303,46 @@ struct MenuBarView: View {
                     )
                 }
             }
-            .disabled(!appState.isServerConnected)
+            .disabled(!appState.isServerConnected || appState.isQuickRecordingTransitioning || appState.isQuickTranscriptionInFlight)
         }
     }
 
     // MARK: - Microphone Row
 
     private var microphoneRow: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "mic")
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.secondary)
-
-            Picker(selection: $appState.selectedDeviceId) {
+        Menu {
+            if appState.isServerConnected && !appState.audioDevices.isEmpty {
                 ForEach(appState.audioDevices) { device in
-                    Text(device.displayName)
-                        .tag(device.id as AudioDeviceID?)
+                    Button(device.displayName) {
+                        appState.selectedDeviceId = device.id
+                    }
                 }
-            } label: {
-                EmptyView()
+            } else {
+                Text(appState.isServerConnected ? "Detecting microphone..." : "Starting backend...")
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .controlSize(.small)
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "mic")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                Text(selectedMicrophoneLabel)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(appState.isServerConnected && !appState.audioDevices.isEmpty ? .primary : .secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .disabled(!appState.isServerConnected || appState.audioDevices.isEmpty)
         .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, minHeight: 32)
         .background(.white.opacity(0.04), in: .rect(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -285,7 +350,112 @@ struct MenuBarView: View {
         )
     }
 
+    private var selectedMicrophoneLabel: String {
+        if !appState.isServerConnected {
+            return "Starting backend..."
+        }
+        if appState.audioDevices.isEmpty {
+            return "Detecting microphone..."
+        }
+        if let selected = appState.audioDevices.first(where: { $0.id == appState.selectedDeviceId }) {
+            return selected.displayName
+        }
+        return appState.audioDevices.first?.displayName ?? "Default microphone"
+    }
+
     // MARK: - Recent History
+
+    private var visiblePolishPresets: [PolishPreset] {
+        guard hasAnyConfiguredLanguageModelKey else {
+            return []
+        }
+        return appState.polishPresets.filter { $0.isEnabled && $0.showInMenu }
+    }
+
+    private var hasAnyConfiguredLanguageModelKey: Bool {
+        APILanguageModelStore.load().contains { model in
+            if APIKeychainStore.hasAPIKey(providerId: model.providerId) {
+                return true
+            }
+            return model.providerId == TranscriptionProviderDescriptor.openAI.id &&
+                model.modelId.contains("/") &&
+                APIKeychainStore.hasAPIKey(providerId: TranscriptionProviderDescriptor.openRouter.id)
+        }
+    }
+
+    private var polishQuickSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Text("Polish")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.primary)
+
+                if let selected = appState.selectedPolishPreset {
+                    Text(selected.displayName)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.blue)
+                        .lineLimit(1)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.blue.opacity(0.10), in: Capsule())
+                } else {
+                    Text("Raw")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(.white.opacity(0.06), in: Capsule())
+                }
+
+                Spacer()
+            }
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 4), spacing: 6) {
+                ForEach(visiblePolishPresets) { preset in
+                    Button {
+                        if appState.selectedPolishPresetId == preset.id {
+                            appState.setSelectedPolishPreset(nil)
+                        } else {
+                            appState.setSelectedPolishPreset(preset.id)
+                        }
+                    } label: {
+                        Image(systemName: preset.symbolName)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(appState.selectedPolishPresetId == preset.id ? .white : .secondary)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 30)
+                            .background(
+                                appState.selectedPolishPresetId == preset.id
+                                    ? AnyShapeStyle(Color.blue)
+                                    : AnyShapeStyle(.white.opacity(0.04)),
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .strokeBorder(
+                                        appState.selectedPolishPresetId == preset.id ? Color.blue.opacity(0.6) : Color.white.opacity(0.06),
+                                        lineWidth: 0.5
+                                    )
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help(preset.displayName)
+                    .accessibilityLabel("Use \(preset.displayName) polish")
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.white.opacity(0.035), in: .rect(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
+        )
+    }
 
     private var recentHistoryEntries: [TranscriptionEntry] {
         Array(appState.transcriptionHistory.prefix(5))
@@ -384,78 +554,15 @@ struct MenuBarView: View {
         .background(.white.opacity(0.025), in: .rect(cornerRadius: 8, style: .continuous))
     }
 
-    // MARK: - Footer Bar
-
-    private var footerBar: some View {
-        HStack(spacing: 0) {
-            // Settings
-            Button {
-                openAndFocusSettings()
-            } label: {
-                Image(systemName: "gear")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(isHoveredSettings ? .primary : .secondary)
-                    .frame(width: 28, height: 28)
-                    .background(
-                        isHoveredSettings
-                            ? AnyShapeStyle(.white.opacity(0.08))
-                            : AnyShapeStyle(.clear)
-                        , in: .rect(cornerRadius: 6, style: .continuous)
-                    )
-            }
-            .buttonStyle(.plain)
-            .onHover { h in
-                withAnimation(.easeOut(duration: 0.12)) { isHoveredSettings = h }
-            }
-            .help("Settings")
-
-            #if DEBUG
-            Button {
-                showIntroductionScreen()
-            } label: {
-                Image(systemName: "play.circle")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28)
-            }
-            .buttonStyle(.plain)
-            .help("Show Introduction")
-            #endif
-
-            Spacer()
-
-            // Quit
-            Button {
-                NSApplication.shared.terminate(nil)
-            } label: {
-                Image(systemName: "power")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(isHoveredQuit ? .red : .secondary)
-                    .frame(width: 28, height: 28)
-                    .background(
-                        isHoveredQuit
-                            ? AnyShapeStyle(.red.opacity(0.1))
-                            : AnyShapeStyle(.clear)
-                        , in: .rect(cornerRadius: 6, style: .continuous)
-                    )
-            }
-            .buttonStyle(.plain)
-            .onHover { h in
-                withAnimation(.easeOut(duration: 0.12)) { isHoveredQuit = h }
-            }
-            .help("Quit AiTranscribe")
-        }
-    }
-
     // MARK: - Helpers
 
     private var statusColor: Color {
         if !appState.isServerConnected {
             return .red
-        } else if appState.isRecording {
-            return .orange
         } else if isTranscribing {
             return .blue
+        } else if appState.isRecording {
+            return .orange
         } else {
             return .green
         }
@@ -464,10 +571,10 @@ struct MenuBarView: View {
     private var statusLabel: String {
         if !appState.isServerConnected {
             return "Server offline"
-        } else if appState.isRecording {
-            return "Recording"
         } else if isTranscribing {
             return "Transcribing…"
+        } else if appState.isRecording {
+            return "Recording"
         } else {
             return "Ready"
         }

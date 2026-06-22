@@ -5,6 +5,7 @@ import SwiftUI
 enum SettingsSection: String, CaseIterable, Identifiable {
     case dashboard
     case general
+    case polish
     case models
     case sessions
     case history
@@ -17,6 +18,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: return "Dashboard"
         case .general:   return "General"
+        case .polish:    return "Polish"
         case .models:    return "Models"
         case .sessions:  return "Sessions"
         case .history:   return "History"
@@ -29,6 +31,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: return "square.grid.2x2"
         case .general:   return "gear"
+        case .polish:    return "sparkles"
         case .models:    return "cube.box"
         case .sessions:  return "waveform.circle"
         case .history:   return "clock.arrow.circlepath"

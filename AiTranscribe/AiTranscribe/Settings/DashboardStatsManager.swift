@@ -20,6 +20,8 @@ struct DashboardStats: Equatable {
     var totalDurationSeconds: Double = 0
     var averageWPM: Double = 0
     var timeSavedMinutes: Double = 0  // vs typing at 40 WPM
+    var estimatedAPICostUSD: Double = 0
+    var apiCostItemCount: Int = 0
 
     // Activity
     var usingSinceDate: Date?
@@ -60,24 +62,39 @@ final class DashboardStatsManager: ObservableObject {
     @Published var isLoading = false
     @Published var hasLoaded = false
 
+    private var apiCostResetDate = DashboardStatsManager.defaultAPICostResetDate()
+
     /// Compute stats from an array of transcription entries.
     /// Call this once when the dashboard first appears.
-    func computeStats(from entries: [TranscriptionEntry]) async {
-        guard !entries.isEmpty else {
+    func computeStats(
+        from entries: [TranscriptionEntry],
+        sessions: [Session] = [],
+        apiCostResetDate: Date? = DashboardStatsManager.defaultAPICostResetDate()
+    ) async {
+        guard !entries.isEmpty || !sessions.isEmpty else {
+            self.apiCostResetDate = apiCostResetDate
             hasLoaded = true
             return
         }
 
+        self.apiCostResetDate = apiCostResetDate
         isLoading = true
 
         // Do heavy work off main thread
         let computed = await Task.detached(priority: .userInitiated) {
-            Self.calculate(entries: entries)
+            Self.calculate(entries: entries, sessions: sessions, apiCostResetDate: apiCostResetDate)
         }.value
 
         stats = computed
         isLoading = false
         hasLoaded = true
+    }
+
+    func resetAPICosts(from entries: [TranscriptionEntry], sessions: [Session] = []) async {
+        let resetDate = Date()
+        UserDefaults.standard.set(resetDate.timeIntervalSince1970, forKey: Self.apiCostResetTimestampKey)
+        UserDefaults.standard.set(true, forKey: Self.apiCostPricingMigrationKey)
+        await computeStats(from: entries, sessions: sessions, apiCostResetDate: resetDate)
     }
 
     /// Lightweight update when a single new entry is added.
@@ -99,11 +116,47 @@ final class DashboardStatsManager: ObservableObject {
         if entry.wordCount > stats.longestTranscriptionWords {
             stats.longestTranscriptionWords = entry.wordCount
         }
+
+        if let cost = entry.estimatedCostUSD,
+           Self.shouldIncludeAPICost(date: entry.timestamp, resetDate: apiCostResetDate) {
+            stats.estimatedAPICostUSD += cost
+            stats.apiCostItemCount += 1
+        }
     }
 
     // MARK: - Heavy Computation (off-main)
 
-    private nonisolated static func calculate(entries: [TranscriptionEntry]) -> DashboardStats {
+    private nonisolated static let apiCostResetTimestampKey = "dashboardAPICostResetTimestamp"
+    private nonisolated static let apiCostPricingMigrationKey = "dashboardAPICostPricingMigration20260622"
+
+    private nonisolated static func defaultAPICostResetDate() -> Date? {
+        let defaults = UserDefaults.standard
+        let storedTimestamp = defaults.double(forKey: apiCostResetTimestampKey)
+        if storedTimestamp > 0 {
+            return Date(timeIntervalSince1970: storedTimestamp)
+        }
+
+        guard !defaults.bool(forKey: apiCostPricingMigrationKey) else {
+            return nil
+        }
+
+        let resetDate = Date()
+        defaults.set(resetDate.timeIntervalSince1970, forKey: apiCostResetTimestampKey)
+        defaults.set(true, forKey: apiCostPricingMigrationKey)
+        return resetDate
+    }
+
+    private nonisolated static func shouldIncludeAPICost(date: Date?, resetDate: Date?) -> Bool {
+        guard let resetDate else { return true }
+        guard let date else { return false }
+        return date >= resetDate
+    }
+
+    private nonisolated static func calculate(
+        entries: [TranscriptionEntry],
+        sessions: [Session],
+        apiCostResetDate: Date?
+    ) -> DashboardStats {
         var s = DashboardStats()
 
         s.totalTranscriptions = entries.count
@@ -119,6 +172,26 @@ final class DashboardStatsManager: ObservableObject {
 
         s.averageWordsPerTranscription = s.totalWords / max(entries.count, 1)
         s.longestTranscriptionWords = entries.map(\.wordCount).max() ?? 0
+        let pricedEntries = entries.filter {
+            $0.estimatedCostUSD != nil && shouldIncludeAPICost(date: $0.timestamp, resetDate: apiCostResetDate)
+        }
+        s.estimatedAPICostUSD = pricedEntries.compactMap(\.estimatedCostUSD).reduce(0, +)
+        s.apiCostItemCount = pricedEntries.count
+
+        for session in sessions {
+            if let cost = session.transcriptionEstimatedCostUSD,
+               shouldIncludeAPICost(date: session.createdAt, resetDate: apiCostResetDate) {
+                s.estimatedAPICostUSD += cost
+                s.apiCostItemCount += 1
+            }
+            for summary in session.summaries.values {
+                if let cost = summary.estimatedCostUSD,
+                   shouldIncludeAPICost(date: summary.generatedAt, resetDate: apiCostResetDate) {
+                    s.estimatedAPICostUSD += cost
+                    s.apiCostItemCount += 1
+                }
+            }
+        }
 
         // Date analysis
         let calendar = Calendar.current

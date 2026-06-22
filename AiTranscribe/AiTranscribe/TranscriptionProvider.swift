@@ -45,6 +45,33 @@ struct TranscriptionProviderCapabilities: Codable, Equatable {
         supportsPolishing: false,
         supportsMultilingual: true
     )
+
+    static let openAI = TranscriptionProviderCapabilities(
+        supportsBasic: true,
+        supportsSessions: true,
+        supportsBatching: true,
+        supportsParallelBatching: true,
+        supportsPolishing: false,
+        supportsMultilingual: true
+    )
+
+    static let openRouter = TranscriptionProviderCapabilities(
+        supportsBasic: true,
+        supportsSessions: true,
+        supportsBatching: true,
+        supportsParallelBatching: true,
+        supportsPolishing: false,
+        supportsMultilingual: true
+    )
+
+    static let elevenLabs = TranscriptionProviderCapabilities(
+        supportsBasic: true,
+        supportsSessions: true,
+        supportsBatching: true,
+        supportsParallelBatching: true,
+        supportsPolishing: false,
+        supportsMultilingual: true
+    )
 }
 
 struct TranscriptionProviderDescriptor: Identifiable, Codable, Equatable {
@@ -61,6 +88,30 @@ struct TranscriptionProviderDescriptor: Identifiable, Codable, Equatable {
         capabilities: .localBackend,
         privacyDescription: "Audio and text stay on this Mac."
     )
+
+    static let openAI = TranscriptionProviderDescriptor(
+        id: "openai",
+        displayName: "OpenAI",
+        source: .api,
+        capabilities: .openAI,
+        privacyDescription: "Audio is sent to OpenAI for transcription."
+    )
+
+    static let openRouter = TranscriptionProviderDescriptor(
+        id: "openrouter",
+        displayName: "OpenRouter",
+        source: .api,
+        capabilities: .openRouter,
+        privacyDescription: "Audio is sent to OpenRouter for transcription."
+    )
+
+    static let elevenLabs = TranscriptionProviderDescriptor(
+        id: "elevenlabs",
+        displayName: "ElevenLabs",
+        source: .api,
+        capabilities: .elevenLabs,
+        privacyDescription: "Audio is sent to ElevenLabs for transcription."
+    )
 }
 
 struct TranscriptionModelDescriptor: Identifiable, Codable, Equatable {
@@ -68,6 +119,31 @@ struct TranscriptionModelDescriptor: Identifiable, Codable, Equatable {
     let displayName: String
     let providerId: String
     let source: TranscriptionProviderSource
+
+    static let openAIModels: [TranscriptionModelDescriptor] = [
+        TranscriptionModelDescriptor(
+            id: "gpt-4o-transcribe",
+            displayName: "GPT-4o Transcribe",
+            providerId: TranscriptionProviderDescriptor.openAI.id,
+            source: .api
+        ),
+        TranscriptionModelDescriptor(
+            id: "gpt-4o-mini-transcribe",
+            displayName: "GPT-4o Mini Transcribe",
+            providerId: TranscriptionProviderDescriptor.openAI.id,
+            source: .api
+        ),
+        TranscriptionModelDescriptor(
+            id: "whisper-1",
+            displayName: "Whisper API",
+            providerId: TranscriptionProviderDescriptor.openAI.id,
+            source: .api
+        )
+    ]
+
+    static func openAIModel(id: String?) -> TranscriptionModelDescriptor {
+        openAIModels.first { $0.id == id } ?? openAIModels[0]
+    }
 }
 
 struct TranscriptionProgressUpdate: Equatable {
@@ -111,6 +187,27 @@ struct TranscriptionProviderResult {
     let provider: TranscriptionProviderDescriptor
     let model: TranscriptionModelDescriptor
     let workflow: TranscriptionWorkflow
+    let estimatedCostUSD: Double?
+
+    init(
+        text: String,
+        durationSeconds: Double,
+        processingTimeSeconds: Double,
+        realtimeFactor: Double,
+        provider: TranscriptionProviderDescriptor,
+        model: TranscriptionModelDescriptor,
+        workflow: TranscriptionWorkflow,
+        estimatedCostUSD: Double? = nil
+    ) {
+        self.text = text
+        self.durationSeconds = durationSeconds
+        self.processingTimeSeconds = processingTimeSeconds
+        self.realtimeFactor = realtimeFactor
+        self.provider = provider
+        self.model = model
+        self.workflow = workflow
+        self.estimatedCostUSD = estimatedCostUSD
+    }
 
     var usage: TranscriptionUsageMetadata {
         TranscriptionUsageMetadata(
@@ -123,7 +220,7 @@ struct TranscriptionProviderResult {
             audioDurationSeconds: durationSeconds,
             processingTimeSeconds: processingTimeSeconds,
             realtimeFactor: realtimeFactor,
-            estimatedCostUSD: nil,
+            estimatedCostUSD: estimatedCostUSD,
             createdAt: Date()
         )
     }

@@ -7,6 +7,11 @@ struct DashboardView: View {
     @EnvironmentObject var sessionManager: SessionManager
     @StateObject private var statsManager = DashboardStatsManager()
 
+    private let topCardHeight: CGFloat = 132
+    private let weeklyRowHeight: CGFloat = 136
+    private let overviewMiniBoxHeight: CGFloat = 58
+    private let chartRowHeight: CGFloat = 112
+
     let hasAnimated: Bool
     let onAnimated: () -> Void
     let onNavigateToHistory: (UUID?) -> Void
@@ -50,7 +55,7 @@ struct DashboardView: View {
                 return
             }
             let entries = await appState.loadAllHistoryEntries()
-            await statsManager.computeStats(from: entries)
+            await statsManager.computeStats(from: entries, sessions: sessionManager.sessions)
             // Trigger chart grow-in — slow enough to appreciate
             try? await Task.sleep(for: .milliseconds(250))
             withAnimation(.spring(duration: 1.2, bounce: 0.08)) {
@@ -109,7 +114,7 @@ struct DashboardView: View {
             headerSection
                 .staggerIn(index: 0, appeared: appeared)
 
-            Spacer().frame(height: 16)
+            Spacer().frame(height: 12)
 
             heroStatsRow
                 .staggerIn(index: 1, appeared: appeared)
@@ -136,18 +141,17 @@ struct DashboardView: View {
     // MARK: - Header
 
     private var headerSection: some View {
-        VStack(spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Dashboard")
-                        .font(.system(size: 22, weight: .bold, design: .rounded))
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Dashboard")
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
 
-                    Text("\(statsManager.stats.totalTranscriptions) transcriptions")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
+                Text("\(statsManager.stats.totalTranscriptions) transcriptions")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
+
+            Spacer(minLength: 12)
 
             HStack(spacing: 8) {
                 QuickActionPill(icon: "clock.arrow.circlepath", label: "Last Transcription") {
@@ -165,8 +169,6 @@ struct DashboardView: View {
                         NSWorkspace.shared.open(url)
                     }
                 }
-
-                Spacer()
             }
         }
     }
@@ -213,15 +215,17 @@ struct DashboardView: View {
 
     private var row2_topCards: some View {
         HStack(spacing: 10) {
-            topModelCard.frame(maxWidth: .infinity)
-            topWordCard.frame(maxWidth: .infinity)
-            activityCard.frame(maxWidth: .infinity)
+            topModelCard
+                .frame(maxWidth: .infinity)
+            topWordCard
+                .frame(maxWidth: .infinity)
+            activityCard
+                .frame(maxWidth: .infinity)
         }
-        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var topModelCard: some View {
-        DashboardCard2(title: "Top Model", icon: "cube.box.fill") {
+        DashboardCard2(title: "Top Model", icon: "cube.box.fill", fixedHeight: topCardHeight) {
             VStack(alignment: .leading, spacing: 8) {
                 if let model = statsManager.stats.favoriteModel {
                     Text(model.name)
@@ -270,7 +274,7 @@ struct DashboardView: View {
     }
 
     private var topWordCard: some View {
-        DashboardCard2(title: "Top Words", icon: "textformat") {
+        DashboardCard2(title: "Top Words", icon: "textformat", fixedHeight: topCardHeight) {
             VStack(alignment: .leading, spacing: 6) {
                 if let topWord = statsManager.stats.topWords.first {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -315,7 +319,7 @@ struct DashboardView: View {
     }
 
     private var activityCard: some View {
-        DashboardCard2(title: "Activity", icon: "chart.bar.fill") {
+        DashboardCard2(title: "Activity", icon: "chart.bar.fill", fixedHeight: topCardHeight) {
             VStack(spacing: 10) {
                 if !statsManager.stats.monthlyBreakdown.isEmpty {
                     monthlyBarsView
@@ -357,14 +361,16 @@ struct DashboardView: View {
 
     private var row3_weeklyAndInfo: some View {
         HStack(spacing: 10) {
-            weeklyPatternCard.frame(maxWidth: .infinity)
-            overviewGrid.frame(maxWidth: .infinity)
+            weeklyPatternCard
+                .frame(maxWidth: .infinity)
+            overviewGrid
+                .frame(maxWidth: .infinity)
+                .frame(height: weeklyRowHeight)
         }
-        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var weeklyPatternCard: some View {
-        DashboardCard2(title: "Weekly Pattern", icon: "calendar") {
+        DashboardCard2(title: "Weekly Pattern", icon: "calendar", fixedHeight: weeklyRowHeight) {
             let maxCount = statsManager.stats.dayOfWeekCounts.map(\.count).max() ?? 1
             HStack(alignment: .bottom, spacing: 5) {
                 ForEach(Array(statsManager.stats.dayOfWeekCounts.enumerated()), id: \.offset) { idx, item in
@@ -394,9 +400,8 @@ struct DashboardView: View {
 
     /// 4 separate mini boxes in a 2×2 grid
     private var overviewGrid: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                // Using Since
+        HStack(spacing: 8) {
+            VStack(spacing: 12) {
                 OverviewMiniBox(
                     title: "Using Since",
                     icon: "calendar.badge.clock"
@@ -412,25 +417,8 @@ struct DashboardView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                .frame(height: overviewMiniBoxHeight)
 
-                // Peak Hour
-                OverviewMiniBox(
-                    title: "Peak Hour",
-                    icon: "clock.fill"
-                ) {
-                    if let peak = statsManager.stats.hourlyBreakdown.max(by: { $0.count < $1.count }), peak.count > 0 {
-                        Text(formatHour(peak.hour))
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-
-                        Text("\(peak.count) transcriptions")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            HStack(spacing: 8) {
-                // Busiest Day
                 OverviewMiniBox(
                     title: "Busiest Day",
                     icon: "flame.fill"
@@ -444,8 +432,26 @@ struct DashboardView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                .frame(height: overviewMiniBoxHeight)
+            }
+            .frame(maxWidth: .infinity)
 
-                // Total Spoken
+            VStack(spacing: 12) {
+                OverviewMiniBox(
+                    title: "Peak Hour",
+                    icon: "clock.fill"
+                ) {
+                    if let peak = statsManager.stats.hourlyBreakdown.max(by: { $0.count < $1.count }), peak.count > 0 {
+                        Text(formatHour(peak.hour))
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+
+                        Text("\(peak.count) transcriptions")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(height: overviewMiniBoxHeight)
+
                 OverviewMiniBox(
                     title: "Total Spoken",
                     icon: "waveform"
@@ -457,23 +463,35 @@ struct DashboardView: View {
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
                 }
+                .frame(height: overviewMiniBoxHeight)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.vertical, 4)
+    }
+
+    // MARK: - Row 4: Chart Grid
+
+    private var row4_charts: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                hourlyCard
+                    .frame(maxWidth: .infinity)
+                wpmTrendCard
+                    .frame(maxWidth: .infinity)
+            }
+
+            HStack(spacing: 10) {
+                apiCostCard
+                    .frame(maxWidth: .infinity)
+                lengthCard
+                    .frame(maxWidth: .infinity)
             }
         }
     }
 
-    // MARK: - Row 4: Hourly + WPM Trend + Length
-
-    private var row4_charts: some View {
-        HStack(spacing: 10) {
-            hourlyCard.frame(maxWidth: .infinity)
-            wpmTrendCard.frame(maxWidth: .infinity)
-            lengthCard.frame(maxWidth: .infinity)
-        }
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
     private var hourlyCard: some View {
-        DashboardCard2(title: "Hourly Activity", icon: "clock") {
+        DashboardCard2(title: "Hourly Activity", icon: "clock", fixedHeight: chartRowHeight) {
             let maxCount = statsManager.stats.hourlyBreakdown.map(\.count).max() ?? 1
             HStack(alignment: .bottom, spacing: 1) {
                 ForEach(Array(statsManager.stats.hourlyBreakdown.enumerated()), id: \.offset) { _, item in
@@ -510,7 +528,7 @@ struct DashboardView: View {
     }
 
     private var wpmTrendCard: some View {
-        DashboardCard2(title: "WPM Trend", icon: "gauge.with.needle") {
+        DashboardCard2(title: "WPM Trend", icon: "gauge.with.needle", fixedHeight: chartRowHeight) {
             if statsManager.stats.weeklyWPM.count >= 2 {
                 VStack(spacing: 4) {
                     WPMSparkline(data: statsManager.stats.weeklyWPM.map(\.wpm), animated: chartsAnimated)
@@ -543,8 +561,49 @@ struct DashboardView: View {
         }
     }
 
+    private var apiCostCard: some View {
+        DashboardCard2(title: "API Cost", icon: "dollarsign.circle", fixedHeight: chartRowHeight) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(formatCurrency(statsManager.stats.estimatedAPICostUSD))
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .foregroundStyle(statsManager.stats.estimatedAPICostUSD > 0 ? Color.green : Color.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+
+                Spacer()
+
+                Text("\(statsManager.stats.apiCostItemCount) priced")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Text("Manual model pricing estimate")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+
+                Spacer()
+
+                Button {
+                    Task {
+                        let entries = await appState.loadAllHistoryEntries()
+                        await statsManager.resetAPICosts(from: entries, sessions: sessionManager.sessions)
+                    }
+                } label: {
+                    Text("Reset")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(.white.opacity(0.05), in: Capsule(style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
     private var lengthCard: some View {
-        DashboardCard2(title: "Length Distribution", icon: "ruler") {
+        DashboardCard2(title: "Length Distribution", icon: "ruler", fixedHeight: chartRowHeight) {
             let maxCount = statsManager.stats.lengthDistribution.map(\.count).max() ?? 1
             VStack(spacing: 6) {
                 ForEach(Array(statsManager.stats.lengthDistribution.enumerated()), id: \.offset) { _, bucket in
@@ -590,6 +649,12 @@ struct DashboardView: View {
             return String(format: "%.1fK", Double(n) / 1_000)
         }
         return "\(n)"
+    }
+
+    private func formatCurrency(_ value: Double) -> String {
+        if value <= 0 { return "$0.00" }
+        if value < 0.01 { return String(format: "$%.4f", value) }
+        return String(format: "$%.2f", value)
     }
 
     private func formatDateString(_ dateStr: String) -> String {
@@ -659,8 +724,8 @@ struct OverviewMiniBox<Content: View>: View {
 
             content
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(.thinMaterial, in: .rect(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -808,7 +873,20 @@ struct HeroStatCard: View {
 struct DashboardCard2<Content: View>: View {
     let title: String
     let icon: String
-    @ViewBuilder let content: Content
+    let fixedHeight: CGFloat?
+    let content: Content
+
+    init(
+        title: String,
+        icon: String,
+        fixedHeight: CGFloat? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.icon = icon
+        self.fixedHeight = fixedHeight
+        self.content = content()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -827,8 +905,13 @@ struct DashboardCard2<Content: View>: View {
 
             content
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: fixedHeight,
+            maxHeight: fixedHeight ?? .infinity,
+            alignment: .topLeading
+        )
         .background(.thinMaterial, in: .rect(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)

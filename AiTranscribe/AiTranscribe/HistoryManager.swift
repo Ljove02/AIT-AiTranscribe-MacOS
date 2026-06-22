@@ -299,6 +299,10 @@ final class HistoryManager {
 public struct TranscriptionEntry: Identifiable, Codable, Equatable {
     public let id: UUID
     let text: String
+    let rawText: String?
+    let polishedText: String?
+    let polishPresetId: String?
+    let polishPresetName: String?
     let duration: Double  // Recording duration in seconds
     let timestamp: Date
     
@@ -321,6 +325,10 @@ public struct TranscriptionEntry: Identifiable, Codable, Equatable {
     public init(
         id: UUID = UUID(),
         text: String,
+        rawText: String? = nil,
+        polishedText: String? = nil,
+        polishPresetId: String? = nil,
+        polishPresetName: String? = nil,
         duration: Double,
         timestamp: Date = Date(),
         modelId: String = "unknown",
@@ -335,6 +343,10 @@ public struct TranscriptionEntry: Identifiable, Codable, Equatable {
     ) {
         self.id = id
         self.text = text
+        self.rawText = rawText
+        self.polishedText = polishedText
+        self.polishPresetId = polishPresetId
+        self.polishPresetName = polishPresetName
         self.duration = duration
         self.timestamp = timestamp
         self.modelId = modelId

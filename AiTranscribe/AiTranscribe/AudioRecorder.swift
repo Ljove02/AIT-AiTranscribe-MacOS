@@ -613,11 +613,17 @@ class AudioRecorder: NSObject, ObservableObject {
         rollingChunkOverlapSeconds = max(0, min(overlapSeconds, rollingChunkDurationSeconds / 2))
         onRollingChunk = onChunk
         resetRollingChunkState()
+        AppLogger.debug(String(
+            format: "AudioRecorder rolling chunks configured chunk=%.1fs overlap=%.1fs minChunk=10.0s",
+            rollingChunkDurationSeconds,
+            rollingChunkOverlapSeconds
+        ))
     }
 
     func disableRollingChunks() {
         onRollingChunk = nil
         resetRollingChunkState()
+        AppLogger.debug("AudioRecorder rolling chunks disabled")
     }
 
     func finalizeRollingTailChunk() -> AudioRecorderChunk? {
@@ -625,6 +631,7 @@ class AudioRecorder: NSObject, ObservableObject {
               rollingChunkFrameCount > 0,
               let format = recordingFormat,
               let combinedBuffer = combinedBuffer(from: rollingChunkBuffers, format: format) else {
+            AppLogger.debug("AudioRecorder rolling tail skipped reason=no-buffer-or-disabled")
             return nil
         }
 
@@ -632,9 +639,21 @@ class AudioRecorder: NSObject, ObservableObject {
         let minimumTailDuration = rollingChunkIndex > 0 ? rollingChunkOverlapSeconds + 0.5 : 0.25
         guard duration > minimumTailDuration,
               let audioData = createWAVData(from: combinedBuffer) else {
+            AppLogger.debug(String(
+                format: "AudioRecorder rolling tail skipped reason=too-short duration=%.2fs minimum=%.2fs nextIndex=%d",
+                duration,
+                minimumTailDuration,
+                rollingChunkIndex + 1
+            ))
             return nil
         }
 
+        AppLogger.info(String(
+            format: "AudioRecorder rolling tail finalized index=%d duration=%.2fs bytes=%d",
+            rollingChunkIndex + 1,
+            duration,
+            audioData.count
+        ))
         return AudioRecorderChunk(
             index: rollingChunkIndex + 1,
             audioData: audioData,
@@ -672,6 +691,13 @@ class AudioRecorder: NSObject, ObservableObject {
         )
 
         retainRollingOverlap(from: combinedBuffer, format: format)
+        AppLogger.info(String(
+            format: "AudioRecorder rolling chunk sealed index=%d duration=%.2fs bytes=%d nextOverlap=%.1fs",
+            chunk.index,
+            duration,
+            audioData.count,
+            rollingChunkOverlapSeconds
+        ))
 
         if let onRollingChunk {
             DispatchQueue.main.async {

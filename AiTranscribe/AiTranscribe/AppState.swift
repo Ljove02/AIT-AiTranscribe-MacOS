@@ -28,6 +28,11 @@ import SwiftUI
 import CoreAudio
 import Combine  // Apple's framework for reactive programming
 
+private struct PolishApplicationResult {
+    let text: String
+    let estimatedCostUSD: Double?
+}
+
 /*
  @MainActor means "run this on the main thread".
 
@@ -60,6 +65,12 @@ class AppState: ObservableObject {
     /// User-editable summary presets (built-ins + custom)
     @Published var summaryPresetDefinitions: [SummaryPresetDefinition] = SummaryPresetLibrary.load()
 
+    /// User-editable polish presets used after quick transcription
+    @Published var polishPresets: [PolishPreset] = PolishPresetStore.load()
+
+    /// Selected polish preset for quick transcription. Nil means raw transcript only.
+    @Published var selectedPolishPresetId: String? = UserDefaults.standard.string(forKey: "selectedPolishPresetId")
+
     /// Is the model currently loading?
     @Published var isModelLoading: Bool = false
 
@@ -80,6 +91,12 @@ class AppState: ObservableObject {
 
     /// Is currently recording audio?
     @Published var isRecording: Bool = false
+
+    /// True while quick recording is starting/stopping; prevents rapid double actions from wedging the recorder.
+    @Published var isQuickRecordingTransitioning: Bool = false
+
+    /// True after quick recording stops while STT/polish/history output is still being produced.
+    @Published var isQuickTranscriptionInFlight: Bool = false
 
     /// Set by SessionManager to prevent concurrent recording conflicts
     var isSessionRecordingActive: Bool = false
@@ -198,12 +215,15 @@ class AppState: ObservableObject {
     /// The client that talks to our Python backend
     let apiClient = APIClient()
 
-    /// Providers currently available to the app. First implementation is local-only.
+    /// Providers currently available to the app.
     var transcriptionProviders: [TranscriptionProviderDescriptor] {
-        [.localBackend]
+        [.localBackend, .openAI, .openRouter, .elevenLabs]
     }
 
     private lazy var localTranscriptionProvider = LocalTranscriptionProvider(apiClient: apiClient)
+    private lazy var openAITranscriptionProvider = OpenAITranscriptionProvider()
+    private lazy var openRouterTranscriptionProvider = OpenRouterTranscriptionProvider()
+    private lazy var elevenLabsTranscriptionProvider = ElevenLabsTranscriptionProvider()
 
     /// History manager for JSON storage
     private let historyManager = HistoryManager()
@@ -238,6 +258,7 @@ class AppState: ObservableObject {
 
     /// Processes sealed basic-recording chunks while recording continues.
     private var rollingBasicBatchSession: RollingBasicBatchSession?
+    private var rollingAPIBatchSession: RollingAPIBatchSession?
 
 
     // =========================================================================
@@ -540,6 +561,128 @@ class AppState: ObservableObject {
         return KeyboardSimulator.shared.hasAccessibilityPermission
     }
 
+    private func polishTranscript(_ transcript: String, using preset: PolishPreset) async throws -> PolishApplicationResult {
+        let resolvedModel = resolvedLanguageModelForPolish(preset)
+        let startedAt = Date()
+        print("AppState: polish start provider=\(resolvedModel.providerName) model=\(resolvedModel.modelId) preset=\(preset.displayName) inputWords=\(transcript.split(separator: " ").count)")
+        let apiKey = try resolvedAPIKeyForPolish(providerId: resolvedModel.providerId)
+        let response: OpenAILanguageModelResponse
+
+        if resolvedModel.providerId == TranscriptionProviderDescriptor.openRouter.id {
+            response = try await OpenRouterLanguageModelClient().polishText(
+                transcript: transcript,
+                preset: preset,
+                modelId: resolvedModel.modelId,
+                apiKey: apiKey,
+                providerOnly: resolvedModel.openRouterProviderOnly
+            )
+        } else {
+            response = try await OpenAILanguageModelClient().polishText(
+                transcript: transcript,
+                preset: preset,
+                modelId: resolvedModel.modelId,
+                apiKey: apiKey
+            )
+        }
+
+        let estimatedCost = resolvedModel.estimatedCost(
+            inputTokens: response.inputTokens,
+            outputTokens: response.outputTokens
+        )
+        print(String(
+            format: "AppState: polish complete provider=%@ model=%@ elapsed=%.2fs responseElapsed=%.2fs inputTokens=%d outputTokens=%d estimatedCost=$%.6f",
+            resolvedModel.providerName,
+            resolvedModel.modelId,
+            Date().timeIntervalSince(startedAt),
+            response.processingTimeSeconds,
+            response.inputTokens ?? 0,
+            response.outputTokens ?? 0,
+            estimatedCost ?? 0
+        ))
+
+        return PolishApplicationResult(
+            text: response.text,
+            estimatedCostUSD: estimatedCost
+        )
+    }
+
+    func testPolishPreset(_ preset: PolishPreset) async throws -> String {
+        let sample = "Hey so can you turn this messy transcript into a clean useful result, keep the important constraints, and make it easy to copy into another AI tool."
+        let result = try await polishTranscript(sample, using: preset)
+        let trimmed = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw OpenAILanguageModelError.emptyOutput }
+        return trimmed
+    }
+
+    private func resolvedLanguageModelForPolish(_ preset: PolishPreset) -> APILanguageModel {
+        let models = APILanguageModelStore.load()
+        let selectedModelId = UserDefaults.standard.string(forKey: "selectedOpenAILanguageModel")
+
+        if preset.isBuiltIn,
+           let selectedModelId,
+           let selectedModel = models.first(where: { $0.modelId == selectedModelId }) {
+            return routedLanguageModelForPolish(selectedModel)
+        }
+
+        if let presetModel = models.first(where: { $0.providerId == preset.modelProviderId && $0.modelId == preset.modelId }) {
+            return routedLanguageModelForPolish(presetModel)
+        }
+
+        if let selectedModelId,
+           let selectedModel = models.first(where: { $0.modelId == selectedModelId }) {
+            return routedLanguageModelForPolish(selectedModel)
+        }
+
+        if let selectedModelId,
+           selectedModelId.contains("/"),
+           APIKeychainStore.hasAPIKey(providerId: TranscriptionProviderDescriptor.openRouter.id) {
+            return APILanguageModel(
+                providerId: TranscriptionProviderDescriptor.openRouter.id,
+                providerName: TranscriptionProviderDescriptor.openRouter.displayName,
+                modelId: selectedModelId,
+                displayName: selectedModelId
+            )
+        }
+
+        return routedLanguageModelForPolish(models.first ?? APILanguageModelStore.defaultModels[0])
+    }
+
+    private func routedLanguageModelForPolish(_ model: APILanguageModel) -> APILanguageModel {
+        guard model.providerId == TranscriptionProviderDescriptor.openAI.id,
+              model.modelId.contains("/"),
+              APIKeychainStore.hasAPIKey(providerId: TranscriptionProviderDescriptor.openRouter.id) else {
+            return model
+        }
+
+        return APILanguageModel(
+            id: model.id,
+            providerId: TranscriptionProviderDescriptor.openRouter.id,
+            providerName: TranscriptionProviderDescriptor.openRouter.displayName,
+            modelId: model.modelId,
+            displayName: model.displayName,
+            inputCostPerMillionTokensUSD: model.inputCostPerMillionTokensUSD,
+            outputCostPerMillionTokensUSD: model.outputCostPerMillionTokensUSD,
+            openRouterProviderOnly: model.openRouterProviderOnly,
+            createdAt: model.createdAt
+        )
+    }
+
+    private func resolvedAPIKeyForPolish(providerId: String) throws -> String {
+        if let savedKey = try APIKeychainStore.apiKey(providerId: providerId),
+           !savedKey.isEmpty {
+            return savedKey
+        }
+        if providerId == TranscriptionProviderDescriptor.openRouter.id {
+            throw OpenRouterLanguageModelError.missingAPIKey
+        }
+        throw OpenAILanguageModelError.missingAPIKey
+    }
+
+    private func combinedEstimatedCost(_ first: Double?, _ second: Double?) -> Double? {
+        guard first != nil || second != nil else { return nil }
+        return (first ?? 0) + (second ?? 0)
+    }
+
 
     // =========================================================================
     // SERVER COMMUNICATION
@@ -561,8 +704,9 @@ class AppState: ObservableObject {
 
                 // Fetch available models
                 await fetchAvailableModels()
-                await fetchSummaryModels()
-                await fetchSummaryRuntimeStatus()
+            await fetchSummaryModels()
+            await fetchSummaryRuntimeStatus()
+            polishPresets = PolishPresetStore.load()
 
                 // Also fetch available devices
                 await fetchAudioDevices()
@@ -659,6 +803,49 @@ class AppState: ObservableObject {
             presets.append(defaultPreset)
         }
         saveSummaryPresets(presets)
+    }
+
+    func reloadPolishPresets() {
+        polishPresets = PolishPresetStore.load()
+    }
+
+    func savePolishPresets(_ presets: [PolishPreset]) {
+        PolishPresetStore.save(presets)
+        polishPresets = PolishPresetStore.load()
+    }
+
+    func upsertPolishPreset(_ preset: PolishPreset) {
+        polishPresets = PolishPresetStore.upsert(preset, in: polishPresets)
+    }
+
+    func deletePolishPreset(id: String) {
+        polishPresets = PolishPresetStore.delete(id: id, from: polishPresets)
+        if selectedPolishPresetId == id {
+            setSelectedPolishPreset(nil)
+        }
+    }
+
+    func setSelectedPolishPreset(_ id: String?) {
+        selectedPolishPresetId = id
+        if let id {
+            UserDefaults.standard.set(id, forKey: "selectedPolishPresetId")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "selectedPolishPresetId")
+        }
+        UserDefaults.standard.synchronize()
+        print("AppState: selected polish preset = \(id ?? "raw")")
+    }
+
+    var selectedPolishPreset: PolishPreset? {
+        let persistedId = UserDefaults.standard.string(forKey: "selectedPolishPresetId")
+        guard let candidateId = selectedPolishPresetId ?? persistedId else { return nil }
+        guard let preset = polishPresets.first(where: { $0.id == candidateId && $0.isEnabled }) else {
+            return nil
+        }
+        if selectedPolishPresetId != candidateId {
+            selectedPolishPresetId = candidateId
+        }
+        return preset
     }
 
     func downloadSummaryModel(modelId: String) async -> Bool {
@@ -993,11 +1180,21 @@ class AppState: ObservableObject {
     /// Track if we're in streaming mode
     private var isStreamingMode: Bool = false
 
+    /// Provider selected when the current quick recording started.
+    /// UI can switch Local/Public while recording, but the active pipeline must stay stable.
+    private var activeQuickRecordingProviderId: String?
+
     /// Task for streaming session
     private var streamingTask: Task<Void, Never>?
 
     /// Start recording audio
     func startRecording() async {
+        guard !isQuickRecordingTransitioning, !isQuickTranscriptionInFlight, !isRecording else {
+            AppLogger.warning("QuickPipeline start ignored reason=busy recording=\(isRecording) transitioning=\(isQuickRecordingTransitioning) transcribing=\(isQuickTranscriptionInFlight)")
+            statusMessage = isQuickTranscriptionInFlight ? "Finishing previous recording..." : statusMessage
+            return
+        }
+
         // Mutual exclusion: don't start quick-transcribe while a session is recording
         // (The session recorder uses the same mic and audio engine)
         guard !isSessionRecordingActive else {
@@ -1005,23 +1202,36 @@ class AppState: ObservableObject {
             return
         }
 
+        isQuickRecordingTransitioning = true
+
         // Cancel idle unload timer — user is active
         idleUnloadTimer?.invalidate()
         idleUnloadTimer = nil
 
-        // Smart auto-load: if model isn't loaded, try to load preferred model in background
-        if !isModelLoaded && !isModelLoading {
-            if let preferredModelId = UserDefaults.standard.string(forKey: "preferredModelId") {
-                // Auto-load preferred model in background while recording starts
-                isAutoLoadingModel = true
-                Task {
-                    await loadModel(modelId: preferredModelId)
-                    isAutoLoadingModel = false
-                }
-            } else {
-                // No preferred model — first-time user needs to pick one
-                statusMessage = "Load model first"
+        let selectedProviderId = selectedTranscriptionProviderId
+
+        if selectedProviderId != TranscriptionProviderDescriptor.localBackend.id {
+            guard APIKeychainStore.hasAPIKey(providerId: selectedProviderId) else {
+                isQuickRecordingTransitioning = false
+                statusMessage = "Add \(publicProviderName(for: selectedProviderId)) API key first"
                 return
+            }
+        } else {
+            // Smart auto-load: if model isn't loaded, try to load preferred model in background.
+            if !isModelLoaded && !isModelLoading {
+                if let preferredModelId = UserDefaults.standard.string(forKey: "preferredModelId") {
+                    // Auto-load preferred model in background while recording starts
+                    isAutoLoadingModel = true
+                    Task {
+                        await loadModel(modelId: preferredModelId)
+                        isAutoLoadingModel = false
+                    }
+                } else {
+                    // No preferred model — first-time user needs to pick one
+                    isQuickRecordingTransitioning = false
+                    statusMessage = "Load model first"
+                    return
+                }
             }
         }
 
@@ -1036,37 +1246,47 @@ class AppState: ObservableObject {
         // Check if streaming is enabled
         let streamingEnabled = UserDefaults.standard.bool(forKey: "realTimeStreaming")
 
-        if streamingEnabled && KeyboardSimulator.shared.hasAccessibilityPermission {
+        activeQuickRecordingProviderId = selectedProviderId
+
+        if selectedProviderId == TranscriptionProviderDescriptor.localBackend.id,
+           streamingEnabled,
+           KeyboardSimulator.shared.hasAccessibilityPermission {
             await startStreamingRecording()
         } else {
-            await startNormalRecording()
+            await startNormalRecording(providerId: selectedProviderId)
         }
     }
 
     /// Start normal (non-streaming) recording
     /// Uses Swift's AVFoundation for proper microphone permission handling
-    private func startNormalRecording() async {
+    private func startNormalRecording(providerId: String) async {
         // Check microphone permission
         if !AudioRecorder.hasMicrophonePermission {
             AudioRecorder.requestMicrophonePermission { [weak self] granted in
                 guard let self = self else { return }
                 if granted {
                     Task {
-                        await self.startNormalRecording()
+                        await self.startNormalRecording(providerId: providerId)
                     }
                 } else {
+                    self.isQuickRecordingTransitioning = false
+                    self.activeQuickRecordingProviderId = nil
                     self.statusMessage = "Microphone permission denied"
+                    if self.mutePlaybackDuringRecording {
+                        self.audioManager.endDuckingSession()
+                    }
                 }
             }
             return
         }
 
-        configureRollingBasicBatchingIfNeeded()
+        configureRollingBasicBatchingIfNeeded(providerId: providerId)
 
         // Start Swift-native recording with selected device
         if await audioRecorder.startRecording(deviceId: selectedDeviceId) {
             isRecording = true
             isStreamingMode = false
+            isQuickRecordingTransitioning = false
             statusMessage = "Recording..."
 
             // Play start sound
@@ -1079,7 +1299,12 @@ class AppState: ObservableObject {
             startVolumePolling()
         } else {
             cleanupRollingBasicBatching()
+            activeQuickRecordingProviderId = nil
+            isQuickRecordingTransitioning = false
             statusMessage = "Failed to start recording"
+            if mutePlaybackDuringRecording {
+                audioManager.endDuckingSession()
+            }
         }
     }
 
@@ -1099,6 +1324,7 @@ class AppState: ObservableObject {
     private func startStreamingRecording() async {
         isRecording = true
         isStreamingMode = true
+        isQuickRecordingTransitioning = false
         statusMessage = "Recording (streaming)..."
 
         // Reset incremental typer
@@ -1146,6 +1372,9 @@ class AppState: ObservableObject {
             await MainActor.run {
                 self.isRecording = false
                 self.isStreamingMode = false
+                self.isQuickRecordingTransitioning = false
+                self.isQuickTranscriptionInFlight = false
+                self.activeQuickRecordingProviderId = nil
                 self.statusMessage = "Ready"
                 self.recordingIndicator.hide()
                 
@@ -1159,9 +1388,15 @@ class AppState: ObservableObject {
 
     /// Stop recording and get transcription
     func stopRecording() async {
-        stopStatusPolling()
-
         guard isRecording else { return }
+        guard !isQuickRecordingTransitioning else {
+            AppLogger.warning("QuickPipeline stop ignored reason=transitioning")
+            return
+        }
+
+        isQuickRecordingTransitioning = true
+        isQuickTranscriptionInFlight = true
+        stopStatusPolling()
 
         // Play stop sound
         SoundManager.shared.playStopSound()
@@ -1176,11 +1411,15 @@ class AppState: ObservableObject {
     /// Stop normal recording and transcribe
     /// Uses Swift AudioRecorder to get audio data, then sends to backend for transcription
     private func stopNormalRecording() async {
+        let pipelineStartedAt = Date()
         // Show transcribing state on indicator (dots rotate)
         recordingIndicator.setTranscribing(true)
 
-        // If model was auto-loading when recording started, wait for it to finish
-        if isAutoLoadingModel || isModelLoading {
+        let selectedProviderId = activeQuickRecordingProviderId ?? selectedTranscriptionProviderId
+
+        // If a local model was auto-loading when recording started, wait for it to finish.
+        if selectedProviderId == TranscriptionProviderDescriptor.localBackend.id,
+           (isAutoLoadingModel || isModelLoading) {
             statusMessage = "Loading model..."
             // Poll until model is loaded or timeout (60 seconds)
             let deadline = Date().addingTimeInterval(60)
@@ -1189,6 +1428,9 @@ class AppState: ObservableObject {
             }
             if !isModelLoaded {
                 isRecording = false
+                isQuickRecordingTransitioning = false
+                isQuickTranscriptionInFlight = false
+                activeQuickRecordingProviderId = nil
                 statusMessage = "Model failed to load"
                 recordingIndicator.hide()
                 if mutePlaybackDuringRecording { audioManager.endDuckingSession() }
@@ -1202,8 +1444,12 @@ class AppState: ObservableObject {
         incrementalTyper.reset()
 
         // Stop Swift AudioRecorder and get WAV data
+        let audioStopStartedAt = Date()
         guard let audioData = await audioRecorder.stopRecording() else {
             isRecording = false
+            isQuickRecordingTransitioning = false
+            isQuickTranscriptionInFlight = false
+            activeQuickRecordingProviderId = nil
             statusMessage = "No audio recorded"
             recordingIndicator.hide()
             cleanupRollingBasicBatching()
@@ -1214,35 +1460,81 @@ class AppState: ObservableObject {
             }
             return
         }
+        let audioStopElapsed = Date().timeIntervalSince(audioStopStartedAt)
 
         let recordedDuration = audioRecorder.duration
-        let rollingSession = rollingBasicBatchSession
-        let rollingWasUsed = rollingSession?.hasStarted == true
-        let rollingTailChunk = rollingWasUsed ? audioRecorder.finalizeRollingTailChunk() : nil
-        
-        // Restore volume IMMEDIATELY when recording stops (not during transcription)
+        isRecording = false
+        isQuickRecordingTransitioning = false
+
+        // Restore volume immediately when recording capture stops, before any early exits.
         if mutePlaybackDuringRecording {
             audioManager.endDuckingSession()
         }
 
+        guard recordedDuration >= 0.75 else {
+            cleanupRollingBasicBatching()
+            isQuickTranscriptionInFlight = false
+            activeQuickRecordingProviderId = nil
+            statusMessage = "Recording too short"
+            recordingIndicator.hide()
+            AppLogger.warning(String(
+                format: "QuickPipeline discarded too-short recording duration=%.2fs bytes=%d",
+                recordedDuration,
+                audioData.count
+            ))
+            return
+        }
+
+        let rollingSession = rollingBasicBatchSession
+        let rollingAPISession = rollingAPIBatchSession
+        let rollingWasUsed = rollingSession?.hasStarted == true || rollingAPISession?.hasStarted == true
+        let rollingTailChunk = rollingWasUsed ? audioRecorder.finalizeRollingTailChunk() : nil
+        AppLogger.info(String(
+            format: "QuickPipeline audioFinalized duration=%.2fs bytes=%d finalizeElapsed=%.2fs provider=%@ rollingBatches=%@ tailChunk=%@",
+            recordedDuration,
+            audioData.count,
+            audioStopElapsed,
+            publicProviderName(for: selectedProviderId),
+            rollingWasUsed ? "true" : "false",
+            rollingTailChunk == nil ? "false" : "true"
+        ))
+
         do {
             let result: TranscriptionProviderResult
+            let transcriptionStartedAt = Date()
 
-            if let rollingSession, rollingWasUsed {
+            if let rollingSession, rollingSession.hasStarted {
                 statusMessage = "Finishing batches..."
+                AppLogger.info("QuickPipeline using rolling local batches for final transcript")
                 result = try await rollingSession.finish(
                     finalChunk: rollingTailChunk,
                     totalDurationSeconds: recordedDuration
                 )
+            } else if let rollingAPISession, rollingAPISession.hasStarted {
+                statusMessage = "Finishing API batches..."
+                AppLogger.info("QuickPipeline using rolling public API batches for final transcript")
+                result = try await rollingAPISession.finish(
+                    finalChunk: rollingTailChunk,
+                    totalDurationSeconds: recordedDuration
+                )
             } else {
+                AppLogger.info(String(
+                    format: "QuickPipeline using single-shot transcription provider=%@ duration=%.2fs localRollingSession=%@ apiRollingSession=%@ rollingStarted=%@",
+                    publicProviderName(for: selectedProviderId),
+                    recordedDuration,
+                    rollingSession == nil ? "false" : "true",
+                    rollingAPISession == nil ? "false" : "true",
+                    rollingWasUsed ? "true" : "false"
+                ))
+                let provider = transcriptionProvider(for: selectedProviderId)
                 let request = TranscriptionRequest(
                     audioData: audioData,
                     recordedDurationSeconds: recordedDuration,
                     workflow: .basic,
-                    model: currentLocalTranscriptionModel()
+                    model: currentTranscriptionModel(for: provider.descriptor)
                 )
 
-                result = try await localTranscriptionProvider.transcribe(request) { update in
+                result = try await provider.transcribe(request) { update in
                     let percent = Int(update.progress * 100)
                     if let message = update.message, !message.isEmpty {
                         self.statusMessage = message
@@ -1253,20 +1545,72 @@ class AppState: ObservableObject {
                     }
                 }
             }
+            let transcriptionElapsed = Date().timeIntervalSince(transcriptionStartedAt)
+            AppLogger.info(String(
+                format: "QuickPipeline sttComplete provider=%@ model=%@ workflow=%@ elapsed=%.2fs providerElapsed=%.2fs audioDuration=%.2fs rtf=%.3f estimatedCost=$%.6f outputWords=%d",
+                result.provider.displayName,
+                result.model.id,
+                result.workflow.rawValue,
+                transcriptionElapsed,
+                result.processingTimeSeconds,
+                result.durationSeconds,
+                result.realtimeFactor,
+                result.usage.estimatedCostUSD ?? 0,
+                result.text.split(separator: " ").count
+            ))
 
             cleanupRollingBasicBatching()
-            isRecording = false
-            lastTranscription = result.text
+            activeQuickRecordingProviderId = nil
             let usage = result.usage
             lastTranscriptionUsage = usage
-            statusMessage = "Ready"
+            let rawTranscriptionText = result.text
+            var finalTranscriptionText = rawTranscriptionText
+            var polishedTranscriptionText: String?
+            var appliedPolishPresetId: String?
+            var appliedPolishPresetName: String?
+            var polishEstimatedCostUSD: Double?
+            var polishFailureMessage: String?
+
+            if let polishPreset = selectedPolishPreset {
+                statusMessage = "Polishing with \(polishPreset.displayName)..."
+                let polishStartedAt = Date()
+                do {
+                    let polishResult = try await polishTranscript(rawTranscriptionText, using: polishPreset)
+                    let polished = polishResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !polished.isEmpty {
+                        polishedTranscriptionText = polished
+                        appliedPolishPresetId = polishPreset.id
+                        appliedPolishPresetName = polishPreset.displayName
+                        polishEstimatedCostUSD = polishResult.estimatedCostUSD
+                        finalTranscriptionText = polishPreset.outputBehavior == .copyRaw ? rawTranscriptionText : polished
+                    }
+                    print(String(
+                        format: "AppState: quick polish applied preset=%@ elapsed=%.2fs estimatedCost=$%.6f outputWords=%d",
+                        polishPreset.displayName,
+                        Date().timeIntervalSince(polishStartedAt),
+                        polishEstimatedCostUSD ?? 0,
+                        polishedTranscriptionText?.split(separator: " ").count ?? 0
+                    ))
+                } catch {
+                    print("Polish failed: \(error)")
+                    let description = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    polishFailureMessage = "Polish failed: \(description)"
+                }
+            }
+
+            lastTranscription = finalTranscriptionText
+            statusMessage = polishFailureMessage ?? "Ready"
 
             // Hide indicator after transcription completes
             recordingIndicator.hide()
 
             // Save to history
             let entry = TranscriptionEntry(
-                text: result.text,
+                text: finalTranscriptionText,
+                rawText: polishedTranscriptionText == nil ? nil : rawTranscriptionText,
+                polishedText: polishedTranscriptionText,
+                polishPresetId: appliedPolishPresetId,
+                polishPresetName: appliedPolishPresetName,
                 duration: result.durationSeconds,
                 timestamp: Date(),
                 modelId: result.model.id,
@@ -1277,12 +1621,20 @@ class AppState: ObservableObject {
                 workflow: result.workflow,
                 processingTimeSeconds: result.processingTimeSeconds,
                 realtimeFactor: result.realtimeFactor,
-                estimatedCostUSD: usage.estimatedCostUSD
+                estimatedCostUSD: combinedEstimatedCost(usage.estimatedCostUSD, polishEstimatedCostUSD)
             )
             addToHistory(entry)
+            AppLogger.info(String(
+                format: "QuickPipeline complete totalElapsed=%.2fs sttCost=$%.6f polishCost=$%.6f totalCost=$%.6f finalWords=%d",
+                Date().timeIntervalSince(pipelineStartedAt),
+                usage.estimatedCostUSD ?? 0,
+                polishEstimatedCostUSD ?? 0,
+                combinedEstimatedCost(usage.estimatedCostUSD, polishEstimatedCostUSD) ?? 0,
+                finalTranscriptionText.split(separator: " ").count
+            ))
 
             // ALWAYS copy to clipboard (default behavior)
-            copyToClipboard(result.text)
+            copyToClipboard(finalTranscriptionText)
 
             // Auto-paste if enabled (simulates Cmd+V)
             let autoPaste = UserDefaults.standard.bool(forKey: "autoPasteAfterTranscription")
@@ -1293,14 +1645,23 @@ class AppState: ObservableObject {
                 }
             }
 
+            isQuickTranscriptionInFlight = false
+
             // Start idle unload timer — unloads model after 2 minutes of inactivity
             startIdleUnloadTimer()
 
         } catch {
             cleanupRollingBasicBatching()
+            activeQuickRecordingProviderId = nil
             isRecording = false
+            isQuickRecordingTransitioning = false
+            isQuickTranscriptionInFlight = false
             if "\(error)".contains("timed out") || "\(error)".contains("timeout") {
                 statusMessage = "Transcription timed out - try shorter audio"
+            } else if selectedProviderId != TranscriptionProviderDescriptor.localBackend.id,
+                      let localizedError = error as? LocalizedError,
+                      let description = localizedError.errorDescription {
+                statusMessage = description
             } else {
                 statusMessage = "Transcription failed"
             }
@@ -1309,12 +1670,25 @@ class AppState: ObservableObject {
         }
     }
 
-    private func configureRollingBasicBatchingIfNeeded() {
+    private func configureRollingBasicBatchingIfNeeded(providerId: String) {
         cleanupRollingBasicBatching()
 
-        guard isBasicBatchingEnabled,
-              !isStreamingMode,
-              isModelLoaded || isModelLoading || isAutoLoadingModel else {
+        guard isBasicBatchingEnabled else {
+            AppLogger.debug("QuickPipeline rolling batching disabled reason=user-setting-off")
+            return
+        }
+        guard providerId == TranscriptionProviderDescriptor.localBackend.id else {
+            if !configureRollingAPIBatchingIfNeeded(providerId: providerId) {
+                AppLogger.debug("QuickPipeline public rolling batching disabled provider=\(publicProviderName(for: providerId))")
+            }
+            return
+        }
+        guard !isStreamingMode else {
+            AppLogger.debug("QuickPipeline rolling batching disabled reason=streaming-mode")
+            return
+        }
+        guard isModelLoaded || isModelLoading || isAutoLoadingModel else {
+            AppLogger.debug("QuickPipeline rolling batching disabled reason=local-model-not-ready")
             return
         }
 
@@ -1338,7 +1712,13 @@ class AppState: ObservableObject {
         }
         rollingBasicBatchSession = session
 
-        print("AppState: rolling basic batching enabled (threshold=\(basicBatchingThresholdSeconds)s, modelLoaded=\(isModelLoaded), modelLoading=\(isModelLoading), autoLoading=\(isAutoLoadingModel))")
+        AppLogger.info(String(
+            format: "QuickPipeline rolling batching enabled threshold=%.1fs overlap=3.0s modelLoaded=%@ modelLoading=%@ autoLoading=%@",
+            basicBatchingThresholdSeconds,
+            isModelLoaded ? "true" : "false",
+            isModelLoading ? "true" : "false",
+            isAutoLoadingModel ? "true" : "false"
+        ))
         audioRecorder.configureRollingChunks(
             chunkDurationSeconds: basicBatchingThresholdSeconds,
             overlapSeconds: 3
@@ -1347,9 +1727,51 @@ class AppState: ObservableObject {
         }
     }
 
+    private func configureRollingAPIBatchingIfNeeded(providerId: String) -> Bool {
+        guard isBasicBatchingEnabled else {
+            return false
+        }
+        guard providerId != TranscriptionProviderDescriptor.localBackend.id else {
+            return false
+        }
+
+        let provider = transcriptionProvider(for: providerId)
+        guard provider.descriptor.capabilities.supportsParallelBatching else {
+            AppLogger.debug("QuickPipeline public rolling batching disabled reason=provider-no-parallel provider=\(provider.descriptor.displayName)")
+            return false
+        }
+
+        let model = currentTranscriptionModel(for: provider.descriptor)
+        let session = RollingAPIBatchSession(
+            provider: provider,
+            model: model,
+            maxConcurrentUploads: 4
+        )
+        session.onStatusUpdate = { [weak self] message in
+            self?.statusMessage = message
+        }
+        rollingAPIBatchSession = session
+
+        AppLogger.info(String(
+            format: "QuickPipeline public rolling batching enabled provider=%@ model=%@ threshold=%.1fs overlap=3.0s maxConcurrent=4",
+            provider.descriptor.displayName,
+            model.id,
+            basicBatchingThresholdSeconds
+        ))
+        audioRecorder.configureRollingChunks(
+            chunkDurationSeconds: basicBatchingThresholdSeconds,
+            overlapSeconds: 3
+        ) { [weak self] chunk in
+            self?.rollingAPIBatchSession?.enqueue(chunk)
+        }
+        return true
+    }
+
     private func cleanupRollingBasicBatching() {
         rollingBasicBatchSession?.cancel()
         rollingBasicBatchSession = nil
+        rollingAPIBatchSession?.cancel()
+        rollingAPIBatchSession = nil
         audioRecorder.disableRollingChunks()
     }
 
@@ -1376,6 +1798,128 @@ class AppState: ObservableObject {
         )
     }
 
+    private var selectedTranscriptionProviderId: String {
+        let storedProviderId = UserDefaults.standard.string(forKey: "selectedTranscriptionProviderId")
+        if storedProviderId == TranscriptionProviderDescriptor.openAI.id {
+            return TranscriptionProviderDescriptor.openAI.id
+        }
+        if storedProviderId == TranscriptionProviderDescriptor.openRouter.id {
+            return TranscriptionProviderDescriptor.openRouter.id
+        }
+        if storedProviderId == TranscriptionProviderDescriptor.elevenLabs.id {
+            return TranscriptionProviderDescriptor.elevenLabs.id
+        }
+        return TranscriptionProviderDescriptor.localBackend.id
+    }
+
+    private func selectedTranscriptionProvider() -> any TranscriptionProvider {
+        transcriptionProvider(for: selectedTranscriptionProviderId)
+    }
+
+    private func transcriptionProvider(for providerId: String) -> any TranscriptionProvider {
+        if providerId == TranscriptionProviderDescriptor.openAI.id {
+            return openAITranscriptionProvider
+        }
+        if providerId == TranscriptionProviderDescriptor.openRouter.id {
+            return openRouterTranscriptionProvider
+        }
+        if providerId == TranscriptionProviderDescriptor.elevenLabs.id {
+            return elevenLabsTranscriptionProvider
+        }
+        return localTranscriptionProvider
+    }
+
+    private func publicProviderName(for providerId: String) -> String {
+        switch providerId {
+        case TranscriptionProviderDescriptor.openAI.id:
+            return TranscriptionProviderDescriptor.openAI.displayName
+        case TranscriptionProviderDescriptor.openRouter.id:
+            return TranscriptionProviderDescriptor.openRouter.displayName
+        case TranscriptionProviderDescriptor.elevenLabs.id:
+            return TranscriptionProviderDescriptor.elevenLabs.displayName
+        default:
+            return "Public"
+        }
+    }
+
+    private func currentTranscriptionModel(for provider: TranscriptionProviderDescriptor) -> TranscriptionModelDescriptor {
+        if provider.id == TranscriptionProviderDescriptor.openAI.id {
+            let modelId = UserDefaults.standard.string(forKey: "selectedOpenAITranscriptionModel")
+            let supportedAPIModels = APITranscriptionModelStore.load().filter {
+                $0.providerId == provider.id &&
+                APITranscriptionModelStore.isSupportedModel($0.modelId, providerId: $0.providerId)
+            }
+            if let apiModel = supportedAPIModels.first(where: { $0.modelId == modelId }) {
+                return TranscriptionModelDescriptor(
+                    id: apiModel.modelId,
+                    displayName: apiModel.displayName,
+                    providerId: apiModel.providerId,
+                    source: .api
+                )
+            }
+            if let descriptor = TranscriptionModelDescriptor.openAIModels.first(where: { $0.id == modelId }) {
+                return descriptor
+            }
+            if let fallbackModel = supportedAPIModels.first {
+                UserDefaults.standard.set(fallbackModel.modelId, forKey: "selectedOpenAITranscriptionModel")
+                return TranscriptionModelDescriptor(
+                    id: fallbackModel.modelId,
+                    displayName: fallbackModel.displayName,
+                    providerId: fallbackModel.providerId,
+                    source: .api
+                )
+            }
+            let fallbackDescriptor = TranscriptionModelDescriptor.openAIModels[0]
+            UserDefaults.standard.set(fallbackDescriptor.id, forKey: "selectedOpenAITranscriptionModel")
+            return fallbackDescriptor
+        }
+        if provider.id == TranscriptionProviderDescriptor.openRouter.id {
+            let modelId = UserDefaults.standard.string(forKey: "selectedOpenAITranscriptionModel")
+            let supportedAPIModels = APITranscriptionModelStore.load().filter {
+                $0.providerId == provider.id &&
+                APITranscriptionModelStore.isSupportedModel($0.modelId, providerId: $0.providerId)
+            }
+            if let apiModel = supportedAPIModels.first(where: { $0.modelId == modelId }) ?? supportedAPIModels.first {
+                UserDefaults.standard.set(apiModel.modelId, forKey: "selectedOpenAITranscriptionModel")
+                return TranscriptionModelDescriptor(
+                    id: apiModel.modelId,
+                    displayName: apiModel.displayName,
+                    providerId: apiModel.providerId,
+                    source: .api
+                )
+            }
+            return TranscriptionModelDescriptor(
+                id: "openai/whisper-1",
+                displayName: "OpenRouter Whisper",
+                providerId: provider.id,
+                source: .api
+            )
+        }
+        if provider.id == TranscriptionProviderDescriptor.elevenLabs.id {
+            let modelId = UserDefaults.standard.string(forKey: "selectedOpenAITranscriptionModel")
+            let supportedAPIModels = APITranscriptionModelStore.load().filter {
+                $0.providerId == provider.id &&
+                APITranscriptionModelStore.isSupportedModel($0.modelId, providerId: $0.providerId)
+            }
+            if let apiModel = supportedAPIModels.first(where: { $0.modelId == modelId }) ?? supportedAPIModels.first {
+                UserDefaults.standard.set(apiModel.modelId, forKey: "selectedOpenAITranscriptionModel")
+                return TranscriptionModelDescriptor(
+                    id: apiModel.modelId,
+                    displayName: apiModel.displayName,
+                    providerId: apiModel.providerId,
+                    source: .api
+                )
+            }
+            return TranscriptionModelDescriptor(
+                id: "scribe_v2",
+                displayName: "ElevenLabs Scribe v2",
+                providerId: provider.id,
+                source: .api
+            )
+        }
+        return currentLocalTranscriptionModel()
+    }
+
     /// Stop streaming recording
     private func stopStreamingRecording() async {
         statusMessage = "Finishing..."
@@ -1389,6 +1933,9 @@ class AppState: ObservableObject {
             streamingTask?.cancel()
             isRecording = false
             isStreamingMode = false
+            isQuickRecordingTransitioning = false
+            isQuickTranscriptionInFlight = false
+            activeQuickRecordingProviderId = nil
             statusMessage = "Ready"
             recordingIndicator.hide()
             
@@ -1427,6 +1974,9 @@ class AppState: ObservableObject {
         }
 
         isRecording = false
+        isQuickRecordingTransitioning = false
+        isQuickTranscriptionInFlight = false
+        activeQuickRecordingProviderId = nil
         statusMessage = "Cancelled"
     }
 

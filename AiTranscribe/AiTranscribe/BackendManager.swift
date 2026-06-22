@@ -46,6 +46,12 @@ struct LogEntry: Identifiable, Equatable {
     let timestamp: Date
     let level: LogLevel
     let message: String
+    let source: LogSource
+
+    enum LogSource: String {
+        case backend = "BACKEND"
+        case app = "APP"
+    }
 
     enum LogLevel: String {
         case info = "INFO"
@@ -175,7 +181,7 @@ class BackendManager: ObservableObject {
         print("BackendManager.init() called - singleton being created")
 
         // Add initial log entry to show init happened
-        let entry = LogEntry(timestamp: Date(), level: .info, message: "BackendManager initialized")
+        let entry = LogEntry(timestamp: Date(), level: .info, message: "BackendManager initialized", source: .backend)
         logs.append(entry)
 
         // Register for app termination notification
@@ -713,14 +719,18 @@ class BackendManager: ObservableObject {
     }
 
     /// Add a log entry
-    private func addLog(_ message: String, level: LogEntry.LogLevel) {
-        let entry = LogEntry(timestamp: Date(), level: level, message: message)
+    private func addLog(_ message: String, level: LogEntry.LogLevel, source: LogEntry.LogSource = .backend) {
+        let entry = LogEntry(timestamp: Date(), level: level, message: message, source: source)
         logs.append(entry)
 
         // Trim old logs if needed
         if logs.count > maxLogEntries {
             logs.removeFirst(logs.count - maxLogEntries)
         }
+    }
+
+    func addAppLog(_ message: String, level: LogEntry.LogLevel) {
+        addLog(message, level: level, source: .app)
     }
 
     /// Clear all logs
@@ -744,7 +754,7 @@ class BackendManager: ObservableObject {
 
         return logs.map { entry in
             let time = formatter.string(from: entry.timestamp)
-            return "[\(time)] \(entry.level.rawValue): \(entry.message)"
+            return "[\(time)] \(entry.source.rawValue) \(entry.level.rawValue): \(entry.message)"
         }.joined(separator: "\n")
     }
 

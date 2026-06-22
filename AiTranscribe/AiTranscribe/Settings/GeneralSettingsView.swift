@@ -79,7 +79,7 @@ struct GeneralSettingsView: View {
 
                     SettingsRow(
                         title: "Chunk length",
-                        description: "Shorter chunks finish sooner and use less memory. Two minutes is the validated fast default."
+                        description: "Shorter chunks finish sooner and use less memory. 30 seconds is experimental; two minutes is the validated stable default."
                     ) {
                         Picker("", selection: $basicBatchingThresholdSeconds) {
                             ForEach(batchLengthPresets) { preset in
@@ -87,7 +87,7 @@ struct GeneralSettingsView: View {
                             }
                         }
                         .labelsHidden()
-                        .frame(width: 168)
+                        .frame(width: 210)
                         .disabled(!basicBatchingEnabled)
                     }
 
@@ -286,6 +286,7 @@ struct GeneralSettingsView: View {
 
     private var batchLengthPresets: [BatchLengthPreset] {
         [
+            BatchLengthPreset(seconds: 30, title: "30 seconds - Experimental"),
             BatchLengthPreset(seconds: 60, title: "1 min"),
             BatchLengthPreset(seconds: 90, title: "1.5 min"),
             BatchLengthPreset(seconds: 120, title: "2 min")
@@ -327,7 +328,10 @@ struct GeneralSettingsView: View {
 
     private var batchDescription: String {
         if basicBatchingEnabled {
-            return "Current setting: a new local chunk starts about every \(formattedBatchLength). Fallback memory budget: \(formattedRAMBudget)."
+            let suffix = basicBatchingThresholdSeconds <= 30
+                ? " Watch the debug console for chunk timing and boundary quality."
+                : ""
+            return "Current setting: a new local chunk starts about every \(formattedBatchLength). Fallback memory budget: \(formattedRAMBudget).\(suffix)"
         }
 
         return "Use this only for troubleshooting. The validated default is enabled with 2-minute rolling chunks."

@@ -132,6 +132,10 @@ struct SettingsView: View {
             GeneralSettingsView(hasAnimated: animatedTabs.contains(.general), onAnimated: {
                 animatedTabs.insert(.general)
             })
+        case .polish:
+            PolishSettingsView(hasAnimated: animatedTabs.contains(.polish), onAnimated: {
+                animatedTabs.insert(.polish)
+            })
         case .models:
             ModelsSettingsView(
                 hasAnimated: animatedTabs.contains(.models),
@@ -211,6 +215,8 @@ struct SettingsTopBar: View {
                         .background(.quaternary, in: .circle)
                 }
                 .buttonStyle(.plain)
+
+                TranscriptionModeSwitch()
             }
 
             Spacer()
@@ -250,6 +256,144 @@ struct SettingsTopBar: View {
                 .padding(.trailing, 20)
         }
         .frame(height: 48)
+    }
+}
+
+struct TranscriptionModeSwitch: View {
+    @AppStorage("selectedTranscriptionProviderId") private var selectedTranscriptionProviderId = TranscriptionProviderDescriptor.localBackend.id
+    @AppStorage("hasSeenTranscriptionModeInfo") private var hasSeenTranscriptionModeInfo = false
+    @State private var showingModeInfo = false
+
+    private var isLocalMode: Bool {
+        selectedTranscriptionProviderId == TranscriptionProviderDescriptor.localBackend.id
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 2) {
+                modeButton(title: "Local", isSelected: isLocalMode, tint: .green, selectedForeground: .green, selectedOpacity: 0.14) {
+                    selectedTranscriptionProviderId = TranscriptionProviderDescriptor.localBackend.id
+                }
+
+                modeButton(title: "Public", isSelected: !isLocalMode, tint: .blue, selectedForeground: .white, selectedOpacity: 1.0) {
+                    if selectedTranscriptionProviderId == TranscriptionProviderDescriptor.localBackend.id {
+                        selectedTranscriptionProviderId = APITranscriptionModelStore.load().first?.providerId
+                            ?? TranscriptionProviderDescriptor.openAI.id
+                    }
+                }
+            }
+            .padding(3)
+            .background(Color.primary.opacity(0.06), in: Capsule())
+            .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+
+            Button {
+                showingModeInfo = true
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+                    .background(.quaternary, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("How Local/Public mode works")
+        }
+        .onAppear {
+            guard !hasSeenTranscriptionModeInfo else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                showingModeInfo = true
+            }
+        }
+        .sheet(isPresented: $showingModeInfo, onDismiss: {
+            hasSeenTranscriptionModeInfo = true
+        }) {
+            TranscriptionModeInfoSheet {
+                hasSeenTranscriptionModeInfo = true
+                showingModeInfo = false
+            }
+        }
+    }
+
+    private func modeButton(
+        title: String,
+        isSelected: Bool,
+        tint: Color,
+        selectedForeground: Color,
+        selectedOpacity: Double,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            withAnimation(.spring(duration: 0.28, bounce: 0.16)) {
+                action()
+            }
+        } label: {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(isSelected ? selectedForeground : Color.secondary)
+                .padding(.horizontal, 11)
+                .frame(height: 24)
+                .background(
+                    Capsule()
+                        .fill(isSelected ? tint.opacity(selectedOpacity) : Color.clear)
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(isSelected ? tint.opacity(0.35) : Color.clear, lineWidth: 0.5)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct TranscriptionModeInfoSheet: View {
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(.orange)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Choose The Active Engine")
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                    Text("The Local/Public switch decides which transcription engine runs.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                explanationRow(title: "Local", body: "Uses the loaded model on this Mac. Audio stays local.")
+                explanationRow(title: "Public", body: "Uses the selected API model. Audio is sent to the provider.")
+                explanationRow(title: "Remembered models", body: "Each side remembers its selected model, but only the switch-selected side is active.")
+            }
+
+            HStack {
+                Spacer()
+                Button("I Understand") {
+                    onClose()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(24)
+        .frame(width: 460)
+    }
+
+    private func explanationRow(title: String, body: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+            Text(body)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
