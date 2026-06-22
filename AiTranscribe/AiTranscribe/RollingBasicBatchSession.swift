@@ -53,12 +53,28 @@ final class RollingBasicBatchSession {
     func enqueue(_ chunk: AudioRecorderChunk) {
         pendingChunks.append(chunk)
         totalEnqueuedChunks += 1
-        print("RollingBasicBatchSession: queued batch \(chunk.index) (\(String(format: "%.1f", chunk.durationSeconds))s)")
+        print(String(
+            format: "AiTranscribe INFO RollingBatch queued index=%d duration=%.2fs bytes=%d pending=%d totalQueued=%d completed=%d",
+            chunk.index,
+            chunk.durationSeconds,
+            chunk.audioData.count,
+            pendingChunks.count,
+            totalEnqueuedChunks,
+            completedChunks
+        ))
         onStatusUpdate?("Recording... queued batch \(chunk.index)")
         startProcessingIfNeeded()
     }
 
     func finish(finalChunk: AudioRecorderChunk?, totalDurationSeconds: Double) async throws -> TranscriptionProviderResult {
+        print(String(
+            format: "AiTranscribe INFO RollingBatch finish requested totalDuration=%.2fs queued=%d completed=%d pending=%d hasFinalChunk=%@",
+            totalDurationSeconds,
+            totalEnqueuedChunks,
+            completedChunks,
+            pendingChunks.count,
+            finalChunk == nil ? "false" : "true"
+        ))
         if let finalChunk {
             enqueue(finalChunk)
         }
@@ -86,6 +102,15 @@ final class RollingBasicBatchSession {
         let text = mergeChunkTexts(orderedResults.map(\.text))
         let processingTime = orderedResults.reduce(0) { $0 + $1.processingTimeSeconds }
         let realtimeFactor = processingTime > 0 ? totalDurationSeconds / processingTime : 0
+        print(String(
+            format: "AiTranscribe INFO RollingBatch merged chunks=%d totalProviderTime=%.2fs audioDuration=%.2fs rtf=%.3f outputWords=%d elapsedSinceStart=%.2fs",
+            orderedResults.count,
+            processingTime,
+            totalDurationSeconds,
+            realtimeFactor,
+            text.split(separator: " ").count,
+            Date().timeIntervalSince(startedAt)
+        ))
 
         return TranscriptionProviderResult(
             text: text,
@@ -103,11 +128,18 @@ final class RollingBasicBatchSession {
         processingTask = nil
         pendingChunks.removeAll()
         isFinishing = true
+        print(String(
+            format: "AiTranscribe WARN RollingBatch cancelled queued=%d completed=%d elapsed=%.2fs",
+            totalEnqueuedChunks,
+            completedChunks,
+            Date().timeIntervalSince(startedAt)
+        ))
     }
 
     private func startProcessingIfNeeded() {
         guard processingTask == nil else { return }
 
+        print("AiTranscribe DEBUG RollingBatch processor started")
         processingTask = Task { [weak self] in
             await self?.processLoop()
         }
@@ -117,6 +149,7 @@ final class RollingBasicBatchSession {
         while !Task.isCancelled {
             if let processingError {
                 pendingChunks.removeAll()
+                print("AiTranscribe ERROR RollingBatch failed error=\(processingError.localizedDescription)")
                 onStatusUpdate?("Batch failed: \(processingError.localizedDescription)")
                 return
             }
@@ -129,7 +162,7 @@ final class RollingBasicBatchSession {
 
             guard isReadyToProcess() else {
                 if !didReportWaitingForModel {
-                    print("RollingBasicBatchSession: waiting for loaded model before processing queued batches")
+                    print("AiTranscribe DEBUG RollingBatch waiting for loaded local model before processing queued batches")
                     onStatusUpdate?("Recording... waiting for model")
                     didReportWaitingForModel = true
                 }
@@ -139,7 +172,14 @@ final class RollingBasicBatchSession {
             didReportWaitingForModel = false
 
             let chunk = pendingChunks.removeFirst()
-            print("RollingBasicBatchSession: processing batch \(chunk.index)")
+            let startedAt = Date()
+            print(String(
+                format: "AiTranscribe INFO RollingBatch processing index=%d duration=%.2fs bytes=%d pendingAfterPop=%d",
+                chunk.index,
+                chunk.durationSeconds,
+                chunk.audioData.count,
+                pendingChunks.count
+            ))
             onStatusUpdate?("Recording... processing batch \(chunk.index)")
 
             do {
@@ -157,9 +197,19 @@ final class RollingBasicBatchSession {
                     text: response.text,
                     processingTimeSeconds: response.processingTime
                 )
-                print("RollingBasicBatchSession: batch \(chunk.index) ready in \(String(format: "%.2f", response.processingTime))s")
+                print(String(
+                    format: "AiTranscribe INFO RollingBatch ready index=%d providerTime=%.2fs wallTime=%.2fs words=%d completed=%d/%d pending=%d",
+                    chunk.index,
+                    response.processingTime,
+                    Date().timeIntervalSince(startedAt),
+                    response.text.split(separator: " ").count,
+                    completedChunks,
+                    totalEnqueuedChunks,
+                    pendingChunks.count
+                ))
                 onStatusUpdate?("Recording... batch \(chunk.index) ready")
             } catch {
+                print("AiTranscribe ERROR RollingBatch batchFailed index=\(chunk.index) error=\(error.localizedDescription)")
                 processingError = error
             }
         }

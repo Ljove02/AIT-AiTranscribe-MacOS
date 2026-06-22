@@ -18,6 +18,7 @@ import Foundation
 import SwiftUI
 import Combine
 import CoreAudio
+import AVFoundation
 
 // MARK: - Session Status
 
@@ -310,6 +311,9 @@ struct SessionSummaryMetadata: Codable, Equatable {
     var targetWordCount: Int?
     var maxOutputTokens: Int?
     var processingTimeSeconds: Double?
+    var inputTokens: Int?
+    var outputTokens: Int?
+    var estimatedCostUSD: Double?
     var generatedAt: Date?
     var text: String?
 
@@ -325,6 +329,9 @@ struct SessionSummaryMetadata: Codable, Equatable {
         case targetWordCount = "target_word_count"
         case maxOutputTokens = "max_output_tokens"
         case processingTimeSeconds = "processing_time_seconds"
+        case inputTokens = "input_tokens"
+        case outputTokens = "output_tokens"
+        case estimatedCostUSD = "estimated_cost_usd"
         case generatedAt = "generated_at"
     }
 
@@ -351,6 +358,9 @@ struct SessionSummaryMetadata: Codable, Equatable {
             targetWordCount: nil,
             maxOutputTokens: nil,
             processingTimeSeconds: nil,
+            inputTokens: nil,
+            outputTokens: nil,
+            estimatedCostUSD: nil,
             generatedAt: nil,
             text: nil
         )
@@ -384,6 +394,7 @@ struct Session: Identifiable, Codable, Equatable {
     var batchCount: Int?
     var transcriptionTime: TimeInterval?
     var wordCount: Int?
+    var transcriptionEstimatedCostUSD: Double?
     var status: SessionStatus
     var summaries: [String: SessionSummaryMetadata]
 
@@ -405,6 +416,7 @@ struct Session: Identifiable, Codable, Equatable {
         self.fileSize = 0
         self.hasAudio = false
         self.hasTranscription = false
+        self.transcriptionEstimatedCostUSD = nil
         self.status = .idle
         self.summaries = SessionSummaryMetadata.defaultMap()
 
@@ -444,6 +456,34 @@ struct SessionSummaryProgress: Equatable {
     var totalPresets: Int
 }
 
+private struct PublicSessionAudioBatch: Sendable {
+    let index: Int
+    let total: Int
+    let url: URL
+    let durationSeconds: Double
+    let fileName: String
+    let mimeType: String
+}
+
+private struct PublicSessionBatchPlan: Sendable {
+    let batches: [PublicSessionAudioBatch]
+    let temporaryDirectory: URL?
+}
+
+private struct PublicSessionBatchResult: Sendable {
+    let index: Int
+    let text: String
+    let processingTimeSeconds: Double
+    let estimatedCostUSD: Double?
+}
+
+private struct PublicSessionTranscriptionResult: Sendable {
+    let text: String
+    let processingTimeSeconds: Double
+    let estimatedCostUSD: Double?
+    let batchCount: Int
+}
+
 // MARK: - Session Metadata (for JSON persistence)
 
 /// The metadata.json structure stored in each session directory
@@ -460,6 +500,7 @@ private struct SessionMetadata: Codable {
     var batchCount: Int?
     var transcriptionTimeSeconds: Double?
     var wordCount: Int?
+    var transcriptionEstimatedCostUSD: Double?
     var status: String
     var statusMessage: String?
     var summaries: [String: SessionSummaryMetadata]?
@@ -478,6 +519,7 @@ private struct SessionMetadata: Codable {
         self.batchCount = session.batchCount
         self.transcriptionTimeSeconds = session.transcriptionTime
         self.wordCount = session.wordCount
+        self.transcriptionEstimatedCostUSD = session.transcriptionEstimatedCostUSD
         self.summaries = session.summaries
 
         switch session.status {
@@ -504,6 +546,7 @@ private struct SessionMetadata: Codable {
         session.batchCount = batchCount
         session.transcriptionTime = transcriptionTimeSeconds
         session.wordCount = wordCount
+        session.transcriptionEstimatedCostUSD = transcriptionEstimatedCostUSD
         session.summaries = summaries ?? SessionSummaryMetadata.defaultMap()
 
         switch status {
@@ -819,6 +862,7 @@ class SessionManager: ObservableObject {
         sessions[index].hasTranscription = false
         sessions[index].transcriptionText = nil
         sessions[index].wordCount = nil
+        sessions[index].transcriptionEstimatedCostUSD = nil
         sessions[index].batchCount = nil
         sessions[index].transcriptionTime = nil
         sessions[index].status = .idle
@@ -973,6 +1017,431 @@ class SessionManager: ObservableObject {
         }
     }
 
+    /// Start public API transcription for a session with the selected public provider model.
+    /// Long recordings are exported into ordered chunks and transcribed concurrently.
+    func startPublicTranscription(
+        sessionId: UUID,
+        providerId: String,
+        modelId: String,
+        displayName: String,
+        targetBatchCount: Int? = nil
+    ) {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        guard sessions[index].hasAudio else {
+            print("SessionManager: No audio file for session")
+            return
+        }
+
+        let session = sessions[index]
+        let audioURL = getAudioURL(for: session)
+
+        guard let attrs = try? fileManager.attributesOfItem(atPath: audioURL.path),
+              let fileSize = attrs[.size] as? Int64 else {
+            sessions[index].status = .failed("Could not read session audio file.")
+            saveMetadata(for: sessions[index])
+            return
+        }
+
+        guard let apiKey = try? APIKeychainStore.apiKey(providerId: providerId),
+              !apiKey.isEmpty else {
+            sessions[index].status = .failed("Add \(publicTranscriptionProviderName(for: providerId)) API key first.")
+            saveMetadata(for: sessions[index])
+            return
+        }
+
+        clearSummaries(sessionIndex: index)
+
+        sessions[index].status = .transcribing
+        sessions[index].modelUsed = modelId
+        sessions[index].ramBudgetMB = nil
+        currentTranscribingSessionId = sessionId
+        transcriptionProgress = BatchProgress(batch: 0, totalBatches: 0, progress: 0.02)
+        saveMetadata(for: sessions[index])
+
+        Task {
+            let startedAt = Date()
+            do {
+                let plan = try await Self.makePublicSessionBatchPlan(
+                    audioURL: audioURL,
+                    durationSeconds: session.duration,
+                    targetBatchCount: targetBatchCount
+                )
+                defer {
+                    if let temporaryDirectory = plan.temporaryDirectory {
+                        try? FileManager.default.removeItem(at: temporaryDirectory)
+                    }
+                }
+
+                await MainActor.run {
+                    transcriptionProgress = BatchProgress(
+                        batch: 0,
+                        totalBatches: plan.batches.count,
+                        progress: 0.08,
+                        textSoFar: "Prepared \(plan.batches.count) API batch\(plan.batches.count == 1 ? "" : "es")"
+                    )
+                    print("SessionManager: public session batching provider=\(providerId) model=\(modelId) batches=\(plan.batches.count) targetBatches=\(targetBatchCount ?? 0) fileSizeMB=\(Double(fileSize) / 1_000_000.0)")
+                }
+
+                let result = try await Self.transcribePublicSessionBatches(
+                    plan.batches,
+                    providerId: providerId,
+                    modelId: modelId,
+                    apiKey: apiKey
+                ) { completed, total, preview in
+                    await MainActor.run {
+                        let progress = total > 0 ? 0.08 + (Double(completed) / Double(total) * 0.90) : 0.08
+                        self.transcriptionProgress = BatchProgress(
+                            batch: completed,
+                            totalBatches: total,
+                            progress: min(progress, 0.98),
+                            textSoFar: preview
+                        )
+                    }
+                }
+
+                await MainActor.run {
+                    guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+                    let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    sessions[idx].status = .completed
+                    sessions[idx].hasTranscription = !text.isEmpty
+                    sessions[idx].transcriptionText = text
+                    sessions[idx].wordCount = text.split(separator: " ").count
+                    sessions[idx].batchCount = result.batchCount
+                    sessions[idx].transcriptionTime = Date().timeIntervalSince(startedAt)
+                    sessions[idx].modelUsed = displayName
+                    sessions[idx].transcriptionEstimatedCostUSD = result.estimatedCostUSD
+                        ?? APITranscriptionModelStore.load()
+                            .first(where: { $0.providerId == providerId && $0.modelId == modelId })?
+                            .estimatedCost(durationSeconds: sessions[idx].duration)
+                    saveTranscriptionText(for: sessions[idx], text: text)
+                    saveMetadata(for: sessions[idx])
+                    currentTranscribingSessionId = nil
+                    transcriptionProgress = nil
+                    print(String(
+                        format: "SessionManager: public session transcription complete provider=%@ model=%@ batches=%d elapsed=%.2fs requestElapsed=%.2fs words=%d estimatedCost=$%.6f",
+                        providerId,
+                        modelId,
+                        result.batchCount,
+                        Date().timeIntervalSince(startedAt),
+                        result.processingTimeSeconds,
+                        sessions[idx].wordCount ?? 0,
+                        sessions[idx].transcriptionEstimatedCostUSD ?? 0
+                    ))
+                }
+            } catch {
+                await MainActor.run {
+                    if let idx = sessions.firstIndex(where: { $0.id == sessionId }) {
+                        sessions[idx].status = .failed(error.localizedDescription)
+                        saveMetadata(for: sessions[idx])
+                    }
+                    currentTranscribingSessionId = nil
+                    transcriptionProgress = nil
+                }
+            }
+        }
+    }
+
+    private func publicTranscriptionProviderName(for providerId: String) -> String {
+        switch providerId {
+        case TranscriptionProviderDescriptor.openRouter.id:
+            return TranscriptionProviderDescriptor.openRouter.displayName
+        case TranscriptionProviderDescriptor.elevenLabs.id:
+            return TranscriptionProviderDescriptor.elevenLabs.displayName
+        default:
+            return TranscriptionProviderDescriptor.openAI.displayName
+        }
+    }
+
+    private nonisolated static func makePublicSessionBatchPlan(
+        audioURL: URL,
+        durationSeconds: Double,
+        targetBatchCount: Int?
+    ) async throws -> PublicSessionBatchPlan {
+        let asset = AVURLAsset(url: audioURL)
+        let assetDuration = CMTimeGetSeconds(asset.duration)
+        let effectiveDuration = durationSeconds > 0
+            ? durationSeconds
+            : (assetDuration.isFinite && assetDuration > 0 ? assetDuration : 0)
+        let requestedBatchCount = Self.normalizedPublicSessionBatchCount(
+            targetBatchCount: targetBatchCount,
+            durationSeconds: effectiveDuration
+        )
+        let batchDuration = publicSessionBatchDurationSeconds(
+            targetBatchCount: requestedBatchCount,
+            durationSeconds: effectiveDuration
+        )
+
+        guard effectiveDuration > batchDuration else {
+            return PublicSessionBatchPlan(
+                batches: [
+                    PublicSessionAudioBatch(
+                        index: 0,
+                        total: 1,
+                        url: audioURL,
+                        durationSeconds: max(effectiveDuration, durationSeconds),
+                        fileName: "session-batch-001.m4a",
+                        mimeType: "audio/mp4"
+                    )
+                ],
+                temporaryDirectory: nil
+            )
+        }
+
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AiTranscribePublicSessionBatches-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+
+        let totalBatches = requestedBatchCount ?? Int(ceil(effectiveDuration / batchDuration))
+        var batches: [PublicSessionAudioBatch] = []
+        batches.reserveCapacity(totalBatches)
+
+        for index in 0..<totalBatches {
+            let startSeconds = Double(index) * batchDuration
+            let remaining = max(0, effectiveDuration - startSeconds)
+            let segmentDuration = min(batchDuration, remaining)
+            guard segmentDuration > 0 else { continue }
+
+            let outputURL = temporaryDirectory
+                .appendingPathComponent(String(format: "session-batch-%03d.m4a", index + 1))
+            try await exportPublicSessionSegment(
+                asset: asset,
+                startSeconds: startSeconds,
+                durationSeconds: segmentDuration,
+                outputURL: outputURL
+            )
+            batches.append(
+                PublicSessionAudioBatch(
+                    index: index,
+                    total: totalBatches,
+                    url: outputURL,
+                    durationSeconds: segmentDuration,
+                    fileName: outputURL.lastPathComponent,
+                    mimeType: "audio/mp4"
+                )
+            )
+        }
+
+        guard !batches.isEmpty else {
+            throw NSError(
+                domain: "AiTranscribe.SessionManager",
+                code: 2001,
+                userInfo: [NSLocalizedDescriptionKey: "Could not create API session batches."]
+            )
+        }
+
+        return PublicSessionBatchPlan(batches: batches, temporaryDirectory: temporaryDirectory)
+    }
+
+    private nonisolated static func exportPublicSessionSegment(
+        asset: AVAsset,
+        startSeconds: Double,
+        durationSeconds: Double,
+        outputURL: URL
+    ) async throws {
+        try? FileManager.default.removeItem(at: outputURL)
+
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+            throw NSError(
+                domain: "AiTranscribe.SessionManager",
+                code: 2002,
+                userInfo: [NSLocalizedDescriptionKey: "Could not create audio exporter for API session batch."]
+            )
+        }
+
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .m4a
+        exportSession.timeRange = CMTimeRange(
+            start: CMTime(seconds: startSeconds, preferredTimescale: 600),
+            duration: CMTime(seconds: durationSeconds, preferredTimescale: 600)
+        )
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            exportSession.exportAsynchronously {
+                switch exportSession.status {
+                case .completed:
+                    continuation.resume()
+                case .failed, .cancelled:
+                    continuation.resume(throwing: exportSession.error ?? NSError(
+                        domain: "AiTranscribe.SessionManager",
+                        code: 2003,
+                        userInfo: [NSLocalizedDescriptionKey: "Audio batch export failed."]
+                    ))
+                default:
+                    continuation.resume(throwing: NSError(
+                        domain: "AiTranscribe.SessionManager",
+                        code: 2004,
+                        userInfo: [NSLocalizedDescriptionKey: "Audio batch export ended unexpectedly."]
+                    ))
+                }
+            }
+        }
+    }
+
+    private nonisolated static func transcribePublicSessionBatches(
+        _ batches: [PublicSessionAudioBatch],
+        providerId: String,
+        modelId: String,
+        apiKey: String,
+        onBatchComplete: @escaping @Sendable (_ completed: Int, _ total: Int, _ preview: String?) async -> Void
+    ) async throws -> PublicSessionTranscriptionResult {
+        let startedAt = Date()
+        let maxConcurrent = min(maxPublicSessionConcurrentUploads(), max(1, batches.count))
+        var results = Array<PublicSessionBatchResult?>(repeating: nil, count: batches.count)
+        var nextIndex = 0
+        var completed = 0
+
+        try await withThrowingTaskGroup(of: PublicSessionBatchResult.self) { group in
+            func scheduleNext() {
+                guard nextIndex < batches.count else { return }
+                let batch = batches[nextIndex]
+                nextIndex += 1
+                group.addTask {
+                    try await Self.transcribePublicSessionBatch(
+                        batch,
+                        providerId: providerId,
+                        modelId: modelId,
+                        apiKey: apiKey
+                    )
+                }
+            }
+
+            for _ in 0..<maxConcurrent {
+                scheduleNext()
+            }
+
+            while let result = try await group.next() {
+                completed += 1
+                results[result.index] = result
+                let preview = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                await onBatchComplete(completed, batches.count, preview.isEmpty ? nil : preview)
+                scheduleNext()
+            }
+        }
+
+        let orderedResults = try results.enumerated().map { index, result in
+            guard let result else {
+                throw NSError(
+                    domain: "AiTranscribe.SessionManager",
+                    code: 2005,
+                    userInfo: [NSLocalizedDescriptionKey: "API session batch \(index + 1) did not complete."]
+                )
+            }
+            return result
+        }
+
+        let combinedText = orderedResults
+            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        let requestCost = orderedResults.reduce(Double?.none) { partial, result in
+            guard partial != nil || result.estimatedCostUSD != nil else { return nil }
+            return (partial ?? 0) + (result.estimatedCostUSD ?? 0)
+        }
+
+        return PublicSessionTranscriptionResult(
+            text: combinedText,
+            processingTimeSeconds: Date().timeIntervalSince(startedAt),
+            estimatedCostUSD: requestCost,
+            batchCount: orderedResults.count
+        )
+    }
+
+    private nonisolated static func transcribePublicSessionBatch(
+        _ batch: PublicSessionAudioBatch,
+        providerId: String,
+        modelId: String,
+        apiKey: String
+    ) async throws -> PublicSessionBatchResult {
+        let audioData = try Data(contentsOf: batch.url)
+        let startedAt = Date()
+
+        if providerId == "openrouter" {
+            let response = try await OpenRouterTranscriptionClient().transcribe(
+                audioData: audioData,
+                modelId: modelId,
+                apiKey: apiKey,
+                format: "m4a"
+            )
+            return PublicSessionBatchResult(
+                index: batch.index,
+                text: response.text,
+                processingTimeSeconds: Date().timeIntervalSince(startedAt),
+                estimatedCostUSD: response.usage?.cost
+            )
+        }
+
+        if providerId == "elevenlabs" {
+            let response = try await ElevenLabsTranscriptionClient().transcribe(
+                audioData: audioData,
+                modelId: modelId,
+                apiKey: apiKey,
+                fileName: batch.fileName,
+                mimeType: batch.mimeType
+            )
+            return PublicSessionBatchResult(
+                index: batch.index,
+                text: response.text,
+                processingTimeSeconds: Date().timeIntervalSince(startedAt),
+                estimatedCostUSD: nil
+            )
+        }
+
+        let response = try await OpenAITranscriptionClient().transcribe(
+            audioData: audioData,
+            modelId: modelId,
+            apiKey: apiKey,
+            fileName: batch.fileName,
+            mimeType: batch.mimeType
+        )
+        return PublicSessionBatchResult(
+            index: batch.index,
+            text: response.text,
+            processingTimeSeconds: Date().timeIntervalSince(startedAt),
+            estimatedCostUSD: nil
+        )
+    }
+
+    private nonisolated static func publicSessionBatchDurationSeconds(
+        targetBatchCount: Int?,
+        durationSeconds: Double
+    ) -> Double {
+        if let targetBatchCount, targetBatchCount > 0, durationSeconds > 0 {
+            return max(1, durationSeconds / Double(targetBatchCount))
+        }
+        let storedValue = UserDefaults.standard.double(forKey: "publicSessionBatchDurationSeconds")
+        return storedValue > 0 ? storedValue : 120
+    }
+
+    private nonisolated static func normalizedPublicSessionBatchCount(
+        targetBatchCount: Int?,
+        durationSeconds: Double
+    ) -> Int? {
+        guard durationSeconds > 0 else { return targetBatchCount.map { max(1, min($0, 30)) } }
+
+        if let targetBatchCount, targetBatchCount > 0 {
+            return max(6, min(nearestMultipleOfSix(targetBatchCount), 30))
+        }
+
+        let targetMinutesPerBatch = 15.0
+        let rawCount = Int(ceil((durationSeconds / 60.0) / targetMinutesPerBatch))
+        return max(6, min(roundUpToMultipleOfSix(rawCount), 30))
+    }
+
+    private nonisolated static func roundUpToMultipleOfSix(_ value: Int) -> Int {
+        guard value > 0 else { return 6 }
+        return Int(ceil(Double(value) / 6.0)) * 6
+    }
+
+    private nonisolated static func nearestMultipleOfSix(_ value: Int) -> Int {
+        guard value > 0 else { return 6 }
+        return Int(round(Double(value) / 6.0)) * 6
+    }
+
+    private nonisolated static func maxPublicSessionConcurrentUploads() -> Int {
+        let storedValue = UserDefaults.standard.integer(forKey: "publicSessionConcurrentUploads")
+        return max(1, min(storedValue > 0 ? storedValue : 6, 6))
+    }
+
     /// Cancel the current batch transcription.
     func cancelTranscription(apiClient: APIClient) {
         guard let sessionId = currentTranscribingSessionId else { return }
@@ -1056,6 +1525,141 @@ class SessionManager: ObservableObject {
                 summaryProgress = nil
             }
         }
+    }
+
+    func startPublicSummary(
+        sessionId: UUID,
+        providerId: String,
+        modelId: String,
+        modelName: String,
+        presetRequests: [SummaryGenerationPresetRequest]
+    ) {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        guard let transcript = sessions[index].transcriptionText,
+              !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        guard let firstPreset = presetRequests.first else { return }
+        guard let apiKey = try? APIKeychainStore.apiKey(providerId: providerId),
+              !apiKey.isEmpty else {
+            markSummaryRunFailed(sessionId: sessionId, message: "Add \(publicSummaryProviderName(for: providerId)) API key first.")
+            return
+        }
+        let pricingModel = APILanguageModelStore.load()
+            .first(where: { $0.providerId == providerId && $0.modelId == modelId })
+
+        let selectedPresetIds = presetRequests.map(\.presetId)
+        for request in presetRequests {
+            var metadata = sessions[index].summaries[request.presetId]
+                ?? .empty(displayName: request.displayName, fileName: request.fileName)
+            metadata.status = request.presetId == firstPreset.presetId ? "preparing" : "queued"
+            metadata.statusMessage = nil
+            metadata.fileName = request.fileName
+            metadata.modelId = modelId
+            metadata.modelName = modelName
+            metadata.presetDisplayName = request.displayName
+            metadata.targetWordCount = request.targetWords
+            metadata.maxOutputTokens = request.maxOutputTokens
+            sessions[index].summaries[request.presetId] = metadata
+        }
+
+        currentSummarizingSessionId = sessionId
+        summaryProgress = SessionSummaryProgress(
+            activePresetId: firstPreset.presetId,
+            selectedPresetIds: selectedPresetIds,
+            completedPresetIds: [],
+            stage: "Sending to API",
+            partialText: sessions[index].summaries[firstPreset.presetId]?.text,
+            memoryEstimate: nil,
+            kvQuantized: nil,
+            currentIndex: 1,
+            totalPresets: presetRequests.count
+        )
+        saveMetadata(for: sessions[index])
+
+        Task {
+            var completedPresetIds: [String] = []
+            do {
+                for (offset, request) in presetRequests.enumerated() {
+                    guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+                    var activeMetadata = sessions[idx].summaries[request.presetId]
+                        ?? .empty(displayName: request.displayName, fileName: request.fileName)
+                    activeMetadata.status = "generating"
+                    activeMetadata.statusMessage = nil
+                    sessions[idx].summaries[request.presetId] = activeMetadata
+                    summaryProgress = SessionSummaryProgress(
+                        activePresetId: request.presetId,
+                        selectedPresetIds: selectedPresetIds,
+                        completedPresetIds: completedPresetIds,
+                        stage: "Generating with \(publicSummaryProviderName(for: providerId))",
+                        partialText: activeMetadata.text,
+                        memoryEstimate: nil,
+                        kvQuantized: nil,
+                        currentIndex: offset + 1,
+                        totalPresets: presetRequests.count
+                    )
+                    saveMetadata(for: sessions[idx])
+
+                    let result: OpenAILanguageModelResponse
+                    if providerId == TranscriptionProviderDescriptor.openRouter.id {
+                        result = try await OpenRouterLanguageModelClient().generateSummary(
+                            transcript: transcript,
+                            preset: request,
+                            modelId: modelId,
+                            apiKey: apiKey,
+                            providerOnly: pricingModel?.openRouterProviderOnly
+                        )
+                    } else {
+                        result = try await OpenAILanguageModelClient().generateSummary(
+                            transcript: transcript,
+                            preset: request,
+                            modelId: modelId,
+                            apiKey: apiKey
+                        )
+                    }
+
+                    guard let doneIndex = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+                    var doneMetadata = sessions[doneIndex].summaries[request.presetId]
+                        ?? .empty(displayName: request.displayName, fileName: request.fileName)
+                    doneMetadata.hasSummary = true
+                    doneMetadata.status = "complete"
+                    doneMetadata.statusMessage = nil
+                    doneMetadata.fileName = request.fileName
+                    doneMetadata.modelId = modelId
+                    doneMetadata.modelName = modelName
+                    doneMetadata.presetDisplayName = request.displayName
+                    doneMetadata.wordCount = result.text.split(separator: " ").count
+                    doneMetadata.targetWordCount = request.targetWords
+                    doneMetadata.maxOutputTokens = request.maxOutputTokens
+                    doneMetadata.processingTimeSeconds = result.processingTimeSeconds
+                    doneMetadata.inputTokens = result.inputTokens
+                    doneMetadata.outputTokens = result.outputTokens
+                    doneMetadata.estimatedCostUSD = pricingModel?.estimatedCost(
+                        inputTokens: result.inputTokens,
+                        outputTokens: result.outputTokens
+                    )
+                    doneMetadata.generatedAt = Date()
+                    doneMetadata.text = result.text
+                    sessions[doneIndex].summaries[request.presetId] = doneMetadata
+                    saveSummaryText(for: sessions[doneIndex], fileName: request.fileName, text: result.text)
+                    saveMetadata(for: sessions[doneIndex])
+                    completedPresetIds.append(request.presetId)
+                }
+
+                currentSummarizingSessionId = nil
+                summaryProgress = nil
+            } catch {
+                markSummaryRunFailed(sessionId: sessionId, message: error.localizedDescription)
+                currentSummarizingSessionId = nil
+                summaryProgress = nil
+            }
+        }
+    }
+
+    private func publicSummaryProviderName(for providerId: String) -> String {
+        providerId == TranscriptionProviderDescriptor.openRouter.id
+            ? TranscriptionProviderDescriptor.openRouter.displayName
+            : TranscriptionProviderDescriptor.openAI.displayName
     }
 
     func cancelSummary(apiClient: APIClient) {
@@ -1280,6 +1884,11 @@ class SessionManager: ObservableObject {
     }
 
     // MARK: - Private Helpers
+
+    private func saveTranscriptionText(for session: Session, text: String) {
+        let transcriptionURL = getTranscriptionURL(for: session)
+        try? text.write(to: transcriptionURL, atomically: true, encoding: .utf8)
+    }
 
     private func saveSummaryText(for session: Session, fileName: String, text: String) {
         let summaryURL = getSummaryURL(for: session, fileName: fileName)

@@ -19,13 +19,14 @@ struct DebugConsoleView: View {
     @EnvironmentObject var backendManager: BackendManager
     @State private var autoScroll = true
     @State private var filterLevel: LogEntry.LogLevel? = nil
+    @State private var filterSource: LogEntry.LogSource? = nil
 
     /// Filtered logs based on selected level
     var filteredLogs: [LogEntry] {
-        if let level = filterLevel {
-            return backendManager.logs.filter { $0.level == level }
+        backendManager.logs.filter { entry in
+            (filterLevel == nil || entry.level == filterLevel) &&
+            (filterSource == nil || entry.source == filterSource)
         }
-        return backendManager.logs
     }
 
     var body: some View {
@@ -44,15 +45,25 @@ struct DebugConsoleView: View {
 
                 Spacer()
 
-                // Filter picker
+                // Source picker
+                Picker("Source", selection: $filterSource) {
+                    Text("All").tag(nil as LogEntry.LogSource?)
+                    Text("App").tag(LogEntry.LogSource.app as LogEntry.LogSource?)
+                    Text("Backend").tag(LogEntry.LogSource.backend as LogEntry.LogSource?)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 210)
+
+                // Level picker
                 Picker("Filter", selection: $filterLevel) {
                     Text("All").tag(nil as LogEntry.LogLevel?)
+                    Text("Debug").tag(LogEntry.LogLevel.debug as LogEntry.LogLevel?)
                     Text("Info").tag(LogEntry.LogLevel.info as LogEntry.LogLevel?)
                     Text("Warning").tag(LogEntry.LogLevel.warning as LogEntry.LogLevel?)
                     Text("Error").tag(LogEntry.LogLevel.error as LogEntry.LogLevel?)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 200)
+                .frame(width: 270)
 
                 Spacer()
 
@@ -196,6 +207,12 @@ struct LogEntryRow: View {
                 .fontWeight(.medium)
                 .foregroundColor(levelColor)
                 .frame(width: 40, alignment: .leading)
+
+            Text(entry.source.rawValue)
+                .font(.system(.caption2, design: .monospaced))
+                .fontWeight(.semibold)
+                .foregroundColor(entry.source == .app ? .blue : .secondary)
+                .frame(width: 56, alignment: .leading)
 
             // Message
             Text(entry.message)

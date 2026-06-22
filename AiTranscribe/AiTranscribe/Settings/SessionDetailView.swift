@@ -14,6 +14,11 @@ struct SessionDetailView: View {
     @EnvironmentObject var appState: AppState
     @AppStorage("preferredSummaryLengthOption") private var preferredSummaryLengthOption = SummaryLengthOption.medium.rawValue
     @AppStorage("preferredSummaryCustomWords") private var preferredSummaryCustomWords = SummaryLengthOption.custom.defaultWordTarget
+    @AppStorage("selectedTranscriptionProviderId") private var selectedTranscriptionProviderId = TranscriptionProviderDescriptor.localBackend.id
+    @AppStorage("selectedOpenAITranscriptionModel") private var selectedOpenAITranscriptionModel = TranscriptionModelDescriptor.openAIModels[0].id
+    @AppStorage("selectedOpenAILanguageModel") private var selectedOpenAILanguageModel = APILanguageModelStore.defaultModels[0].modelId
+    @AppStorage("publicSessionTargetBatchCount") private var publicSessionTargetBatchCount = 0
+    @AppStorage("publicSessionConcurrentUploads") private var publicSessionConcurrentUploads = 6
     let sessionId: UUID
     let onBack: () -> Void
     var onNavigateToModels: ((ModelMode) -> Void)? = nil
@@ -35,6 +40,8 @@ struct SessionDetailView: View {
     @State private var isEditingSummary = false
     @State private var editableSummaryText = ""
     @State private var openedSummaryPresetId: String? = nil
+    @State private var apiTranscriptionModels: [APITranscriptionModel] = APITranscriptionModelStore.load()
+    @State private var apiLanguageModels: [APILanguageModel] = APILanguageModelStore.load()
 
     private var session: Session? {
         sessionManager.sessions.first(where: { $0.id == sessionId })
@@ -72,6 +79,30 @@ struct SessionDetailView: View {
 
     private var selectedSummaryModel: SummaryModelInfoResponse? {
         availableSummaryModels.first(where: { $0.id == selectedSummaryModelId })
+    }
+
+    private var isPublicMode: Bool {
+        selectedTranscriptionProviderId != TranscriptionProviderDescriptor.localBackend.id
+    }
+
+    private var publicTranscriptionModels: [APITranscriptionModel] {
+        apiTranscriptionModels.filter {
+            APITranscriptionModelStore.isSupportedModel($0.modelId, providerId: $0.providerId)
+        }
+    }
+
+    private var selectedAPITranscriptionModel: APITranscriptionModel? {
+        publicTranscriptionModels.first {
+            $0.providerId == selectedTranscriptionProviderId &&
+            $0.modelId == selectedOpenAITranscriptionModel
+        }
+        ?? publicTranscriptionModels.first { $0.providerId == selectedTranscriptionProviderId }
+        ?? publicTranscriptionModels.first
+    }
+
+    private var selectedAPILanguageModel: APILanguageModel? {
+        apiLanguageModels.first(where: { $0.modelId == selectedOpenAILanguageModel })
+            ?? apiLanguageModels.first
     }
 
     private var currentLengthOption: SummaryLengthOption {
@@ -413,7 +444,7 @@ struct SessionDetailView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
-        } else if !appState.isServerConnected {
+        } else if !isPublicMode && !appState.isServerConnected {
             VStack(spacing: 10) {
                 ProgressView().scaleEffect(0.8)
                 Text("Server Starting...")
@@ -430,7 +461,199 @@ struct SessionDetailView: View {
         }
     }
 
+    @ViewBuilder
     private func notTranscribedControls(_ session: Session) -> some View {
+        if isPublicMode {
+            publicNotTranscribedControls(session)
+        } else {
+            localNotTranscribedControls(session)
+        }
+    }
+
+    private func publicNotTranscribedControls(_ session: Session) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if publicTranscriptionModels.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "network.badge.shield.half.filled")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.tertiary)
+                    Text("No public transcription models configured")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    if let onNavigateToModels {
+                        capsuleButton(label: "Go to API Models", icon: "arrow.right", style: .prominent) {
+                            onNavigateToModels(.speechToText)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(20)
+                .background(.thinMaterial, in: .rect(cornerRadius: 12, style: .continuous))
+            } else {
+                glassCard {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Public Model")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Picker("", selection: $selectedOpenAITranscriptionModel) {
+                                ForEach(publicTranscriptionModels) { model in
+                                    Text("\(model.displayName) · \(model.providerName)").tag(model.modelId)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(maxWidth: 260)
+                            .onChange(of: selectedOpenAITranscriptionModel) { _, modelId in
+                                if let model = publicTranscriptionModels.first(where: { $0.modelId == modelId }) {
+                                    selectedTranscriptionProviderId = model.providerId
+                                }
+                            }
+                        }
+
+                        HStack(spacing: 5) {
+                            Image(systemName: "info.circle")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.orange)
+                            Text("Public session transcription uploads API batches in parallel and stitches them back in order.")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("API Batch Target")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                    Text(publicBatchEstimateText(for: session))
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.tertiary)
+                                }
+
+                                Spacer()
+
+                                Stepper(
+                                    publicSessionTargetBatchCount == 0 ? "Auto" : "\(normalizedManualPublicBatchTarget)",
+                                    value: $publicSessionTargetBatchCount,
+                                    in: 0...30,
+                                    step: 6
+                                )
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .frame(width: 118)
+                                .onChange(of: publicSessionTargetBatchCount) { _, _ in
+                                    normalizePublicBatchTarget()
+                                }
+                            }
+
+                            HStack(spacing: 8) {
+                                metaPill(
+                                    icon: "square.stack.3d.up",
+                                    text: "\(effectivePublicBatchCount(for: session)) batches"
+                                )
+                                metaPill(
+                                    icon: "clock",
+                                    text: "~\(publicBatchMinutesText(for: session))/batch"
+                                )
+                                metaPill(
+                                    icon: "arrow.triangle.branch",
+                                    text: "parallel \(max(1, min(publicSessionConcurrentUploads, 6)))"
+                                )
+                            }
+
+                            if publicSessionTargetBatchCount == 0 {
+                                Text("Auto targets ~15 min per batch, then rounds up to a multiple of 6 so the parallel wave stays balanced.")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+
+                Button {
+                    if let selectedAPITranscriptionModel {
+                        sessionManager.startPublicTranscription(
+                            sessionId: session.id,
+                            providerId: selectedAPITranscriptionModel.providerId,
+                            modelId: selectedAPITranscriptionModel.modelId,
+                            displayName: selectedAPITranscriptionModel.displayName,
+                            targetBatchCount: publicSessionTargetBatchCount > 0 ? normalizedManualPublicBatchTarget : nil
+                        )
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "network")
+                            .font(.system(size: 10))
+                        Text("Start Public Transcription")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.accentColor, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(apiTranscriptionModels.isEmpty || !session.hasAudio)
+            }
+        }
+        .task {
+            apiTranscriptionModels = APITranscriptionModelStore.load()
+            normalizePublicBatchTarget()
+            if !publicTranscriptionModels.contains(where: {
+                $0.providerId == selectedTranscriptionProviderId &&
+                $0.modelId == selectedOpenAITranscriptionModel
+            }),
+               let firstModel = publicTranscriptionModels.first {
+                selectedTranscriptionProviderId = firstModel.providerId
+                selectedOpenAITranscriptionModel = firstModel.modelId
+            }
+        }
+    }
+
+    private var normalizedManualPublicBatchTarget: Int {
+        guard publicSessionTargetBatchCount > 0 else { return 0 }
+        let rounded = Int(round(Double(publicSessionTargetBatchCount) / 6.0)) * 6
+        return max(6, min(rounded, 30))
+    }
+
+    private func normalizePublicBatchTarget() {
+        guard publicSessionTargetBatchCount > 0 else { return }
+        let normalized = normalizedManualPublicBatchTarget
+        if publicSessionTargetBatchCount != normalized {
+            publicSessionTargetBatchCount = normalized
+        }
+    }
+
+    private func effectivePublicBatchCount(for session: Session) -> Int {
+        if publicSessionTargetBatchCount > 0 {
+            return normalizedManualPublicBatchTarget
+        }
+
+        let minutes = max(session.duration / 60.0, 0.1)
+        let rawCount = Int(ceil(minutes / 15.0))
+        let roundedToWave = Int(ceil(Double(rawCount) / 6.0)) * 6
+        return max(6, min(roundedToWave, 30))
+    }
+
+    private func publicBatchMinutesText(for session: Session) -> String {
+        let minutes = max(session.duration / 60.0, 0)
+        let perBatch = minutes / Double(max(effectivePublicBatchCount(for: session), 1))
+        if perBatch >= 10 {
+            return String(format: "%.1f min", perBatch)
+        }
+        return String(format: "%.2f min", perBatch)
+    }
+
+    private func publicBatchEstimateText(for session: Session) -> String {
+        let minutes = max(session.duration / 60.0, 0)
+        let batchCount = effectivePublicBatchCount(for: session)
+        if publicSessionTargetBatchCount == 0 {
+            return String(format: "Auto: %.0f min session / %d wave-aligned batches = %@.", minutes, batchCount, publicBatchMinutesText(for: session))
+        }
+        return String(format: "%.0f min session / %d batches = %@.", minutes, batchCount, publicBatchMinutesText(for: session))
+    }
+
+    private func localNotTranscribedControls(_ session: Session) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             // Model selector
             if availableModels.isEmpty {
@@ -648,6 +871,7 @@ struct SessionDetailView: View {
             }
         }
         .task {
+            apiLanguageModels = APILanguageModelStore.load()
             await appState.fetchSummaryRuntimeStatus()
             await appState.fetchSummaryModels()
             if let preferred = appState.preferredSummaryModelId {
@@ -683,9 +907,11 @@ struct SessionDetailView: View {
                 .padding(14)
                 .background(.thinMaterial, in: .rect(cornerRadius: 12, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.orange.opacity(0.15), lineWidth: 0.5))
-            } else if !appState.summaryRuntimeInstalled {
+            } else if isPublicMode && apiLanguageModels.isEmpty {
+                summaryEmptyAPIModelsView()
+            } else if !isPublicMode && !appState.summaryRuntimeInstalled {
                 summaryRuntimeInstallView()
-            } else if availableSummaryModels.isEmpty {
+            } else if !isPublicMode && availableSummaryModels.isEmpty {
                 summaryEmptyModelsView()
             } else {
                 summaryOverview(session)
@@ -734,13 +960,30 @@ struct SessionDetailView: View {
     private func summaryEmptyModelsView() -> some View {
         glassCard {
             VStack(alignment: .leading, spacing: 10) {
-                Text("No summary models available")
+                Text("No local LLM available")
                     .font(.system(size: 13, weight: .semibold))
                 Text("Download a Gemma model to start summarizing.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 if let onNavigateToModels {
                     capsuleButton(label: "Open Models", icon: "arrow.right", style: .regular) {
+                        onNavigateToModels(.summarization)
+                    }
+                }
+            }
+        }
+    }
+
+    private func summaryEmptyAPIModelsView() -> some View {
+        glassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("No public LLM configured")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Add an API LLM to generate summaries in Public mode.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                if let onNavigateToModels {
+                    capsuleButton(label: "Open API LLM", icon: "arrow.right", style: .regular) {
                         onNavigateToModels(.summarization)
                     }
                 }
@@ -918,23 +1161,33 @@ struct SessionDetailView: View {
 
                     // Model section
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("MODEL")
+                        Text(isPublicMode ? "PUBLIC LLM" : "LOCAL LM")
                             .font(.system(size: 9, weight: .semibold, design: .rounded))
                             .foregroundStyle(.tertiary)
                             .tracking(0.5)
 
                         HStack(spacing: 8) {
-                            Picker("", selection: $selectedSummaryModelId) {
-                                ForEach(availableSummaryModels) { model in
-                                    Text(model.displayName).tag(model.id)
+                            if isPublicMode {
+                                Picker("", selection: $selectedOpenAILanguageModel) {
+                                    ForEach(apiLanguageModels) { model in
+                                        Text(model.displayName).tag(model.modelId)
+                                    }
                                 }
-                            }
-                            .labelsHidden()
-                            .frame(maxWidth: 200)
+                                .labelsHidden()
+                                .frame(maxWidth: 220)
+                            } else {
+                                Picker("", selection: $selectedSummaryModelId) {
+                                    ForEach(availableSummaryModels) { model in
+                                        Text(model.displayName).tag(model.id)
+                                    }
+                                }
+                                .labelsHidden()
+                                .frame(maxWidth: 200)
 
-                            if let model = selectedSummaryModel, !model.downloaded, let onNavigateToModels {
-                                capsuleButton(label: "Download", icon: "arrow.down.circle", style: .regular) {
-                                    onNavigateToModels(.summarization)
+                                if let model = selectedSummaryModel, !model.downloaded, let onNavigateToModels {
+                                    capsuleButton(label: "Download", icon: "arrow.down.circle", style: .regular) {
+                                        onNavigateToModels(.summarization)
+                                    }
                                 }
                             }
                         }
@@ -981,18 +1234,22 @@ struct SessionDetailView: View {
                     .buttonStyle(.plain)
                     .disabled(
                         selectedPresetRequests.isEmpty
-                            || selectedSummaryModel == nil
-                            || !(selectedSummaryModel?.downloaded ?? false)
+                            || (isPublicMode
+                                ? selectedAPILanguageModel == nil
+                                : (selectedSummaryModel == nil || !(selectedSummaryModel?.downloaded ?? false)))
                     )
                     .opacity(
                         (selectedPresetRequests.isEmpty
-                            || selectedSummaryModel == nil
-                            || !(selectedSummaryModel?.downloaded ?? false)) ? 0.5 : 1
+                            || (isPublicMode
+                                ? selectedAPILanguageModel == nil
+                                : (selectedSummaryModel == nil || !(selectedSummaryModel?.downloaded ?? false)))) ? 0.5 : 1
                     )
 
                     HStack(spacing: 6) {
                         metaPill(icon: "text.word.spacing", text: "~\(targetSummaryWords) words")
-                        if let model = selectedSummaryModel {
+                        if let model = selectedAPILanguageModel, isPublicMode {
+                            metaPill(icon: "network", text: model.displayName)
+                        } else if let model = selectedSummaryModel {
                             metaPill(icon: "memorychip", text: formatMB(model.residentModelRamMB))
                         }
                     }
@@ -1211,14 +1468,26 @@ struct SessionDetailView: View {
     }
 
     private func startSelectedSummaries(_ session: Session) {
-        guard let modelId = selectedSummaryModel?.id, !selectedPresetRequests.isEmpty else { return }
+        guard !selectedPresetRequests.isEmpty else { return }
         focusedSummaryPresetId = selectedPresetRequests.first?.presetId ?? focusedSummaryPresetId
-        sessionManager.startSummary(
-            sessionId: session.id,
-            modelId: modelId,
-            presetRequests: selectedPresetRequests,
-            apiClient: appState.apiClient
-        )
+        if isPublicMode {
+            guard let model = selectedAPILanguageModel else { return }
+            sessionManager.startPublicSummary(
+                sessionId: session.id,
+                providerId: model.providerId,
+                modelId: model.modelId,
+                modelName: model.displayName,
+                presetRequests: selectedPresetRequests
+            )
+        } else {
+            guard let modelId = selectedSummaryModel?.id else { return }
+            sessionManager.startSummary(
+                sessionId: session.id,
+                modelId: modelId,
+                presetRequests: selectedPresetRequests,
+                apiClient: appState.apiClient
+            )
+        }
     }
 
     private func previewText(for presetId: String) -> String? {
