@@ -350,13 +350,23 @@ class SessionRecorder: NSObject, ObservableObject {
     private var sessionSystemTrimDB: Double = SessionAudioMixPreferences.defaultSystemTrimDB
 
     /// Auto make-up target for each track, in RMS over active samples.
-    /// 0.09 ≈ -21 dBFS, matching the level of sessions that record cleanly.
-    private let sessionMixTargetRMS: Float = 0.09
+    /// 0.10 ≈ -20 dBFS, measured from sessions that recorded cleanly at a
+    /// level that sounded right (they cluster tightly at 0.101–0.104).
+    private let sessionMixTargetRMS: Float = 0.10
     private let sessionMixMakeupRange: ClosedRange<Float> = 0.25...8.0
     /// Loud passages (99.9th percentile) must sum below this.
     private let sessionMixPeakCeiling: Float = 0.94
-    /// Absolute peaks must sum below this. Guarantees the mix cannot clip.
-    private let sessionMixAbsoluteCeiling: Float = 0.99
+    /// Absolute peaks may overshoot into the soft limiter, but not without
+    /// bound. Constraining true peaks to the ceiling instead would let one
+    /// transient dictate the level for a whole session — the exact problem
+    /// the percentile measurement exists to avoid.
+    private let sessionMixTransientCeiling: Float = 1.5
+
+    /// Output soft limiter. Samples below the threshold pass through
+    /// untouched; above it they are smoothly compressed and approach the
+    /// ceiling asymptotically, so transients round over instead of clipping.
+    private let sessionMixLimiterThreshold: Float = 0.80
+    private let sessionMixLimiterCeiling: Float = 0.99
 
     /// Final output format: 16kHz mono AAC
     private let outputSampleRate: Double = 16000
@@ -776,7 +786,11 @@ class SessionRecorder: NSObject, ObservableObject {
 
         if hasMicAudio {
             removeExistingFile(at: outputURL)
-            if await convertSingleTrackToM4A(inputURL: micURL, outputURL: outputURL) {
+            if await convertSingleTrackToM4A(
+                inputURL: micURL,
+                outputURL: outputURL,
+                trimMultiplier: sessionMicTrimMultiplier
+            ) {
                 return true
             }
             print("SessionRecorder: Mic-only export failed")
@@ -784,7 +798,11 @@ class SessionRecorder: NSObject, ObservableObject {
 
         if hasSystemAudio, let sysURL {
             removeExistingFile(at: outputURL)
-            if await convertSingleTrackToM4A(inputURL: sysURL, outputURL: outputURL) {
+            if await convertSingleTrackToM4A(
+                inputURL: sysURL,
+                outputURL: outputURL,
+                trimMultiplier: sessionSystemTrimMultiplier
+            ) {
                 return true
             }
             print("SessionRecorder: System-only export failed")
@@ -1063,6 +1081,54 @@ class SessionRecorder: NSObject, ObservableObject {
         }
     }
 
+    /// Applies make-up gain and a soft limiter to one buffer of the 32-bit
+    /// float mix, in place, on its way from the reader to the encoder.
+    ///
+    /// Samples below `threshold` are untouched. Above it, magnitude is
+    /// compressed through tanh so it approaches `ceiling` without ever
+    /// reaching it — a transient rounds over instead of squaring off. This is
+    /// what lets the mix be leveled for loudness without either clipping or
+    /// letting one spike set the gain for the whole session.
+    private static func applyGainAndSoftLimit(
+        _ sampleBuffer: CMSampleBuffer,
+        gain: Float,
+        threshold: Float,
+        ceiling: Float
+    ) {
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+
+        var lengthAtOffset = 0
+        var totalLength = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        guard CMBlockBufferGetDataPointer(
+            blockBuffer,
+            atOffset: 0,
+            lengthAtOffsetOut: &lengthAtOffset,
+            totalLengthOut: &totalLength,
+            dataPointerOut: &dataPointer
+        ) == noErr, let dataPointer else { return }
+
+        // Only process contiguous buffers; anything else is passed through
+        // untouched rather than risking a partial, mismatched write.
+        guard lengthAtOffset == totalLength else { return }
+
+        let count = totalLength / MemoryLayout<Float>.size
+        guard count > 0 else { return }
+        let range = ceiling - threshold
+        guard range > 0 else { return }
+
+        let samples = UnsafeMutableRawPointer(dataPointer).assumingMemoryBound(to: Float.self)
+        for index in 0..<count {
+            var value = samples[index] * gain
+            let magnitude = abs(value)
+            if magnitude > threshold {
+                let compressed = threshold + range * tanhf((magnitude - threshold) / range)
+                value = value < 0 ? -compressed : compressed
+            }
+            samples[index] = value
+        }
+    }
+
     /// Gain needed to bring a track to `sessionMixTargetRMS`, bounded so a
     /// near-silent or absent track cannot produce an absurd multiplier.
     private func makeupGain(for analysis: AudioLevelAnalysis?) -> Float {
@@ -1102,8 +1168,8 @@ class SessionRecorder: NSObject, ObservableObject {
             scale = min(scale, sessionMixPeakCeiling / loudSum)
         }
         let peakSum = micPeak + sysPeak
-        if peakSum > sessionMixAbsoluteCeiling {
-            scale = min(scale, sessionMixAbsoluteCeiling / peakSum)
+        if peakSum > sessionMixTransientCeiling {
+            scale = min(scale, sessionMixTransientCeiling / peakSum)
         }
         if scale < 1.0 {
             micGain *= scale
@@ -1222,11 +1288,22 @@ class SessionRecorder: NSObject, ObservableObject {
             writer.startWriting()
             writer.startSession(atSourceTime: .zero)
 
+            let limiterThreshold = sessionMixLimiterThreshold
+            let limiterCeiling = sessionMixLimiterCeiling
+
             return await withCheckedContinuation { continuation in
                 let queue = DispatchQueue(label: "com.aitranscribe.audiomix")
                 writerInput.requestMediaDataWhenReady(on: queue) {
                     while writerInput.isReadyForMoreMediaData {
                         if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
+                            // Track gains are already applied by the audio mix;
+                            // this only rounds over the summed transients.
+                            Self.applyGainAndSoftLimit(
+                                sampleBuffer,
+                                gain: 1.0,
+                                threshold: limiterThreshold,
+                                ceiling: limiterCeiling
+                            )
                             writerInput.append(sampleBuffer)
                         } else {
                             writerInput.markAsFinished()
@@ -1249,8 +1326,28 @@ class SessionRecorder: NSObject, ObservableObject {
         }
     }
 
-    /// Convert a single track (mic-only fallback) to M4A.
-    private func convertSingleTrackToM4A(inputURL: URL, outputURL: URL) async -> Bool {
+    /// Convert a single track (mic-only or system-only fallback) to M4A.
+    /// Carries the same auto make-up and limiting as the mixed path — tracks
+    /// are written to disk at their true level, so without this the fallback
+    /// would export whatever the hardware happened to deliver.
+    private func convertSingleTrackToM4A(
+        inputURL: URL,
+        outputURL: URL,
+        trimMultiplier: Float
+    ) async -> Bool {
+        let analysis = analyzeAudioLevels(at: inputURL)
+        var gain = makeupGain(for: analysis) * trimMultiplier
+        if let analysis, analysis.loudPeak > 0.001 {
+            gain = min(gain, sessionMixPeakCeiling / analysis.loudPeak)
+        }
+        print(String(
+            format: "SessionRecorder: Single-track export rms=%.4f loudPeak=%.3f peak=%.3f -> gain=%.2f",
+            analysis?.activeRMS ?? 0,
+            analysis?.loudPeak ?? 0,
+            analysis?.peak ?? 0,
+            gain
+        ))
+
         let asset = AVURLAsset(url: inputURL)
 
         let audioTrack: AVAssetTrack
@@ -1298,11 +1395,21 @@ class SessionRecorder: NSObject, ObservableObject {
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
 
+        let exportGain = gain
+        let limiterThreshold = sessionMixLimiterThreshold
+        let limiterCeiling = sessionMixLimiterCeiling
+
         return await withCheckedContinuation { continuation in
             let queue = DispatchQueue(label: "com.aitranscribe.audioconvert")
             writerInput.requestMediaDataWhenReady(on: queue) {
                 while writerInput.isReadyForMoreMediaData {
                     if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
+                        Self.applyGainAndSoftLimit(
+                            sampleBuffer,
+                            gain: exportGain,
+                            threshold: limiterThreshold,
+                            ceiling: limiterCeiling
+                        )
                         writerInput.append(sampleBuffer)
                     } else {
                         writerInput.markAsFinished()
