@@ -16,6 +16,7 @@ struct OpenRouterTranscriptionClient {
     ) async throws -> OpenRouterTranscriptionResponse {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
+        request.timeoutInterval = 300
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("AiTranscribe", forHTTPHeaderField: "X-OpenRouter-Title")

@@ -176,20 +176,26 @@ struct ShortcutPill: View {
                 } else {
                     // Render each key symbol as a separate mini-key cap
                     let keys = parseShortcutDisplay(shortcut)
-                    ForEach(Array(keys.enumerated()), id: \.offset) { _, key in
-                        Text(key)
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.primary.opacity(0.85))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(
-                                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                    .fill(.white.opacity(0.06))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                            .strokeBorder(.white.opacity(0.1), lineWidth: 0.5)
-                                    )
-                            )
+                    if keys.isEmpty {
+                        Label("Shortcut", systemImage: "keyboard")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(keys.enumerated()), id: \.offset) { _, key in
+                            Text(key)
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.primary.opacity(0.85))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                        .fill(.white.opacity(0.06))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                                .strokeBorder(.white.opacity(0.1), lineWidth: 0.5)
+                                        )
+                                )
+                        }
                     }
                 }
             }

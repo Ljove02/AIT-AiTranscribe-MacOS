@@ -36,9 +36,9 @@ ENDPOINTS (URLs the app can call):
 
 To run this server:
     cd backend
-    uvicorn server:app --host 127.0.0.1 --port 8765
+    uvicorn server:app --host 127.0.0.1 --port 8770
 
-Then visit http://127.0.0.1:8765/docs to see automatic API documentation!
+Then visit http://127.0.0.1:8770/docs to see automatic API documentation!
 """
 
 # ============================================================================
@@ -61,6 +61,7 @@ import sys
 import tempfile
 import time
 import threading
+import base64
 
 # Force unbuffered stdout so logs appear immediately in Swift's debug console
 # This is important because Python buffers stdout by default when not connected to a TTY
@@ -125,7 +126,7 @@ SAMPLE_RATE = 16000  # 16kHz - standard for speech recognition
 
 # Server settings
 HOST = "127.0.0.1"  # localhost - only accessible from this computer
-PORT = 8765         # The port number (like a door number for the server)
+PORT = 8770         # The port number (like a door number for the server)
 
 
 # ============================================================================
@@ -231,6 +232,7 @@ class SummaryModelInfo(BaseModel):
     download_size_mb: int
     resident_model_ram_mb: int
     downloaded: bool
+    supports_vision: bool = False
     recommended: bool
     path: Optional[str]
     model_url: Optional[str] = None
@@ -251,6 +253,16 @@ class SessionSummarizeRequest(BaseModel):
     session_dir: str
     model_id: str
     presets: list[SummaryPresetRequest]
+
+
+class LocalPolishRequest(BaseModel):
+    model_id: str
+    input_text: str
+    preset_id: str = "polish"
+    display_name: str = "Polish"
+    system_prompt: str
+    max_output_tokens: int = 2000
+    screenshot_data_url: Optional[str] = None
 
 
 class SummaryRuntimeInstallRequest(BaseModel):
@@ -1014,6 +1026,229 @@ async def delete_summary_model_endpoint(model_id: str) -> MessageResponse:
     return MessageResponse(
         message=f"Summary model {model_id} deleted" if deleted else f"Summary model {model_id} was not downloaded",
         success=deleted,
+    )
+
+
+@app.post("/polish/local")
+async def local_polish(request: LocalPolishRequest):
+    global active_summary_process, active_summary_cancel_requested
+
+    if request.model_id not in SUMMARY_MODELS:
+        raise HTTPException(status_code=404, detail=f"Summary model not found: {request.model_id}")
+
+    input_text = request.input_text.strip()
+    if not input_text:
+        raise HTTPException(status_code=400, detail="Polish input is empty")
+
+    runtime_status = get_summary_runtime_status()
+    if not runtime_status.installed:
+        raise HTTPException(status_code=503, detail="Summary runtime not installed")
+    if runtime_status.worker_path is None or runtime_status.python_path is None:
+        raise HTTPException(status_code=503, detail="Summary runtime is incomplete")
+
+    model_path = get_summary_model_dir(request.model_id)
+    if not model_path.exists():
+        raise HTTPException(status_code=404, detail="Summary model is not downloaded")
+
+    if active_summary_process is not None:
+        raise HTTPException(status_code=400, detail="Another local LLM generation is already running")
+
+    screenshot_data_url = (request.screenshot_data_url or "").strip()
+    has_screenshot = bool(screenshot_data_url)
+    if has_screenshot and not SUMMARY_MODELS[request.model_id].get("supports_vision", False):
+        raise HTTPException(status_code=400, detail="Selected local LLM does not support screenshot context")
+
+    word_count = len(input_text.split())
+    max_output_tokens = max(128, min(int(request.max_output_tokens or 2000), 8000))
+    quantize_kv = should_quantize_kv_cache(request.model_id, word_count, max_output_tokens)
+    memory_estimate = estimate_summary_memory(
+        request.model_id,
+        word_count,
+        reserved_output_tokens=max_output_tokens,
+        quantized=quantize_kv,
+    )
+    context_limit = SUMMARY_MODELS[request.model_id]["context_tokens"]
+    if memory_estimate["required_context_tokens"] > context_limit:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Polish input is too large for {request.model_id}: "
+                f"{memory_estimate['required_context_tokens']} > {context_limit} context tokens"
+            ),
+        )
+
+    async def event_generator():
+        global active_summary_process, active_summary_cancel_requested
+        event_queue: queue.Queue = queue.Queue()
+        _SENTINEL = object()
+        active_summary_cancel_requested = False
+        stderr_lines: deque[str] = deque(maxlen=20)
+        terminal_event_seen = False
+        input_file_path = None
+        requests_file_path = None
+        image_file_path = None
+
+        normalized_preset = {
+            "preset_id": request.preset_id.strip() or "polish",
+            "display_name": request.display_name.strip() or "Polish",
+            "system_prompt": request.system_prompt.strip(),
+            "target_words": max(120, min(max_output_tokens // 2, 4000)),
+            "max_output_tokens": max_output_tokens,
+            "file_name": "summary-polish.md",
+        }
+
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as input_file:
+            input_file.write(input_text)
+            input_file_path = input_file.name
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as request_file:
+            json.dump({"presets": [normalized_preset]}, request_file)
+            requests_file_path = request_file.name
+
+        if has_screenshot:
+            try:
+                header, encoded = screenshot_data_url.split(",", 1)
+                if "base64" not in header:
+                    raise ValueError("screenshot data URL must be base64 encoded")
+                image_bytes = base64.b64decode(encoded, validate=True)
+                if not image_bytes:
+                    raise ValueError("screenshot image is empty")
+                suffix = ".jpg" if "image/jpeg" in header or "image/jpg" in header else ".png"
+                with tempfile.NamedTemporaryFile("wb", suffix=suffix, delete=False) as image_file:
+                    image_file.write(image_bytes)
+                    image_file_path = image_file.name
+            except Exception as exc:
+                for path in (input_file_path, requests_file_path):
+                    if path and os.path.exists(path):
+                        try:
+                            os.unlink(path)
+                        except OSError:
+                            pass
+                yield f"data: {json.dumps({'event': 'error', 'message': f'Invalid screenshot image data: {exc}'})}\n\n"
+                return
+
+        command = [
+            runtime_status.python_path,
+            runtime_status.worker_path,
+            "--model-path",
+            str(model_path),
+            "--transcription-file",
+            input_file_path,
+            "--requests-file",
+            requests_file_path,
+            "--word-count",
+            str(word_count),
+        ]
+        if image_file_path:
+            command.extend(["--image-file", image_file_path])
+        if quantize_kv:
+            command.extend(
+                [
+                    "--kv-bits",
+                    "8",
+                    "--kv-quant-scheme",
+                    "turboquant",
+                    "--kv-group-size",
+                    "64",
+                    "--quantized-kv-start",
+                    "0",
+                ]
+            )
+
+        process = _subprocess.Popen(
+            command,
+            stdout=_subprocess.PIPE,
+            stderr=_subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        active_summary_process = process
+
+        def _pump_stdout():
+            try:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event_queue.put(json.loads(line))
+                    except json.JSONDecodeError:
+                        event_queue.put({"event": "error", "message": f"Invalid worker output: {line}"})
+                        break
+            finally:
+                event_queue.put(_SENTINEL)
+
+        def _pump_stderr():
+            try:
+                assert process.stderr is not None
+                for line in process.stderr:
+                    line = line.strip()
+                    if line:
+                        stderr_lines.append(line)
+                        print(f"[local-polish-worker] {line}")
+            except Exception:
+                pass
+
+        threading.Thread(target=_pump_stdout, daemon=True).start()
+        threading.Thread(target=_pump_stderr, daemon=True).start()
+
+        try:
+            yield f"data: {json.dumps({'event': 'preparing_runtime', 'model_id': request.model_id, 'preset_ids': [normalized_preset['preset_id']], 'total_presets': 1, 'memory_estimate': memory_estimate, 'screenshot': bool(image_file_path)})}\n\n"
+
+            while True:
+                try:
+                    event = event_queue.get_nowait()
+                except queue.Empty:
+                    await asyncio.sleep(0.1)
+                    if process.poll() is not None and event_queue.empty():
+                        if not terminal_event_seen:
+                            if active_summary_cancel_requested:
+                                terminal_event_seen = True
+                                yield f"data: {json.dumps({'event': 'cancelled'})}\n\n"
+                            else:
+                                terminal_event_seen = True
+                                message = f"Local polish worker exited unexpectedly (code {process.returncode})"
+                                if stderr_lines:
+                                    message = f"{message}: {stderr_lines[-1]}"
+                                yield f"data: {json.dumps({'event': 'error', 'message': message})}\n\n"
+                        break
+                    continue
+
+                if event is _SENTINEL:
+                    break
+
+                event.setdefault("model_id", request.model_id)
+                yield f"data: {json.dumps(event)}\n\n"
+                event_name = event.get("event")
+                if event_name in {"done", "error", "cancelled", "batch_complete"}:
+                    terminal_event_seen = True
+                if event_name in {"error", "cancelled", "done"}:
+                    break
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except Exception:
+                    process.kill()
+            active_summary_process = None
+            for path in (input_file_path, requests_file_path, image_file_path):
+                if path and os.path.exists(path):
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+            active_summary_cancel_requested = False
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

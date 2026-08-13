@@ -17,9 +17,29 @@ final class RollingAPIBatchSession {
         let estimatedCostUSD: Double?
     }
 
+    private struct RetryFailure: Error {
+        let underlying: Error
+        let attempts: Int
+    }
+
+    private struct ChunkTranscriptionFailure: LocalizedError {
+        let providerName: String
+        let index: Int
+        let attempts: Int
+        let completed: Int
+        let queued: Int
+        let underlying: Error
+
+        var errorDescription: String? {
+            let detail = RollingAPIBatchSession.describe(underlying)
+            return "\(providerName) API batch \(index) failed after \(attempts) attempt\(attempts == 1 ? "" : "s"): \(detail). Completed \(completed) of \(queued) queued batches."
+        }
+    }
+
     private let provider: any TranscriptionProvider
     private let model: TranscriptionModelDescriptor
     private let maxConcurrentUploads: Int
+    private let maxAttempts = 3
     private let startedAt = Date()
 
     private var pendingChunks: [AudioRecorderChunk] = []
@@ -220,7 +240,7 @@ final class RollingAPIBatchSession {
                 workflow: .basicBatch,
                 model: model
             )
-            let result = try await provider.transcribe(request) { [weak self] update in
+            let result = try await transcribeWithRetry(request, chunk: chunk) { [weak self] update in
                 guard let self else { return }
                 if let message = update.message, !message.isEmpty {
                     self.onStatusUpdate?("Recording... \(message)")
@@ -249,9 +269,116 @@ final class RollingAPIBatchSession {
             ))
             onStatusUpdate?("Recording... API batch \(chunk.index) ready")
         } catch {
-            AppLogger.error("RollingAPI batchFailed provider=\(provider.descriptor.displayName) index=\(chunk.index) error=\(error.localizedDescription)")
-            processingError = error
+            let retryFailure = error as? RetryFailure
+            let underlying = retryFailure?.underlying ?? error
+            let attempts = retryFailure?.attempts ?? 1
+            let failure = ChunkTranscriptionFailure(
+                providerName: provider.descriptor.displayName,
+                index: chunk.index,
+                attempts: attempts,
+                completed: completedChunks,
+                queued: totalEnqueuedChunks,
+                underlying: underlying
+            )
+            AppLogger.error(String(
+                format: "RollingAPI batchFailed provider=%@ index=%d attempts=%d completed=%d/%d pending=%d inFlight=%d error=%@",
+                provider.descriptor.displayName,
+                chunk.index,
+                attempts,
+                completedChunks,
+                totalEnqueuedChunks,
+                pendingChunks.count,
+                max(0, inFlightTasks.count - 1),
+                Self.describe(underlying)
+            ))
+            processingError = failure
         }
+    }
+
+    private func transcribeWithRetry(
+        _ request: TranscriptionRequest,
+        chunk: AudioRecorderChunk,
+        onProgress: @escaping (TranscriptionProgressUpdate) -> Void
+    ) async throws -> TranscriptionProviderResult {
+        var attempt = 1
+
+        while true {
+            do {
+                if attempt > 1 {
+                    onStatusUpdate?("Recording... API batch \(chunk.index) retry \(attempt)")
+                }
+                return try await provider.transcribe(request, onProgress: onProgress)
+            } catch {
+                guard !Task.isCancelled else { throw error }
+                guard isRetryable(error), attempt < maxAttempts else {
+                    throw RetryFailure(underlying: error, attempts: attempt)
+                }
+
+                let delayNanoseconds = retryDelayNanoseconds(forAttempt: attempt)
+                AppLogger.warning(String(
+                    format: "RollingAPI retry provider=%@ index=%d attempt=%d/%d delay=%.1fs error=%@",
+                    provider.descriptor.displayName,
+                    chunk.index,
+                    attempt + 1,
+                    maxAttempts,
+                    Double(delayNanoseconds) / 1_000_000_000,
+                    Self.describe(error)
+                ))
+                onStatusUpdate?("Recording... API batch \(chunk.index) retrying")
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+                attempt += 1
+            }
+        }
+    }
+
+    private func retryDelayNanoseconds(forAttempt attempt: Int) -> UInt64 {
+        let seconds = min(8.0, pow(2.0, Double(attempt - 1)))
+        return UInt64(seconds * 1_000_000_000)
+    }
+
+    private func isRetryable(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return false
+        }
+
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .notConnectedToInternet:
+                return true
+            default:
+                return false
+            }
+        }
+
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            return [
+                NSURLErrorTimedOut,
+                NSURLErrorNetworkConnectionLost,
+                NSURLErrorCannotConnectToHost,
+                NSURLErrorCannotFindHost,
+                NSURLErrorDNSLookupFailed,
+                NSURLErrorNotConnectedToInternet
+            ].contains(nsError.code)
+        }
+
+        switch error {
+        case OpenAITranscriptionError.apiError(let statusCode, _):
+            return statusCode == 408 || statusCode == 429 || (500..<600).contains(statusCode)
+        case ElevenLabsTranscriptionError.apiError(let statusCode, _):
+            return statusCode == 408 || statusCode == 429 || (500..<600).contains(statusCode)
+        case OpenRouterTranscriptionError.apiError(let statusCode, _):
+            return statusCode == 408 || statusCode == 429 || (500..<600).contains(statusCode)
+        default:
+            return false
+        }
+    }
+
+    nonisolated private static func describe(_ error: Error) -> String {
+        if let description = (error as? LocalizedError)?.errorDescription, !description.isEmpty {
+            return description
+        }
+        return error.localizedDescription
     }
 
     private func mergeChunkTexts(_ texts: [String]) -> String {

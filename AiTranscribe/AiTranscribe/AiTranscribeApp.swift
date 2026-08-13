@@ -34,6 +34,7 @@ struct AiTranscribeApp: App {
     @ObservedObject private var sessionManager = SessionManager.shared
     @ObservedObject private var backendManager = BackendManager.shared
     @ObservedObject private var updateChecker = UpdateChecker.shared
+    @ObservedObject private var meetingMonitor = MeetingPresenceMonitor.shared
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     @State private var hotkeysRegistered = false
@@ -44,6 +45,7 @@ struct AiTranscribeApp: App {
         _ = BackendManager.shared
         _ = AppState.shared
         _ = SessionManager.shared
+        _ = MeetingPresenceMonitor.shared
     }
 
     var body: some Scene {
@@ -57,6 +59,11 @@ struct AiTranscribeApp: App {
                         HotkeyManager.shared.setup(appState: appState, sessionManager: sessionManager)
                         hotkeysRegistered = true
                     }
+                    MeetingReminderCoordinator.shared.start(
+                        appState: appState,
+                        sessionManager: sessionManager,
+                        monitor: meetingMonitor
+                    )
                     requestMicrophonePermissionAtLaunch()
                 }
                 .onChange(of: appState.isRecording) { _, _ in }

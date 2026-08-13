@@ -321,7 +321,7 @@ class BackendManager: ObservableObject {
 
                 // Try to actually connect to the server
                 do {
-                    let url = URL(string: "http://localhost:8765/health")!
+                    let url = URL(string: "http://localhost:\(BackendPort.value)/health")!
                     let (_, response) = try await URLSession.shared.data(from: url)
                     if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
                         isServerReady = true
@@ -343,13 +343,13 @@ class BackendManager: ObservableObject {
         statusMessage = "Timeout - server not responding"
     }
 
-    /// Kill any existing process using port 8765
+    /// Kill any existing process using the AiTranscribe backend port.
     /// This prevents "address already in use" errors when restarting
     private func killExistingBackendProcess() {
         // First try graceful SIGTERM
         let termTask = Process()
         termTask.executableURL = URL(fileURLWithPath: "/bin/sh")
-        termTask.arguments = ["-c", "lsof -ti:8765 | xargs kill -15 2>/dev/null"]
+        termTask.arguments = ["-c", "lsof -ti:\(BackendPort.value) | xargs kill -15 2>/dev/null"]
 
         do {
             try termTask.run()
@@ -365,13 +365,13 @@ class BackendManager: ObservableObject {
         // Now forcefully kill any remaining processes
         let killTask = Process()
         killTask.executableURL = URL(fileURLWithPath: "/bin/sh")
-        killTask.arguments = ["-c", "lsof -ti:8765 | xargs kill -9 2>/dev/null"]
+        killTask.arguments = ["-c", "lsof -ti:\(BackendPort.value) | xargs kill -9 2>/dev/null"]
 
         do {
             try killTask.run()
             killTask.waitUntilExit()
             if killTask.terminationStatus == 0 {
-                addLog("Killed existing process on port 8765", level: .debug)
+                addLog("Killed existing process on port \(BackendPort.value)", level: .debug)
             }
         } catch {
             // Ignore errors - no process to kill is fine
@@ -390,7 +390,7 @@ class BackendManager: ObservableObject {
 
         isIntentionallyStopping = false
 
-        // Kill any existing process on port 8765 to prevent "address already in use" errors
+        // Kill any existing AiTranscribe backend process to prevent "address already in use" errors.
         killExistingBackendProcess()
 
         // Determine which mode to use if not explicitly set
@@ -812,7 +812,7 @@ class BackendManager: ObservableObject {
         if !isServerReady {
             Task {
                 do {
-                    let url = URL(string: "http://localhost:8765/health")!
+                    let url = URL(string: "http://localhost:\(BackendPort.value)/health")!
                     let (_, response) = try await URLSession.shared.data(from: url)
                     if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
                         await MainActor.run {
@@ -862,7 +862,7 @@ class BackendManager: ObservableObject {
         // Check if we've now exceeded max restart attempts
         if restartCount >= maxRestartAttempts {
             addLog("Max restart attempts (\(maxRestartAttempts)) reached. Giving up.", level: .error)
-            addLog("Tip: Kill any existing server with 'lsof -ti:8765 | xargs kill' then click Reset & Retry", level: .error)
+            addLog("Tip: Kill any existing server with 'lsof -ti:\(BackendPort.value) | xargs kill' then click Reset & Retry", level: .error)
             statusMessage = "Failed - click Reset & Retry"
             return
         }

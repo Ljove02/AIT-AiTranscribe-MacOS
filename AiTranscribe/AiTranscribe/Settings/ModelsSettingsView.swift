@@ -1106,6 +1106,9 @@ struct APILanguageModelCardView: View {
                    !providerOnly.isEmpty {
                     badge("Only \(providerOnly.joined(separator: ","))", color: .purple)
                 }
+                if model.supportsVision {
+                    badge("Vision", color: .cyan)
+                }
                 if let input = model.inputCostPerMillionTokensUSD,
                    let output = model.outputCostPerMillionTokensUSD {
                     badge(String(format: "$%.2f/$%.2f", input, output), color: .mint)
@@ -1583,6 +1586,7 @@ struct AddAPILanguageModelSheet: View {
     @State private var openRouterProviderOnly = ""
     @State private var inputCostPerMillionTokens = ""
     @State private var outputCostPerMillionTokens = ""
+    @State private var supportsVision = false
     @State private var apiKeyInput = ""
     @State private var statusMessage: String?
     @State private var statusIsError = false
@@ -1609,6 +1613,7 @@ struct AddAPILanguageModelSheet: View {
         _openRouterProviderOnly = State(initialValue: model?.openRouterProviderOnly?.joined(separator: ", ") ?? "")
         _inputCostPerMillionTokens = State(initialValue: model?.inputCostPerMillionTokensUSD.map { String(format: "%.6g", $0) } ?? "")
         _outputCostPerMillionTokens = State(initialValue: model?.outputCostPerMillionTokensUSD.map { String(format: "%.6g", $0) } ?? "")
+        _supportsVision = State(initialValue: model?.supportsVision ?? false)
     }
 
     var body: some View {
@@ -1672,6 +1677,17 @@ struct AddAPILanguageModelSheet: View {
                     }
                 }
 
+                Toggle(isOn: $supportsVision) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Vision model")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("Required for Polish screenshot context. Enable only if this LLM accepts images.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+
                 formRow(label: "API key") {
                     VStack(alignment: .leading, spacing: 6) {
                         SecureField(keyPlaceholder, text: $apiKeyInput)
@@ -1695,6 +1711,8 @@ struct AddAPILanguageModelSheet: View {
             }
             .padding(12)
             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+            providerRoadmapCallout
 
             if let statusMessage {
                 Text(statusMessage)
@@ -1735,6 +1753,41 @@ struct AddAPILanguageModelSheet: View {
         }
         .padding(24)
         .frame(width: 480)
+    }
+
+    private var providerRoadmapCallout: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.blue)
+                .frame(width: 18)
+                .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Provider support")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+
+                Text("Direct LLM providers are currently OpenAI and OpenRouter. Claude, Gemini direct API, Groq, Mistral, and other native providers are planned; for now, use OpenRouter when that provider/model is available there.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button {
+                    openProviderRequestIssue()
+                } label: {
+                    Label("Request a provider", systemImage: "arrow.up.right.square")
+                        .font(.system(size: 10.5, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.blue)
+            }
+        }
+        .padding(12)
+        .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.blue.opacity(0.16), lineWidth: 1)
+        )
     }
 
     private func formRow<Content: View>(label: String, @ViewBuilder content: () -> Content) -> some View {
@@ -1797,6 +1850,7 @@ struct AddAPILanguageModelSheet: View {
             inputCostPerMillionTokensUSD: Double(inputCostPerMillionTokens.trimmingCharacters(in: .whitespacesAndNewlines)),
             outputCostPerMillionTokensUSD: Double(outputCostPerMillionTokens.trimmingCharacters(in: .whitespacesAndNewlines)),
             openRouterProviderOnly: providerId == TranscriptionProviderDescriptor.openRouter.id ? parsedOpenRouterProviderOnly() : nil,
+            supportsVision: supportsVision,
             createdAt: model?.createdAt ?? Date()
         )
     }
@@ -1849,6 +1903,29 @@ struct AddAPILanguageModelSheet: View {
                 }
                 .foregroundStyle(isOverriding ? .orange : .secondary)
             }
+        }
+    }
+
+    private func openProviderRequestIssue() {
+        var components = URLComponents(string: "https://github.com/Ljove02/AIT-AiTranscribe-MacOS/issues/new")
+        components?.queryItems = [
+            URLQueryItem(name: "title", value: "Provider request: "),
+            URLQueryItem(name: "body", value: """
+            Requested provider:
+
+            Provider API docs:
+
+            Needed for:
+            - LLM text generation
+            - Streaming
+            - Vision / screenshot context
+            - Speech-to-text
+
+            Notes:
+            """)
+        ]
+        if let url = components?.url {
+            NSWorkspace.shared.open(url)
         }
     }
 }

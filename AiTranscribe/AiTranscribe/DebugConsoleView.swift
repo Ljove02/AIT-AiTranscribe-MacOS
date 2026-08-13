@@ -2,7 +2,7 @@
  DebugConsoleView.swift
  ======================
 
- A window that displays real-time logs from the backend server.
+ A window that displays real-time logs from the app and backend server.
 
  FEATURES:
  - Scrollable log output with timestamps
@@ -16,6 +16,7 @@
 import SwiftUI
 
 struct DebugConsoleView: View {
+    @EnvironmentObject var appState: AppState
     @EnvironmentObject var backendManager: BackendManager
     @State private var autoScroll = true
     @State private var filterLevel: LogEntry.LogLevel? = nil
@@ -131,6 +132,17 @@ struct DebugConsoleView: View {
 
                 Spacer()
 
+                Button {
+                    DebugConsoleWindowController.shared.showOnboardingPreview(
+                        appState: appState,
+                        backendManager: backendManager
+                    )
+                } label: {
+                    Label("Show Introduction", systemImage: "sparkles.rectangle.stack")
+                }
+                .buttonStyle(.bordered)
+                .help("Open onboarding screens in preview mode without resetting app data")
+
                 // Backend controls
                 if backendManager.isRunning {
                     Button("Stop") {
@@ -233,6 +245,7 @@ class DebugConsoleWindowController {
     static let shared = DebugConsoleWindowController()
 
     private var window: NSWindow?
+    private var onboardingPreviewController: OnboardingWindowController?
 
     private init() {}
 
@@ -244,6 +257,7 @@ class DebugConsoleWindowController {
         }
 
         let contentView = DebugConsoleView()
+            .environmentObject(AppState.shared)
             .environmentObject(backendManager)
 
         let window = NSWindow(
@@ -253,7 +267,7 @@ class DebugConsoleWindowController {
             defer: false
         )
 
-        window.title = "Backend Console"
+        window.title = "Debug Console"
         window.contentView = NSHostingView(rootView: contentView)
         window.center()
         window.setFrameAutosaveName("DebugConsoleWindow")
@@ -264,10 +278,30 @@ class DebugConsoleWindowController {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
+
+    func showOnboardingPreview(appState: AppState, backendManager: BackendManager) {
+        if onboardingPreviewController?.isVisible == true {
+            onboardingPreviewController?.show(
+                appState: appState,
+                backendManager: backendManager,
+                previewMode: true
+            )
+            return
+        }
+
+        let controller = OnboardingWindowController()
+        onboardingPreviewController = controller
+        controller.show(
+            appState: appState,
+            backendManager: backendManager,
+            previewMode: true
+        )
+    }
 }
 
 
 #Preview {
     DebugConsoleView()
+        .environmentObject(AppState())
         .environmentObject(BackendManager())
 }

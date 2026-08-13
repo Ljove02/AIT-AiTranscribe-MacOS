@@ -322,7 +322,7 @@ AIT-AiTranscribe-MacOS/
 ### Tech Stack
 
 - **Frontend**: Swift / SwiftUI (macOS native)
-- **Backend**: Python / FastAPI (local HTTP server on port 8765)
+- **Backend**: Python / FastAPI (local HTTP server on port 8770)
 - **Transcription**: OpenAI Whisper via [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (Metal GPU), NVIDIA NeMo (Parakeet)
 - **Summarization**: Google Gemma 4 via [MLX](https://github.com/ml-explore/mlx) (Apple Silicon)
 - **Audio**: AVFoundation + CoreAudio (Swift), sounddevice (Python)
@@ -343,9 +343,12 @@ Go to System Settings > Privacy & Security > Microphone and enable AiTranscribe.
 
 **Backend won't start**
 ```bash
-lsof -i :8765              # Check if port is in use
-lsof -ti:8765 | xargs kill # Kill existing process, then restart the app
+lsof -i :8770              # Check if port is in use
+lsof -ti:8770 | xargs kill # Kill existing process, then restart the app
 ```
+
+**Local port note**
+AiTranscribe uses `127.0.0.1:8770` for its private backend. It intentionally avoids `8765` because Claude Science keeps a persistent local server on `127.0.0.1:8765` while it is open, with `8766` used by its sandbox flow. Keeping AiTranscribe on `8770` lets both apps coexist and prevents AiTranscribe's backend cleanup from touching Claude Science.
 
 **Summary setup fails**
 Make sure you have native arm64 Python 3.10+ installed (not Rosetta). Run `python3 -c "import platform; print(platform.machine())"` — it should print `arm64`.

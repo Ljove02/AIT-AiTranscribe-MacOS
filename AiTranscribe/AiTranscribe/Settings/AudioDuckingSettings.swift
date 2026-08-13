@@ -59,18 +59,7 @@ struct AudioDuckingSettings: View {
 
                     Spacer()
 
-                    Picker("", selection: $localMuteMode) {
-                        Text("Mute completely").tag("mute")
-                        Text("Lower volume").tag("lower")
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(width: 200)
-                    .onChange(of: localMuteMode) { _, newValue in
-                        DispatchQueue.main.async {
-                            appState.muteMode = newValue
-                        }
-                    }
+                    muteModePills
                 }
                 .padding(.horizontal, 10)
 
@@ -119,5 +108,32 @@ struct AudioDuckingSettings: View {
                 localDuckVolume = appState.duckVolume
             }
         }
+    }
+
+    private var muteModePills: some View {
+        HStack(spacing: 2) {
+            muteModeButton(title: "Mute completely", mode: "mute", width: 116)
+            muteModeButton(title: "Lower volume", mode: "lower", width: 108)
+        }
+        .padding(3)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+
+    private func muteModeButton(title: String, mode: String, width: CGFloat) -> some View {
+        let selected = localMuteMode == mode
+        return Button {
+            withAnimation(.easeOut(duration: 0.12)) {
+                localMuteMode = mode
+                appState.muteMode = mode
+            }
+        } label: {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(selected ? .white : .secondary)
+                .frame(width: width, height: 26)
+                .background(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear), in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }

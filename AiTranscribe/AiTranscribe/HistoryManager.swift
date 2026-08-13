@@ -79,6 +79,27 @@ final class HistoryManager {
             return []
         }
     }
+
+    /// Load all entries from a detached task so large history files do not block UI navigation.
+    func loadAllEntriesDetached() async -> [TranscriptionEntry] {
+        let fileURL = fileURL
+
+        return await Task.detached(priority: .userInitiated) {
+            guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                return []
+            }
+
+            do {
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                let data = try Data(contentsOf: fileURL)
+                return try decoder.decode([TranscriptionEntry].self, from: data)
+            } catch {
+                print("Error loading history: \(error)")
+                return []
+            }
+        }.value
+    }
     
     /// Save a new entry (adds to beginning)
     func save(_ entry: TranscriptionEntry) async {

@@ -5,11 +5,10 @@ import SwiftUI
 struct DashboardView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var sessionManager: SessionManager
-    @StateObject private var statsManager = DashboardStatsManager()
+    @ObservedObject var statsManager: DashboardStatsManager
 
-    private let topCardHeight: CGFloat = 132
-    private let weeklyRowHeight: CGFloat = 136
-    private let overviewMiniBoxHeight: CGFloat = 58
+    private let activityGridHeight: CGFloat = 252
+    private let insightCardHeight: CGFloat = 132
     private let chartRowHeight: CGFloat = 112
 
     let hasAnimated: Bool
@@ -21,22 +20,25 @@ struct DashboardView: View {
     @State private var chartsAnimated = false
 
     init(
+        statsManager: DashboardStatsManager,
         hasAnimated: Bool,
         onAnimated: @escaping () -> Void,
         onNavigateToHistory: @escaping (UUID?) -> Void,
         onNavigateToSessions: @escaping (UUID?) -> Void
     ) {
+        self.statsManager = statsManager
         self.hasAnimated = hasAnimated
         self.onAnimated = onAnimated
         self.onNavigateToHistory = onNavigateToHistory
         self.onNavigateToSessions = onNavigateToSessions
         _appeared = State(initialValue: hasAnimated)
+        _chartsAnimated = State(initialValue: hasAnimated)
     }
 
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
-                if statsManager.isLoading && !statsManager.hasLoaded {
+                if !statsManager.hasLoaded {
                     loadingState
                 } else if statsManager.stats.totalTranscriptions == 0 && statsManager.hasLoaded {
                     emptyState
@@ -54,11 +56,13 @@ struct DashboardView: View {
                 chartsAnimated = true
                 return
             }
+            chartsAnimated = false
             let entries = await appState.loadAllHistoryEntries()
             await statsManager.computeStats(from: entries, sessions: sessionManager.sessions)
-            // Trigger chart grow-in — slow enough to appreciate
-            try? await Task.sleep(for: .milliseconds(250))
-            withAnimation(.spring(duration: 1.2, bounce: 0.08)) {
+
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(120))
+            withAnimation(.easeOut(duration: 0.42)) {
                 chartsAnimated = true
             }
         }
@@ -73,16 +77,9 @@ struct DashboardView: View {
     // MARK: - Loading State
 
     private var loadingState: some View {
-        VStack(spacing: 16) {
-            Spacer().frame(height: 200)
-            ProgressView()
-                .controlSize(.small)
-            Text("Crunching your stats…")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
+        Color.clear
+            .frame(maxWidth: .infinity)
+            .frame(height: 360)
     }
 
     // MARK: - Empty State
@@ -121,17 +118,17 @@ struct DashboardView: View {
 
             Spacer().frame(height: 12)
 
-            row2_topCards
+            activityContributionCard
                 .staggerIn(index: 2, appeared: appeared)
 
             Spacer().frame(height: 12)
 
-            row3_weeklyAndInfo
+            insightCardsRow
                 .staggerIn(index: 3, appeared: appeared)
 
             Spacer().frame(height: 12)
 
-            row4_charts
+            bottomAnalyticsRow
                 .staggerIn(index: 4, appeared: appeared)
 
             Spacer(minLength: 16)
@@ -146,7 +143,7 @@ struct DashboardView: View {
                 Text("Dashboard")
                     .font(.system(size: 22, weight: .bold, design: .rounded))
 
-                Text("\(statsManager.stats.totalTranscriptions) transcriptions")
+                Text(dashboardMetadataText)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -194,10 +191,10 @@ struct DashboardView: View {
             .frame(maxWidth: .infinity)
 
             HeroStatCard(
-                value: "\(Int(statsManager.stats.averageWPM))",
-                label: "Avg WPM",
-                icon: "gauge.with.needle",
-                tint: .orange
+                value: "\(statsManager.stats.totalActiveDays)",
+                label: "Active Days",
+                icon: "calendar.badge.checkmark",
+                tint: .teal
             )
             .frame(maxWidth: .infinity)
 
@@ -211,21 +208,36 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: - Row 2: Top Model + Top Word + Activity (equal thirds)
+    // MARK: - Row 2: Activity Contribution Grid
 
-    private var row2_topCards: some View {
+    private var activityContributionCard: some View {
+        DashboardCard2(title: "Day Streak", icon: "square.grid.3x3.fill", fixedHeight: activityGridHeight) {
+            ActivityContributionPanel(
+                days: statsManager.stats.activityDays,
+                currentStreak: statsManager.stats.currentStreak,
+                longestStreak: statsManager.stats.longestStreak,
+                activeDays: statsManager.stats.totalActiveDays,
+                maxCount: statsManager.stats.activityMaxCount,
+                animated: chartsAnimated
+            )
+        }
+    }
+
+    // MARK: - Row 3: Supporting Insights
+
+    private var insightCardsRow: some View {
         HStack(spacing: 10) {
             topModelCard
                 .frame(maxWidth: .infinity)
             topWordCard
                 .frame(maxWidth: .infinity)
-            activityCard
+            speakingRhythmCard
                 .frame(maxWidth: .infinity)
         }
     }
 
     private var topModelCard: some View {
-        DashboardCard2(title: "Top Model", icon: "cube.box.fill", fixedHeight: topCardHeight) {
+        DashboardCard2(title: "Top Model", icon: "cube.box.fill", fixedHeight: insightCardHeight) {
             VStack(alignment: .leading, spacing: 8) {
                 if let model = statsManager.stats.favoriteModel {
                     Text(model.name)
@@ -274,7 +286,7 @@ struct DashboardView: View {
     }
 
     private var topWordCard: some View {
-        DashboardCard2(title: "Top Words", icon: "textformat", fixedHeight: topCardHeight) {
+        DashboardCard2(title: "Top Words", icon: "textformat", fixedHeight: insightCardHeight) {
             VStack(alignment: .leading, spacing: 6) {
                 if let topWord = statsManager.stats.topWords.first {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -318,159 +330,58 @@ struct DashboardView: View {
         }
     }
 
-    private var activityCard: some View {
-        DashboardCard2(title: "Activity", icon: "chart.bar.fill", fixedHeight: topCardHeight) {
-            VStack(spacing: 10) {
-                if !statsManager.stats.monthlyBreakdown.isEmpty {
-                    monthlyBarsView
-                }
+    private var speakingRhythmCard: some View {
+        DashboardCard2(title: "Speaking Rhythm", icon: "gauge.with.needle", fixedHeight: insightCardHeight) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    RhythmMetric(value: "\(Int(statsManager.stats.averageWPM))", label: "Avg WPM", tint: .orange)
 
-                HStack(spacing: 0) {
-                    MiniStat(value: "\(statsManager.stats.longestStreak)", label: "Streak")
-                    Spacer()
-                    MiniStat(value: "\(statsManager.stats.totalActiveDays)", label: "Days")
-                    if statsManager.stats.currentStreak > 0 {
-                        Spacer()
-                        MiniStat(value: "\(statsManager.stats.currentStreak)", label: "Current")
+                    if let peak = peakHour {
+                        RhythmMetric(value: formatHour(peak.hour), label: "Peak Hour", tint: .purple)
+                    } else {
+                        RhythmMetric(value: "-", label: "Peak Hour", tint: .purple)
                     }
+
+                    RhythmMetric(value: formatDuration(statsManager.stats.totalDurationSeconds), label: "Spoken", tint: .teal)
                 }
-            }
-        }
-    }
 
-    private var monthlyBarsView: some View {
-        let maxCount = statsManager.stats.monthlyBreakdown.map(\.count).max() ?? 1
-        return HStack(alignment: .bottom, spacing: 6) {
-            ForEach(Array(statsManager.stats.monthlyBreakdown.enumerated()), id: \.offset) { _, item in
-                VStack(spacing: 3) {
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.7))
-                        .frame(height: chartsAnimated ? max(4, CGFloat(item.count) / CGFloat(maxCount) * 36) : 2)
+                if let busiest = statsManager.stats.busiestDay {
+                    HStack(spacing: 6) {
+                        Image(systemName: "flame.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.orange.opacity(0.85))
 
-                    Text(item.month)
-                        .font(.system(size: 8, weight: .medium))
-                        .foregroundStyle(.tertiary)
-                }
-                .frame(maxWidth: .infinity)
-            }
-        }
-        .frame(height: 48)
-    }
+                        Text("Busiest day \(formatDateString(busiest.date))")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
 
-    // MARK: - Row 3: Weekly Pattern + 4 Overview Boxes (equal halves)
+                        Spacer(minLength: 4)
 
-    private var row3_weeklyAndInfo: some View {
-        HStack(spacing: 10) {
-            weeklyPatternCard
-                .frame(maxWidth: .infinity)
-            overviewGrid
-                .frame(maxWidth: .infinity)
-                .frame(height: weeklyRowHeight)
-        }
-    }
-
-    private var weeklyPatternCard: some View {
-        DashboardCard2(title: "Weekly Pattern", icon: "calendar", fixedHeight: weeklyRowHeight) {
-            let maxCount = statsManager.stats.dayOfWeekCounts.map(\.count).max() ?? 1
-            HStack(alignment: .bottom, spacing: 5) {
-                ForEach(Array(statsManager.stats.dayOfWeekCounts.enumerated()), id: \.offset) { idx, item in
-                    VStack(spacing: 4) {
-                        Text("\(item.count)")
-                            .font(.system(size: 8, weight: .medium, design: .monospaced))
+                        Text("\(busiest.count) entries")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundStyle(.tertiary)
-
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .fill(weekdayColor(idx).opacity(0.7))
-                            .frame(height: chartsAnimated ? max(6, CGFloat(item.count) / CGFloat(maxCount) * 50) : 2)
-
-                        Text(item.day)
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.secondary)
                     }
-                    .frame(maxWidth: .infinity)
                 }
             }
-            .frame(height: 76)
         }
-    }
-
-    private func weekdayColor(_ index: Int) -> Color {
-        index >= 5 ? .orange : .accentColor
-    }
-
-    /// 4 separate mini boxes in a 2×2 grid
-    private var overviewGrid: some View {
-        HStack(spacing: 8) {
-            VStack(spacing: 12) {
-                OverviewMiniBox(
-                    title: "Using Since",
-                    icon: "calendar.badge.clock"
-                ) {
-                    if let since = statsManager.stats.usingSinceDate {
-                        Text(since, style: .date)
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-
-                        Text(timeAgoString(from: since))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(height: overviewMiniBoxHeight)
-
-                OverviewMiniBox(
-                    title: "Busiest Day",
-                    icon: "flame.fill"
-                ) {
-                    if let busiest = statsManager.stats.busiestDay {
-                        Text(formatDateString(busiest.date))
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-
-                        Text("\(busiest.count) transcriptions")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(height: overviewMiniBoxHeight)
-            }
-            .frame(maxWidth: .infinity)
-
-            VStack(spacing: 12) {
-                OverviewMiniBox(
-                    title: "Peak Hour",
-                    icon: "clock.fill"
-                ) {
-                    if let peak = statsManager.stats.hourlyBreakdown.max(by: { $0.count < $1.count }), peak.count > 0 {
-                        Text(formatHour(peak.hour))
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-
-                        Text("\(peak.count) transcriptions")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(height: overviewMiniBoxHeight)
-
-                OverviewMiniBox(
-                    title: "Total Spoken",
-                    icon: "waveform"
-                ) {
-                    Text(formatDuration(statsManager.stats.totalDurationSeconds))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-
-                    Text("recording time")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(height: overviewMiniBoxHeight)
-            }
-            .frame(maxWidth: .infinity)
-        }
-        .padding(.vertical, 4)
     }
 
     // MARK: - Row 4: Chart Grid
+
+    private var bottomAnalyticsRow: some View {
+        HStack(spacing: 10) {
+            hourlyCard
+                .frame(maxWidth: .infinity)
+
+            recordingDistributionCard
+                .frame(maxWidth: .infinity)
+
+            if statsManager.stats.apiCostItemCount > 0 {
+                apiCostCard
+                    .frame(maxWidth: .infinity)
+            }
+        }
+    }
 
     private var row4_charts: some View {
         VStack(spacing: 10) {
@@ -484,7 +395,7 @@ struct DashboardView: View {
             HStack(spacing: 10) {
                 apiCostCard
                     .frame(maxWidth: .infinity)
-                lengthCard
+                recordingDistributionCard
                     .frame(maxWidth: .infinity)
             }
         }
@@ -602,8 +513,8 @@ struct DashboardView: View {
         }
     }
 
-    private var lengthCard: some View {
-        DashboardCard2(title: "Length Distribution", icon: "ruler", fixedHeight: chartRowHeight) {
+    private var recordingDistributionCard: some View {
+        DashboardCard2(title: "Recording Distribution", icon: "ruler", fixedHeight: chartRowHeight) {
             let maxCount = statsManager.stats.lengthDistribution.map(\.count).max() ?? 1
             VStack(spacing: 6) {
                 ForEach(Array(statsManager.stats.lengthDistribution.enumerated()), id: \.offset) { _, bucket in
@@ -657,6 +568,30 @@ struct DashboardView: View {
         return String(format: "$%.2f", value)
     }
 
+    private var dashboardMetadataText: String {
+        var parts: [String] = ["\(statsManager.stats.totalTranscriptions) transcriptions"]
+
+        if let since = statsManager.stats.usingSinceDate {
+            parts.append("Using since \(formatMonthDay(since))")
+        }
+
+        parts.append("\(statsManager.stats.totalActiveDays) active days")
+
+        if let peak = peakHour {
+            parts.append("Peak \(formatHour(peak.hour))")
+        }
+
+        return parts.joined(separator: " / ")
+    }
+
+    private var peakHour: (hour: Int, count: Int)? {
+        guard let peak = statsManager.stats.hourlyBreakdown.max(by: { $0.count < $1.count }),
+              peak.count > 0 else {
+            return nil
+        }
+        return peak
+    }
+
     private func formatDateString(_ dateStr: String) -> String {
         let inputFormatter = DateFormatter()
         inputFormatter.dateFormat = "yyyy-MM-dd"
@@ -664,6 +599,12 @@ struct DashboardView: View {
         let outputFormatter = DateFormatter()
         outputFormatter.dateFormat = "MMM d"
         return outputFormatter.string(from: date)
+    }
+
+    private func formatMonthDay(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter.string(from: date)
     }
 
     private func shortenModelName(_ name: String) -> String {
@@ -699,6 +640,290 @@ struct DashboardView: View {
             return "\(months)mo, \(days)d ago"
         }
         return "\(days) day\(days == 1 ? "" : "s") ago"
+    }
+}
+
+// MARK: - Activity Contribution Panel
+
+struct ActivityContributionPanel: View {
+    let days: [DashboardActivityDay]
+    let currentStreak: Int
+    let longestStreak: Int
+    let activeDays: Int
+    let maxCount: Int
+    let animated: Bool
+
+    private let weekCount = 52
+    private let dayCount = 7
+    private let labelWidth: CGFloat = 25
+    private let cellSpacing: CGFloat = 4
+
+    private var weeks: [[DashboardActivityDay]] {
+        guard !days.isEmpty else { return [] }
+        return stride(from: 0, to: days.count, by: dayCount).map { start in
+            Array(days[start..<min(start + dayCount, days.count)])
+        }
+    }
+
+    var body: some View {
+        let weekGroups = weeks
+
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline, spacing: 16) {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    Text("\(currentStreak)")
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                        .contentTransition(.numericText())
+
+                    Text("day streak")
+                        .font(.system(size: 18, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.primary.opacity(0.9))
+                }
+
+                Spacer()
+
+                HStack(spacing: 16) {
+                    ActivityInlineStat(value: "\(longestStreak)", label: "Longest")
+                    ActivityInlineStat(value: "\(activeDays)", label: "Active days")
+                    ActivityInlineStat(value: "\(maxCount)", label: "Best day")
+                }
+            }
+
+            GeometryReader { proxy in
+                let cellSize = contributionCellSize(for: proxy.size.width)
+                let gridWidth = CGFloat(weekCount) * cellSize + CGFloat(weekCount - 1) * cellSpacing
+
+                HStack {
+                    Spacer(minLength: 0)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        monthLabels(cellSize: cellSize, weeks: weekGroups)
+                            .frame(width: labelWidth + gridWidth, height: 14, alignment: .leading)
+
+                        HStack(alignment: .top, spacing: 7) {
+                            weekdayLabels(cellSize: cellSize)
+
+                            HStack(alignment: .top, spacing: cellSpacing) {
+                                ForEach(Array(weekGroups.prefix(weekCount).enumerated()), id: \.offset) { weekIndex, week in
+                                    VStack(spacing: cellSpacing) {
+                                        ForEach(Array(week.enumerated()), id: \.element.id) { dayIndex, day in
+                                            ContributionCell(
+                                                day: day,
+                                                maxCount: maxCount,
+                                                size: cellSize,
+                                                animated: animated,
+                                                index: weekIndex * dayCount + dayIndex
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        HStack(spacing: 8) {
+                            Text("Less")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.tertiary)
+
+                            HStack(spacing: 4) {
+                                ForEach(0..<5, id: \.self) { level in
+                                    RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                        .fill(ContributionCell.color(for: level, maxLevel: 4))
+                                        .frame(width: 10, height: 10)
+                                }
+                            }
+
+                            Text("More")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.tertiary)
+
+                            Spacer()
+
+                            Text("\(activeDays) days with activity")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
+                        .padding(.leading, labelWidth + 7)
+                        .padding(.top, 1)
+                    }
+                    .frame(width: labelWidth + 7 + gridWidth, alignment: .leading)
+
+                    Spacer(minLength: 0)
+                }
+            }
+            .frame(height: 150)
+        }
+    }
+
+    private func contributionCellSize(for width: CGFloat) -> CGFloat {
+        let availableWidth = max(0, width - labelWidth - 7)
+        let spacingWidth = CGFloat(weekCount - 1) * cellSpacing
+        let rawSize = (availableWidth - spacingWidth) / CGFloat(weekCount)
+        return min(13, max(6, floor(rawSize)))
+    }
+
+    private func weekdayLabels(cellSize: CGFloat) -> some View {
+        let labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+        return VStack(alignment: .trailing, spacing: cellSpacing) {
+            ForEach(Array(labels.enumerated()), id: \.offset) { _, label in
+                Text(label)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: labelWidth, height: cellSize, alignment: .trailing)
+            }
+        }
+    }
+
+    private func monthLabels(cellSize: CGFloat, weeks: [[DashboardActivityDay]]) -> some View {
+        let labels = contributionMonthLabels(weeks: weeks)
+
+        return ZStack(alignment: .topLeading) {
+            ForEach(labels, id: \.weekIndex) { item in
+                Text(item.label)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .offset(x: labelWidth + 7 + CGFloat(item.weekIndex) * (cellSize + cellSpacing))
+            }
+        }
+    }
+
+    private func contributionMonthLabels(weeks: [[DashboardActivityDay]]) -> [(weekIndex: Int, label: String)] {
+        let calendar = Calendar.current
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM"
+
+        return weeks.prefix(weekCount).enumerated().compactMap { index, week in
+            guard let firstDay = week.first else { return nil }
+            let day = calendar.component(.day, from: firstDay.date)
+            if index == 0 || day <= 7 {
+                return (index, formatter.string(from: firstDay.date))
+            }
+            return nil
+        }
+    }
+}
+
+struct ContributionCell: View {
+    let day: DashboardActivityDay
+    let maxCount: Int
+    let size: CGFloat
+    let animated: Bool
+    let index: Int
+
+    @State private var isHovered = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+            .fill(fillColor)
+            .frame(width: size, height: size)
+            .overlay(
+                RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                    .strokeBorder(.white.opacity(day.hasActivity ? 0.08 : 0.025), lineWidth: 0.5)
+            )
+            .scaleEffect(isHovered ? 1.28 : (animated ? 1 : 0.65))
+            .opacity(animated ? 1 : 0)
+            .shadow(color: day.hasActivity ? fillColor.opacity(isHovered ? 0.45 : 0.18) : .clear, radius: isHovered ? 7 : 3)
+            .animation(.spring(duration: 0.18, bounce: 0.16), value: isHovered)
+            .animation(.spring(duration: 0.55, bounce: 0.12).delay(Double(index % 42) * 0.01), value: animated)
+            .onHover { hovering in
+                isHovered = hovering
+            }
+            .help(helpText)
+            .accessibilityLabel(accessibilityText)
+    }
+
+    private var fillColor: Color {
+        guard day.hasActivity, maxCount > 0 else {
+            return Color.white.opacity(0.055)
+        }
+
+        let ratio = Double(day.transcriptionCount) / Double(maxCount)
+        switch ratio {
+        case 0.75...:
+            return Color(red: 0.20, green: 0.82, blue: 0.35)
+        case 0.50..<0.75:
+            return Color(red: 0.12, green: 0.62, blue: 0.30)
+        case 0.25..<0.50:
+            return Color(red: 0.08, green: 0.42, blue: 0.25)
+        default:
+            return Color(red: 0.05, green: 0.25, blue: 0.18)
+        }
+    }
+
+    private var helpText: String {
+        guard day.hasActivity else {
+            return "\(day.displayDate)\nNo transcriptions"
+        }
+
+        let transcriptionLabel = day.transcriptionCount == 1 ? "transcription" : "transcriptions"
+        return "\(day.displayDate)\n\(day.transcriptionCount) \(transcriptionLabel)\n\(day.wordCount) words"
+    }
+
+    private var accessibilityText: String {
+        day.hasActivity ? helpText.replacingOccurrences(of: "\n", with: ", ") : helpText
+    }
+
+    static func color(for level: Int, maxLevel: Int) -> Color {
+        guard level > 0 else { return Color.white.opacity(0.055) }
+        let ratio = Double(level) / Double(max(maxLevel, 1))
+        switch ratio {
+        case 0.75...:
+            return Color(red: 0.20, green: 0.82, blue: 0.35)
+        case 0.50..<0.75:
+            return Color(red: 0.12, green: 0.62, blue: 0.30)
+        case 0.25..<0.50:
+            return Color(red: 0.08, green: 0.42, blue: 0.25)
+        default:
+            return Color(red: 0.05, green: 0.25, blue: 0.18)
+        }
+    }
+}
+
+struct ActivityInlineStat: View {
+    let value: String
+    let label: String
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 2) {
+            Text(value)
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundStyle(.primary)
+
+            Text(label)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.tertiary)
+        }
+    }
+}
+
+struct RhythmMetric: View {
+    let value: String
+    let label: String
+    let tint: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(value)
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(tint.opacity(0.75))
+                    .frame(width: 5, height: 5)
+
+                Text(label)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

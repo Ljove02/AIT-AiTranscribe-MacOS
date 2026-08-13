@@ -7,6 +7,7 @@
  Inspired by Osados-style compact utility panels.
  */
 
+import AppKit
 import SwiftUI
 import CoreAudio
 
@@ -22,11 +23,19 @@ struct MenuBarView: View {
     @State private var isHoveredQuit = false
     @State private var isHistoryExpanded = false
     @State private var copiedHistoryEntryId: UUID?
+    @State private var copiedMeetingURLKey: String?
+    @AppStorage("selectedTranscriptionProviderId") private var selectedTranscriptionProviderId = TranscriptionProviderDescriptor.localBackend.id
+    @ObservedObject private var meetingMonitor = MeetingPresenceMonitor.shared
 
     var body: some View {
         VStack(spacing: 0) {
             // ── Header: Identity + Status ──
             headerSection
+
+            if let prompt = meetingMonitor.currentPrompt, canStartSessionFromMeetingReminder {
+                meetingReminderCard(prompt)
+                    .padding(.top, 8)
+            }
 
             // ── Status Strip ──
             statusStrip
@@ -68,13 +77,8 @@ struct MenuBarView: View {
                 HStack(spacing: 6) {
                     Text("AiTranscribe")
                         .font(.system(size: 14, weight: .semibold, design: .rounded))
-
-                    Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.5")")
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(.white.opacity(0.06), in: Capsule())
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
 
                 HStack(spacing: 4) {
@@ -95,19 +99,19 @@ struct MenuBarView: View {
     }
 
     private var headerActions: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 6) {
             Button {
                 openAndFocusSettings()
             } label: {
                 Image(systemName: "gear")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(isHoveredSettings ? .primary : .secondary)
-                    .frame(width: 24, height: 24)
+                    .frame(width: 28, height: 28)
                     .background(
                         isHoveredSettings
                             ? AnyShapeStyle(.white.opacity(0.08))
                             : AnyShapeStyle(.clear),
-                        in: .rect(cornerRadius: 6, style: .continuous)
+                        in: .rect(cornerRadius: 8, style: .continuous)
                     )
             }
             .buttonStyle(.plain)
@@ -120,14 +124,14 @@ struct MenuBarView: View {
                 NSApplication.shared.terminate(nil)
             } label: {
                 Image(systemName: "power")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(isHoveredQuit ? .red : .secondary)
-                    .frame(width: 24, height: 24)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(isHoveredQuit ? .white : .red)
+                    .frame(width: 28, height: 28)
                     .background(
                         isHoveredQuit
-                            ? AnyShapeStyle(.red.opacity(0.1))
-                            : AnyShapeStyle(.clear),
-                        in: .rect(cornerRadius: 6, style: .continuous)
+                            ? AnyShapeStyle(.red.opacity(0.82))
+                            : AnyShapeStyle(.red.opacity(0.10)),
+                        in: .rect(cornerRadius: 8, style: .continuous)
                     )
             }
             .buttonStyle(.plain)
@@ -142,6 +146,8 @@ struct MenuBarView: View {
 
     private var statusStrip: some View {
         HStack(spacing: 8) {
+            versionChip
+
             StatusChip(
                 icon: "server.rack",
                 label: appState.isServerConnected ? "Backend" : "Offline",
@@ -149,7 +155,83 @@ struct MenuBarView: View {
             )
 
             Spacer()
+
+            menuModeSwitch
         }
+    }
+
+    private var versionChip: some View {
+        Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.5")")
+            .font(.system(size: 9, weight: .medium, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(.white.opacity(0.06), in: Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
+            )
+    }
+
+    private var menuModeSwitch: some View {
+        HStack(spacing: 2) {
+            providerModeButton(
+                title: "Local",
+                isSelected: isLocalProviderMode,
+                tint: .green
+            ) {
+                selectedTranscriptionProviderId = TranscriptionProviderDescriptor.localBackend.id
+            }
+
+            providerModeButton(
+                title: "Public",
+                isSelected: !isLocalProviderMode,
+                tint: .blue
+            ) {
+                if selectedTranscriptionProviderId == TranscriptionProviderDescriptor.localBackend.id {
+                    selectedTranscriptionProviderId = APITranscriptionModelStore.load().first?.providerId
+                        ?? TranscriptionProviderDescriptor.openAI.id
+                }
+            }
+        }
+        .padding(2)
+        .background(.white.opacity(0.06), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+        .opacity(providerModeSwitchDisabled ? 0.48 : 1)
+        .disabled(providerModeSwitchDisabled)
+        .help(providerModeSwitchDisabled ? "Finish the current recording before switching mode" : "Switch transcription mode")
+    }
+
+    private func providerModeButton(
+        title: String,
+        isSelected: Bool,
+        tint: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            withAnimation(.spring(duration: 0.24, bounce: 0.14)) {
+                action()
+            }
+        } label: {
+            Text(title)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(isSelected ? .white : .secondary)
+                .padding(.horizontal, 7)
+                .frame(height: 20)
+                .background(isSelected ? tint : .clear, in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var isLocalProviderMode: Bool {
+        selectedTranscriptionProviderId == TranscriptionProviderDescriptor.localBackend.id
+    }
+
+    private var providerModeSwitchDisabled: Bool {
+        appState.isRecording ||
+        appState.isQuickRecordingTransitioning ||
+        appState.isQuickTranscriptionInFlight ||
+        sessionManager.isSessionRecording
     }
 
     // MARK: - Controls Section
@@ -307,6 +389,113 @@ struct MenuBarView: View {
         }
     }
 
+    private var canStartSessionFromMeetingReminder: Bool {
+        appState.isServerConnected &&
+            !appState.isRecording &&
+            !appState.isQuickRecordingTransitioning &&
+            !appState.isQuickTranscriptionInFlight &&
+            !sessionManager.isSessionRecording
+    }
+
+    private func meetingReminderCard(_ prompt: MeetingReminder) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 8) {
+                Image(systemName: prompt.provider.symbolName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(promptTint(prompt))
+                    .frame(width: 24, height: 24)
+                    .background(promptTint(prompt).opacity(0.14), in: .circle)
+                    .overlay(
+                        Circle()
+                            .strokeBorder(promptTint(prompt).opacity(0.24), lineWidth: 0.5)
+                    )
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(prompt.headline)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    HStack(spacing: 6) {
+                        Text(prompt.detail)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        Text(prompt.contextLabel)
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(promptTint(prompt))
+                            .lineLimit(1)
+                            .padding(.horizontal, 5)
+                            .frame(height: 15)
+                            .background(promptTint(prompt).opacity(0.12), in: Capsule())
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(promptTint(prompt).opacity(0.16), lineWidth: 0.5)
+                            )
+                    }
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 4)
+
+                Button {
+                    meetingMonitor.dismissCurrentPrompt()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.red.opacity(0.85))
+                        .frame(width: 22, height: 22)
+                        .background(.red.opacity(0.10), in: .circle)
+                }
+                .buttonStyle(.plain)
+                .help("Dismiss meeting reminder")
+            }
+
+            HStack(spacing: 7) {
+                meetingReminderPillButton(
+                    title: "Record session",
+                    icon: "waveform.badge.plus",
+                    tint: promptTint(prompt),
+                    isProminent: true
+                ) {
+                    Task {
+                        let started = await sessionManager.startSessionRecording(
+                            micDeviceId: appState.selectedDeviceId
+                        )
+                        if started {
+                            meetingMonitor.markStartedFromPrompt()
+                        }
+                    }
+                }
+
+                if let meetingURL = prompt.meetingURL {
+                    meetingReminderPillButton(
+                        title: copiedMeetingURLKey == prompt.suppressionKey ? "Copied" : "Copy link",
+                        icon: copiedMeetingURLKey == prompt.suppressionKey ? "checkmark" : "link",
+                        tint: promptTint(prompt),
+                        isProminent: false
+                    ) {
+                        copyMeetingURL(meetingURL, key: prompt.suppressionKey)
+                    }
+                }
+
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(.thinMaterial, in: .rect(cornerRadius: 14, style: .continuous))
+        .background(promptTint(prompt).opacity(0.045), in: .rect(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(.white.opacity(0.12), lineWidth: 0.5)
+        )
+        .task(id: prompt.id) {
+            MeetingReminderCoordinator.shared.presentFloatingPromptIfNeeded()
+        }
+    }
+
     // MARK: - Microphone Row
 
     private var microphoneRow: some View {
@@ -366,10 +555,20 @@ struct MenuBarView: View {
     // MARK: - Recent History
 
     private var visiblePolishPresets: [PolishPreset] {
-        guard hasAnyConfiguredLanguageModelKey else {
+        guard hasUsablePolishModel else {
             return []
         }
         return appState.polishPresets.filter { $0.isEnabled && $0.showInMenu }
+    }
+
+    private var hasUsablePolishModel: Bool {
+        selectedTranscriptionProviderId == TranscriptionProviderDescriptor.localBackend.id
+            ? hasDownloadedLocalLanguageModel
+            : hasAnyConfiguredLanguageModelKey
+    }
+
+    private var hasDownloadedLocalLanguageModel: Bool {
+        appState.availableSummaryModels.contains(where: \.downloaded)
     }
 
     private var hasAnyConfiguredLanguageModelKey: Bool {
@@ -616,6 +815,59 @@ struct MenuBarView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             if copiedHistoryEntryId == entry.id {
                 copiedHistoryEntryId = nil
+            }
+        }
+    }
+
+    private func promptTint(_ prompt: MeetingReminder) -> Color {
+        prompt.provider == .googleMeet ? .green : .blue
+    }
+
+    private func meetingReminderPillButton(
+        title: String,
+        icon: String,
+        tint: Color,
+        isProminent: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 9, weight: .semibold))
+
+                Text(title)
+                    .font(.system(size: 10, weight: .semibold))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(isProminent ? .white : .secondary)
+            .padding(.horizontal, isProminent ? 10 : 9)
+            .frame(height: 27)
+            .background(
+                isProminent
+                    ? AnyShapeStyle(tint.opacity(0.72))
+                    : AnyShapeStyle(.white.opacity(0.055)),
+                in: Capsule()
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(
+                        isProminent ? tint.opacity(0.32) : .white.opacity(0.08),
+                        lineWidth: 0.5
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .help(title)
+    }
+
+    private func copyMeetingURL(_ meetingURL: String, key: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(meetingURL, forType: .string)
+        copiedMeetingURLKey = key
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            if copiedMeetingURLKey == key {
+                copiedMeetingURLKey = nil
             }
         }
     }

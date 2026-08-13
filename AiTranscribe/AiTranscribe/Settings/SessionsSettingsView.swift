@@ -6,6 +6,7 @@ import ScreenCaptureKit
 
 struct SessionsSettingsView: View {
     @EnvironmentObject var sessionManager: SessionManager
+    @EnvironmentObject var appState: AppState
     var onNavigateToModels: ((ModelMode) -> Void)? = nil
 
     let hasAnimated: Bool
@@ -21,12 +22,33 @@ struct SessionsSettingsView: View {
     @State private var isSelectingSessions = false
     @State private var selectedSessionIds: Set<UUID> = []
     @State private var showAudioMixSheet = false
+    @State private var showAutomationSheet = false
     @State private var selectedDate: Date? = nil
     @State private var showDatePicker = false
+    @State private var apiTranscriptionModels: [APITranscriptionModel] = APITranscriptionModelStore.load()
+    @State private var apiLanguageModels: [APILanguageModel] = APILanguageModelStore.load()
+    @State private var automationSelectedPresetIds: Set<String> = Set(
+        UserDefaults.standard.stringArray(forKey: SessionAutomationPreferences.summaryPresetIdsKey)
+            ?? [SessionSummaryPreset.meetingNotes.rawValue]
+    )
 
     @AppStorage("hideSessionInfoBanner") private var hideBanner = false
     @AppStorage(SessionAudioMixPreferences.micTrimDBKey) private var sessionMicTrimDB = SessionAudioMixPreferences.defaultMicTrimDB
     @AppStorage(SessionAudioMixPreferences.systemTrimDBKey) private var sessionSystemTrimDB = SessionAudioMixPreferences.defaultSystemTrimDB
+    @AppStorage(SessionAutomationPreferences.autoTranscribeKey) private var automationAutoTranscribe = false
+    @AppStorage(SessionAutomationPreferences.transcriptionSourceKey) private var automationTranscriptionSource = SessionAutomationSource.local.rawValue
+    @AppStorage(SessionAutomationPreferences.localTranscriptionModelKey) private var automationLocalTranscriptionModelId = "parakeet-v2"
+    @AppStorage(SessionAutomationPreferences.transcriptionProviderKey) private var automationTranscriptionProviderId = TranscriptionProviderDescriptor.openAI.id
+    @AppStorage(SessionAutomationPreferences.transcriptionModelKey) private var automationTranscriptionModelId = TranscriptionModelDescriptor.openAIModels[0].id
+    @AppStorage(SessionAutomationPreferences.localRamBudgetGBKey) private var automationLocalRamBudgetGB = 4.0
+    @AppStorage(SessionAutomationPreferences.publicBatchTargetKey) private var automationPublicBatchTarget = 0
+    @AppStorage(SessionAutomationPreferences.autoSummarizeKey) private var automationAutoSummarize = false
+    @AppStorage(SessionAutomationPreferences.summarySourceKey) private var automationSummarySource = SessionAutomationSource.local.rawValue
+    @AppStorage(SessionAutomationPreferences.localSummaryModelKey) private var automationLocalSummaryModelId = "gemma-4-e2b-it-4bit"
+    @AppStorage(SessionAutomationPreferences.summaryProviderKey) private var automationSummaryProviderId = TranscriptionProviderDescriptor.openAI.id
+    @AppStorage(SessionAutomationPreferences.summaryModelKey) private var automationSummaryModelId = APILanguageModelStore.defaultModels[0].modelId
+    @AppStorage(SessionAutomationPreferences.summaryLengthOptionKey) private var automationSummaryLengthOption = SummaryLengthOption.medium.rawValue
+    @AppStorage(SessionAutomationPreferences.summaryCustomWordsKey) private var automationSummaryCustomWords = SummaryLengthOption.custom.defaultWordTarget
 
     /// Animation state
     @State private var appeared: Bool
@@ -64,6 +86,60 @@ struct SessionsSettingsView: View {
     private var uniqueDates: [Date] {
         let dates = Set(sessionManager.sessions.map { Calendar.current.startOfDay(for: $0.createdAt) })
         return dates.sorted(by: >)
+    }
+
+    private var localSessionModels: [ModelInfoResponse] {
+        appState.availableModels.filter { $0.downloaded == true && $0.sessionCompatible }
+    }
+
+    private var selectedLocalSessionModel: ModelInfoResponse? {
+        localSessionModels.first { $0.id == automationLocalTranscriptionModelId }
+            ?? localSessionModels.first
+    }
+
+    private var publicSessionModels: [APITranscriptionModel] {
+        apiTranscriptionModels.filter {
+            APITranscriptionModelStore.isSupportedModel($0.modelId, providerId: $0.providerId)
+        }
+    }
+
+    private var selectedPublicSessionModel: APITranscriptionModel? {
+        publicSessionModels.first {
+            $0.providerId == automationTranscriptionProviderId &&
+                $0.modelId == automationTranscriptionModelId
+        } ?? publicSessionModels.first
+    }
+
+    private var summaryModels: [SummaryModelInfoResponse] {
+        appState.availableSummaryModels.filter(\.downloaded)
+    }
+
+    private var selectedLocalSummaryModel: SummaryModelInfoResponse? {
+        summaryModels.first { $0.id == automationLocalSummaryModelId }
+    }
+
+    private var selectedPublicSummaryModel: APILanguageModel? {
+        apiLanguageModels.first {
+            $0.providerId == automationSummaryProviderId &&
+                $0.modelId == automationSummaryModelId
+        } ?? apiLanguageModels.first
+    }
+
+    private var automationSummaryPresets: [SummaryPresetDefinition] {
+        appState.summaryPresetDefinitions.filter {
+            !$0.instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    private var automationSummaryLength: SummaryLengthOption {
+        get { SummaryLengthOption(rawValue: automationSummaryLengthOption) ?? .medium }
+        nonmutating set { automationSummaryLengthOption = newValue.rawValue }
+    }
+
+    private var automationTargetSummaryWords: Int {
+        automationSummaryLength == .custom
+            ? max(120, automationSummaryCustomWords)
+            : automationSummaryLength.defaultWordTarget
     }
 
     var body: some View {
@@ -165,6 +241,14 @@ struct SessionsSettingsView: View {
                 latestAudioURL: latestSessionAudioURL
             )
         }
+        .sheet(isPresented: $showAutomationSheet) {
+            sessionAutomationSettingsSheet
+        }
+        .task {
+            apiTranscriptionModels = APITranscriptionModelStore.load()
+            apiLanguageModels = APILanguageModelStore.load()
+            normalizeAutomationSelections()
+        }
     }
 
     // MARK: - Header
@@ -236,6 +320,51 @@ struct SessionsSettingsView: View {
         }
     }
 
+    private var automationDockControl: some View {
+        let activeCount = sessionManager.sessions.filter { $0.automation?.isActive == true }.count
+        let statusText = activeCount > 0 ? "\(activeCount) active" : (automationAutoTranscribe ? "On" : "Off")
+        let tint: Color = activeCount > 0 ? .orange : (automationAutoTranscribe ? .green : .secondary)
+
+        return HStack(spacing: 0) {
+            Button {
+                showAutomationSheet = true
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(tint)
+
+                    Text("Auto Process")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    Text(statusText)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(tint)
+                }
+                .padding(.leading, 10)
+                .padding(.trailing, 8)
+                .padding(.vertical, 5)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(width: 1, height: 20)
+
+            Toggle("", isOn: $automationAutoTranscribe)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
+                .padding(.horizontal, 7)
+        }
+        .background(.thinMaterial, in: Capsule())
+        .overlay(
+            Capsule()
+                .strokeBorder(tint.opacity(automationAutoTranscribe || activeCount > 0 ? 0.24 : 0.08), lineWidth: 0.6)
+        )
+    }
+
     // MARK: - Permission Pills
 
     private var permissionPills: some View {
@@ -287,6 +416,8 @@ struct SessionsSettingsView: View {
             }
 
             Spacer()
+
+            automationDockControl
         }
     }
 
@@ -353,6 +484,551 @@ struct SessionsSettingsView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(.blue.opacity(0.15), lineWidth: 0.5)
         )
+    }
+
+    // MARK: - Session Automation
+
+    private var sessionAutomationSettingsSheet: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(Color.accentColor.opacity(0.14))
+                        .frame(width: 42, height: 42)
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text("Session Auto Processing")
+                            .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        automationStatusPill
+                    }
+                    Text("Choose what happens after each new session recording ends.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Toggle("", isOn: $automationAutoTranscribe)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+            .padding(20)
+
+            Divider()
+
+            ScrollView {
+                sessionAutomationPanel
+                    .padding(20)
+            }
+            .scrollIndicators(.automatic)
+
+            Divider()
+
+            HStack {
+                Text(automationAutoTranscribe ? "New sessions will be processed automatically." : "Automation is off for new sessions.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+
+                Spacer()
+
+                Button("Done") {
+                    showAutomationSheet = false
+                }
+                .buttonStyle(.plain)
+                .modifier(SessionSheetActionPillStyle(tint: .accentColor, prominent: true))
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(20)
+        }
+        .frame(width: 680, height: automationAutoSummarize && automationAutoTranscribe ? 620 : 430)
+    }
+
+    private var sessionAutomationPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if automationAutoTranscribe {
+                VStack(alignment: .leading, spacing: 12) {
+                    automationTranscriptionControls
+
+                    Divider().opacity(0.2)
+
+                    HStack(alignment: .center, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Summarize after transcription")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("Runs only after the automatic transcript succeeds.")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $automationAutoSummarize)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+
+                    if automationAutoSummarize {
+                        automationSummaryControls
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("After session ends")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    Text("Turn on automation to transcribe new sessions automatically, then optionally generate summaries.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(Color.primary.opacity(0.045), in: .rect(cornerRadius: 12, style: .continuous))
+            }
+        }
+        .padding(14)
+        .background(.thinMaterial, in: .rect(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(automationAutoTranscribe ? 0.18 : 0.08), lineWidth: 0.5)
+        )
+    }
+
+    private var automationStatusPill: some View {
+        let activeCount = sessionManager.sessions.filter { $0.automation?.isActive == true }.count
+        let label: String = {
+            if activeCount > 0 { return "\(activeCount) active" }
+            return automationAutoTranscribe ? "Enabled" : "Off"
+        }()
+        let tint: Color = activeCount > 0 ? .orange : (automationAutoTranscribe ? .green : .secondary)
+
+        return HStack(spacing: 4) {
+            Circle()
+                .fill(tint)
+                .frame(width: 5, height: 5)
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(tint.opacity(0.12), in: Capsule())
+    }
+
+    private func automationSourcePills(selection: Binding<String>) -> some View {
+        HStack(spacing: 2) {
+            ForEach(SessionAutomationSource.allCases) { source in
+                let selected = selection.wrappedValue == source.rawValue
+                Button {
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        selection.wrappedValue = source.rawValue
+                    }
+                } label: {
+                    Text(source.displayName)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(selected ? .white : .secondary)
+                        .frame(width: source == .local ? 78 : 96, height: 26)
+                        .background(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+
+    private var publicTranscriptionModelMenu: some View {
+        Menu {
+            ForEach(publicSessionModels) { model in
+                Button("\(model.displayName) · \(model.providerName)") {
+                    automationTranscriptionProviderId = model.providerId
+                    automationTranscriptionModelId = model.modelId
+                }
+            }
+        } label: {
+            automationSelectPill(
+                title: selectedPublicSessionModel.map { "\($0.displayName) · \($0.providerName)" } ?? "Choose API transcription model",
+                icon: "waveform",
+                width: 330
+            )
+        }
+        .menuStyle(.borderlessButton)
+    }
+
+    private var localTranscriptionModelMenu: some View {
+        Menu {
+            ForEach(localSessionModels) { model in
+                Button(model.displayName) {
+                    automationLocalTranscriptionModelId = model.id
+                }
+            }
+        } label: {
+            automationSelectPill(
+                title: selectedLocalSessionModel?.displayName ?? "Choose local transcription model",
+                icon: "externaldrive.fill",
+                width: 330
+            )
+        }
+        .menuStyle(.borderlessButton)
+    }
+
+    private var publicSummaryModelMenu: some View {
+        Menu {
+            ForEach(apiLanguageModels) { model in
+                Button("\(model.displayName) · \(model.providerName)") {
+                    automationSummaryProviderId = model.providerId
+                    automationSummaryModelId = model.modelId
+                }
+            }
+        } label: {
+            automationSelectPill(
+                title: selectedPublicSummaryModel.map { "\($0.displayName) · \($0.providerName)" } ?? "Choose API summary model",
+                icon: "sparkles",
+                width: 330
+            )
+        }
+        .menuStyle(.borderlessButton)
+    }
+
+    private var localSummaryModelMenu: some View {
+        Menu {
+            ForEach(summaryModels) { model in
+                Button(model.displayName) {
+                    automationLocalSummaryModelId = model.id
+                }
+            }
+        } label: {
+            automationSelectPill(
+                title: selectedLocalSummaryModel?.displayName ?? "Choose local summary model",
+                icon: "sparkles",
+                width: 330
+            )
+        }
+        .menuStyle(.borderlessButton)
+    }
+
+    private func automationSelectPill(title: String, icon: String, width: CGFloat) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 11)
+        .frame(width: width, height: 30)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+        .contentShape(Capsule())
+    }
+
+    private func automationIntegerStepperPill(
+        label: String,
+        value: Binding<Int>,
+        range: ClosedRange<Int>,
+        step: Int,
+        zeroLabel: String?
+    ) -> some View {
+        let displayValue = zeroLabel != nil && value.wrappedValue == 0 ? zeroLabel! : "\(value.wrappedValue)"
+        return HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 48, alignment: .leading)
+
+            Button {
+                value.wrappedValue = max(range.lowerBound, value.wrappedValue - step)
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(value.wrappedValue <= range.lowerBound)
+
+            Text(displayValue)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.primary)
+                .frame(width: 42)
+
+            Button {
+                value.wrappedValue = min(range.upperBound, value.wrappedValue + step)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(value.wrappedValue >= range.upperBound)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 9)
+        .frame(height: 30)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+
+    private func automationDoubleStepperPill(
+        label: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        step: Double,
+        suffix: String
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 32, alignment: .leading)
+
+            Button {
+                value.wrappedValue = max(range.lowerBound, value.wrappedValue - step)
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(value.wrappedValue <= range.lowerBound)
+
+            Text("\(String(format: "%.1f", value.wrappedValue)) \(suffix)")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.primary)
+                .frame(width: 66)
+
+            Button {
+                value.wrappedValue = min(range.upperBound, value.wrappedValue + step)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(value.wrappedValue >= range.upperBound)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 9)
+        .frame(height: 30)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+
+    private var automationLengthPills: some View {
+        HStack(spacing: 2) {
+            ForEach(SummaryLengthOption.allCases) { option in
+                let selected = automationSummaryLength == option
+                Button {
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        automationSummaryLength = option
+                    }
+                } label: {
+                    Text(option.displayName)
+                        .font(.system(size: 10, weight: selected ? .semibold : .medium))
+                        .foregroundStyle(selected ? .white : .secondary)
+                        .frame(width: option == .custom ? 70 : 58, height: 26)
+                        .background(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+
+    private var automationTranscriptionControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            automationFieldLabel("TRANSCRIBE")
+
+            automationSourcePills(selection: Binding(
+                get: { automationTranscriptionSource },
+                set: { automationTranscriptionSource = $0 }
+            ))
+
+            if automationTranscriptionSource == SessionAutomationSource.public.rawValue {
+                if publicSessionModels.isEmpty {
+                    automationEmptyModelRow(
+                        title: "No public transcription model",
+                        actionTitle: "Open API Models",
+                        mode: .speechToText
+                    )
+                } else {
+                    HStack(spacing: 12) {
+                        publicTranscriptionModelMenu
+                        automationIntegerStepperPill(
+                            label: "Batches",
+                            value: $automationPublicBatchTarget,
+                            range: 0...30,
+                            step: 6,
+                            zeroLabel: "Auto"
+                        )
+                        Spacer()
+                    }
+                }
+            } else {
+                if localSessionModels.isEmpty {
+                    automationEmptyModelRow(
+                        title: "No downloaded session model",
+                        actionTitle: "Open Models",
+                        mode: .speechToText
+                    )
+                } else {
+                    HStack(spacing: 12) {
+                        localTranscriptionModelMenu
+                        automationDoubleStepperPill(
+                            label: "RAM",
+                            value: $automationLocalRamBudgetGB,
+                            range: 2...max(2, maxAutomationRamBudget),
+                            step: 0.5,
+                            suffix: "GB"
+                        )
+                        Spacer()
+                    }
+                }
+            }
+        }
+    }
+
+    private var automationSummaryControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            automationFieldLabel("SUMMARY")
+
+            automationSourcePills(selection: Binding(
+                get: { automationSummarySource },
+                set: { automationSummarySource = $0 }
+            ))
+
+            HStack(spacing: 12) {
+                if automationSummarySource == SessionAutomationSource.public.rawValue {
+                    if apiLanguageModels.isEmpty {
+                        automationEmptyModelRow(
+                            title: "No public language model",
+                            actionTitle: "Open API LLM",
+                            mode: .summarization
+                        )
+                    } else {
+                        publicSummaryModelMenu
+                    }
+                } else {
+                    if summaryModels.isEmpty {
+                        automationEmptyModelRow(
+                            title: "No local summary model",
+                            actionTitle: "Open Models",
+                            mode: .summarization
+                        )
+                    } else {
+                        localSummaryModelMenu
+                        automationInfoPill(icon: "externaldrive.fill", text: "Downloaded", tint: .secondary)
+                    }
+                }
+                Spacer()
+            }
+
+            HStack(spacing: 12) {
+                automationLengthPills
+
+                if automationSummaryLength == .custom {
+                    automationIntegerStepperPill(
+                        label: "Words",
+                        value: $automationSummaryCustomWords,
+                        range: 180...2200,
+                        step: 80,
+                        zeroLabel: nil
+                    )
+                } else {
+                    automationInfoPill(icon: "text.word.spacing", text: "~\(automationTargetSummaryWords) words", tint: .secondary)
+                }
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Presets")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                FlowLayout(spacing: 6, rowSpacing: 6) {
+                    ForEach(automationSummaryPresets) { preset in
+                        automationPresetChip(preset)
+                    }
+                }
+            }
+        }
+    }
+
+    private var maxAutomationRamBudget: Double {
+        let totalRAM = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+        return max(4.0, totalRAM - 4.0)
+    }
+
+    private func automationFieldLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold, design: .rounded))
+            .foregroundStyle(.tertiary)
+            .tracking(0.5)
+    }
+
+    private func automationEmptyModelRow(title: String, actionTitle: String, mode: ModelMode) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 10))
+                .foregroundStyle(.orange)
+            Text(title)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            Spacer()
+            if let onNavigateToModels {
+                Button(actionTitle) { onNavigateToModels(mode) }
+                    .font(.system(size: 10, weight: .medium))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+            }
+        }
+    }
+
+    private func automationInfoPill(icon: String, text: String, tint: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 8))
+            Text(text)
+                .font(.system(size: 9, weight: .medium))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(tint.opacity(0.1), in: Capsule())
+    }
+
+    private func automationPresetChip(_ preset: SummaryPresetDefinition) -> some View {
+        let selected = automationSelectedPresetIds.contains(preset.id)
+        return Button {
+            toggleAutomationPreset(preset.id)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: preset.symbolName)
+                    .font(.system(size: 9, weight: .medium))
+                Text(preset.displayName)
+                    .font(.system(size: 10, weight: selected ? .semibold : .medium))
+            }
+            .foregroundStyle(selected ? .white : .secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.primary.opacity(0.06)), in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Date Filter
@@ -622,9 +1298,161 @@ struct SessionsSettingsView: View {
         isSelectingSessions = false
         selectedSessionIds.removeAll()
     }
+
+    // MARK: - Automation Helpers
+
+    private func normalizeAutomationSelections() {
+        let firstLocalSessionModel = localSessionModels.first?.id
+        if let firstLocalSessionModel,
+           !localSessionModels.contains(where: { $0.id == automationLocalTranscriptionModelId }) {
+            automationLocalTranscriptionModelId = firstLocalSessionModel
+        }
+
+        if let publicModel = selectedPublicSessionModel {
+            automationTranscriptionProviderId = publicModel.providerId
+            automationTranscriptionModelId = publicModel.modelId
+        }
+
+        if let firstSummaryModel = summaryModels.first,
+           !summaryModels.contains(where: { $0.id == automationLocalSummaryModelId }) {
+            automationLocalSummaryModelId = firstSummaryModel.id
+        }
+
+        if let publicSummaryModel = selectedPublicSummaryModel {
+            automationSummaryProviderId = publicSummaryModel.providerId
+            automationSummaryModelId = publicSummaryModel.modelId
+        }
+
+        let validPresetIds = Set(automationSummaryPresets.map(\.id))
+        automationSelectedPresetIds = automationSelectedPresetIds.intersection(validPresetIds)
+        if automationSelectedPresetIds.isEmpty,
+           let fallbackPresetId = automationSummaryPresets.first?.id {
+            automationSelectedPresetIds = [fallbackPresetId]
+        }
+        persistAutomationPresetSelection()
+    }
+
+    private func toggleAutomationPreset(_ presetId: String) {
+        if automationSelectedPresetIds.contains(presetId) {
+            automationSelectedPresetIds.remove(presetId)
+        } else {
+            automationSelectedPresetIds.insert(presetId)
+        }
+
+        if automationSelectedPresetIds.isEmpty {
+            automationSelectedPresetIds.insert(presetId)
+        }
+
+        persistAutomationPresetSelection()
+    }
+
+    private func persistAutomationPresetSelection() {
+        let orderedIds = automationSummaryPresets
+            .map(\.id)
+            .filter { automationSelectedPresetIds.contains($0) }
+        UserDefaults.standard.set(orderedIds, forKey: SessionAutomationPreferences.summaryPresetIdsKey)
+    }
+}
+
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+    var rowSpacing: CGFloat? = nil
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        let maxWidth = proposal.width ?? 320
+        let rows = layoutRows(for: subviews, maxWidth: maxWidth)
+        let verticalSpacing = rowSpacing ?? spacing
+        return CGSize(
+            width: maxWidth,
+            height: rows.reduce(CGFloat.zero) { $0 + $1.height } + CGFloat(max(rows.count - 1, 0)) * verticalSpacing
+        )
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let rows = layoutRows(for: subviews, maxWidth: bounds.width)
+        let verticalSpacing = rowSpacing ?? spacing
+        var y = bounds.minY
+
+        for row in rows {
+            var x = bounds.minX
+            for item in row.items {
+                item.subview.place(
+                    at: CGPoint(x: x, y: y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(item.size)
+                )
+                x += item.size.width + spacing
+            }
+            y += row.height + verticalSpacing
+        }
+    }
+
+    private func layoutRows(for subviews: Subviews, maxWidth: CGFloat) -> [FlowRow] {
+        var rows: [FlowRow] = []
+        var currentItems: [FlowItem] = []
+        var currentWidth: CGFloat = 0
+        var currentHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            let proposedWidth = currentItems.isEmpty ? size.width : currentWidth + spacing + size.width
+
+            if proposedWidth > maxWidth, !currentItems.isEmpty {
+                rows.append(FlowRow(items: currentItems, height: currentHeight))
+                currentItems = [FlowItem(subview: subview, size: size)]
+                currentWidth = size.width
+                currentHeight = size.height
+            } else {
+                currentItems.append(FlowItem(subview: subview, size: size))
+                currentWidth = proposedWidth
+                currentHeight = max(currentHeight, size.height)
+            }
+        }
+
+        if !currentItems.isEmpty {
+            rows.append(FlowRow(items: currentItems, height: currentHeight))
+        }
+
+        return rows
+    }
+
+    private struct FlowRow {
+        let items: [FlowItem]
+        let height: CGFloat
+    }
+
+    private struct FlowItem {
+        let subview: LayoutSubview
+        let size: CGSize
+    }
 }
 
 // MARK: - Audio Mix Sheet
+
+private struct SessionSheetActionPillStyle: ViewModifier {
+    let tint: Color
+    let prominent: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(prominent ? .white : tint)
+            .padding(.horizontal, 12)
+            .frame(height: 28)
+            .background(prominent ? AnyShapeStyle(tint) : AnyShapeStyle(Color.primary.opacity(0.075)), in: Capsule())
+            .overlay(Capsule().strokeBorder(prominent ? tint.opacity(0.28) : .white.opacity(0.06), lineWidth: 0.6))
+            .contentShape(Capsule())
+    }
+}
 
 struct AudioMixSheetView: View {
     @Binding var micTrimDB: Double
@@ -758,12 +1586,15 @@ struct AudioMixSheetView: View {
                     micTrimDB = SessionAudioMixPreferences.defaultMicTrimDB
                     systemTrimDB = SessionAudioMixPreferences.defaultSystemTrimDB
                 }
+                .buttonStyle(.plain)
+                .modifier(SessionSheetActionPillStyle(tint: .secondary, prominent: false))
                 .disabled(abs(micTrimDB) < 0.05 && abs(systemTrimDB) < 0.05)
 
                 Spacer()
 
                 Button("Done") { dismiss() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.plain)
+                    .modifier(SessionSheetActionPillStyle(tint: .accentColor, prominent: true))
                     .keyboardShortcut(.defaultAction)
             }
             .padding(20)

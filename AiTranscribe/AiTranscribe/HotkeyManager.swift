@@ -38,6 +38,11 @@ class HotkeyManager {
 
     /// Registered hotkey references (needed to unregister)
     private var hotkeyRefs: [EventHotKeyRef] = []
+    private var polishHotkeyPresetIds: [UInt32: String] = [:]
+    private let polishHotkeyBaseId: UInt32 = 1_000
+    private var quickRecordingToggleTask: Task<Void, Never>?
+    private var lastQuickRecordingToggleFinishedAt: Date?
+    private let quickRecordingToggleCooldown: TimeInterval = 0.8
 
     /// Hotkey IDs
     private enum HotkeyID: UInt32 {
@@ -99,6 +104,8 @@ class HotkeyManager {
         } else {
             registerHotkey(id: .stopSession, keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(controlKey) | UInt32(shiftKey))
         }
+
+        registerPolishHotkeys()
     }
 
     /// Parse a shortcut string like "⌥Space" into keyCode and modifiers
@@ -194,8 +201,12 @@ class HotkeyManager {
 
     /// Register a single hotkey
     private func registerHotkey(id: HotkeyID, keyCode: UInt32, modifiers: UInt32) {
+        registerHotkey(rawId: id.rawValue, keyCode: keyCode, modifiers: modifiers, label: "\(id)")
+    }
+
+    private func registerHotkey(rawId: UInt32, keyCode: UInt32, modifiers: UInt32, label: String) {
         var hotkeyRef: EventHotKeyRef?
-        let hotkeyID = EventHotKeyID(signature: OSType(0x4149_5472), id: id.rawValue)  // "AITr"
+        let hotkeyID = EventHotKeyID(signature: OSType(0x4149_5472), id: rawId)  // "AITr"
 
         let status = RegisterEventHotKey(
             keyCode,
@@ -208,9 +219,34 @@ class HotkeyManager {
 
         if status == noErr, let ref = hotkeyRef {
             hotkeyRefs.append(ref)
-            print("Registered hotkey \(id) with keyCode \(keyCode), modifiers \(modifiers)")
+            print("Registered hotkey \(label) with keyCode \(keyCode), modifiers \(modifiers)")
         } else {
-            print("Failed to register hotkey \(id): \(status)")
+            print("Failed to register hotkey \(label): \(status)")
+        }
+    }
+
+    private func registerPolishHotkeys() {
+        polishHotkeyPresetIds.removeAll()
+        guard let appState else { return }
+
+        let presets = appState.polishPresets
+            .filter { $0.isEnabled }
+            .compactMap { preset -> (PolishPreset, String)? in
+                guard let shortcut = preset.shortcut?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !shortcut.isEmpty else { return nil }
+                return (preset, shortcut)
+            }
+
+        for (index, pair) in presets.enumerated() {
+            let rawId = polishHotkeyBaseId + UInt32(index)
+            guard let (keyCode, modifiers) = parseShortcut(pair.1) else { continue }
+            polishHotkeyPresetIds[rawId] = pair.0.id
+            registerHotkey(
+                rawId: rawId,
+                keyCode: keyCode,
+                modifiers: modifiers,
+                label: "polish:\(pair.0.displayName)"
+            )
         }
     }
 
@@ -251,20 +287,52 @@ class HotkeyManager {
             return noErr
 
         default:
+            if let presetId = polishHotkeyPresetIds[hotkeyID.id] {
+                handlePolishShortcut(presetId: presetId)
+                return noErr
+            }
             return OSStatus(eventNotHandledErr)
         }
     }
 
     /// Handle toggle recording hotkey
     private func handleToggleRecording() {
-        guard let appState = appState else { return }
+        performQuickRecordingToggle()
+    }
 
-        Task { @MainActor in
+    private func performQuickRecordingToggle(oneShotPolishPresetId: String? = nil) {
+        guard let appState else { return }
+
+        if quickRecordingToggleTask != nil {
+            AppLogger.info("QuickPipeline hotkey ignored reason=toggle_task_active")
+            return
+        }
+
+        if let lastFinished = lastQuickRecordingToggleFinishedAt,
+           Date().timeIntervalSince(lastFinished) < quickRecordingToggleCooldown {
+            AppLogger.info("QuickPipeline hotkey ignored reason=toggle_cooldown")
+            return
+        }
+
+        quickRecordingToggleTask = Task { @MainActor [weak self, weak appState] in
+            defer {
+                self?.quickRecordingToggleTask = nil
+                self?.lastQuickRecordingToggleFinishedAt = Date()
+            }
+
+            guard let appState else { return }
+            guard !appState.isQuickRecordingTransitioning, !appState.isQuickTranscriptionInFlight else {
+                AppLogger.info("QuickPipeline hotkey ignored reason=busy")
+                return
+            }
+
             if appState.isRecording {
                 await appState.stopRecording()
             } else {
                 // startRecording() handles auto-loading the model if needed
-                await appState.startRecording()
+                await appState.startRecording(
+                    oneShotPolishPresetId: oneShotPolishPresetId
+                )
             }
         }
     }
@@ -306,12 +374,17 @@ class HotkeyManager {
         }
     }
 
+    private func handlePolishShortcut(presetId: String) {
+        performQuickRecordingToggle(oneShotPolishPresetId: presetId)
+    }
+
     /// Unregister all hotkeys
     func unregisterAll() {
         for ref in hotkeyRefs {
             UnregisterEventHotKey(ref)
         }
         hotkeyRefs.removeAll()
+        polishHotkeyPresetIds.removeAll()
 
         if let handler = eventHandler {
             RemoveEventHandler(handler)

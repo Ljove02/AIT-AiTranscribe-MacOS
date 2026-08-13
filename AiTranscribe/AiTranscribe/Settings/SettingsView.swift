@@ -51,6 +51,7 @@ struct SettingsView: View {
     @State private var pendingHistoryEntryId: UUID? = nil
     @State private var pendingSessionId: UUID? = nil
     @State private var pendingModelMode: ModelMode = .speechToText
+    @StateObject private var dashboardStatsManager = DashboardStatsManager()
     @EnvironmentObject var backendManager: BackendManager
     @EnvironmentObject var updateChecker: UpdateChecker
 
@@ -110,6 +111,7 @@ struct SettingsView: View {
         switch selectedSection {
         case .dashboard:
             DashboardView(
+                statsManager: dashboardStatsManager,
                 hasAnimated: animatedTabs.contains(.dashboard),
                 onAnimated: { animatedTabs.insert(.dashboard) },
                 onNavigateToHistory: { entryId in
@@ -289,11 +291,17 @@ struct TranscriptionModeSwitch: View {
             Button {
                 showingModeInfo = true
             } label: {
-                Image(systemName: "info.circle")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 24, height: 24)
-                    .background(.quaternary, in: Circle())
+                ZStack {
+                    Circle()
+                        .fill(.quaternary)
+                        .frame(width: 24, height: 24)
+
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(width: 30, height: 30, alignment: .center)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("How Local/Public mode works")
@@ -375,7 +383,8 @@ struct TranscriptionModeInfoSheet: View {
                 Button("I Understand") {
                     onClose()
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .modifier(SettingsInfoActionPillStyle())
             }
         }
         .padding(24)
@@ -394,6 +403,19 @@ struct TranscriptionModeInfoSheet: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct SettingsInfoActionPillStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .frame(height: 30)
+            .background(Color.accentColor, in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.28), lineWidth: 0.6))
+            .contentShape(Capsule())
     }
 }
 

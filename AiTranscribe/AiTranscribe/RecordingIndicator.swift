@@ -23,165 +23,280 @@
 
 import SwiftUI
 import AppKit
+import AVFoundation
 import Combine
 import QuartzCore
 
-// =============================================================================
-// RECORDING INDICATOR VIEW
-// =============================================================================
+enum RecordingIndicatorStyle: String, CaseIterable, Identifiable {
+    case classic
+    case glow
+    case aurora
+    case prism
+    case graphite
+    case ember
 
-struct RecordingIndicatorView: View {
-    /// Observe the controller for volume updates
-    @ObservedObject var controller: RecordingIndicatorController
+    var id: String { rawValue }
 
-    /// Smoothed volume level (for gradual transitions)
-    @State private var smoothedVolume: CGFloat = 0
+    var displayName: String {
+        switch self {
+        case .classic:
+            return "Classic"
+        case .glow:
+            return "Glow"
+        case .aurora:
+            return "Aurora"
+        case .prism:
+            return "Prism"
+        case .graphite:
+            return "Graphite"
+        case .ember:
+            return "Ember"
+        }
+    }
 
-    /// Appear/disappear animation state
-    @State private var appearScale: CGFloat = 1.0
-    @State private var appearOpacity: Double = 1.0
-    @State private var hasAppeared: Bool = false
+    var description: String {
+        switch self {
+        case .classic:
+            return "Side pulse"
+        case .glow:
+            return "Blue liquid"
+        case .aurora:
+            return "Green violet"
+        case .prism:
+            return "Rose gold"
+        case .graphite:
+            return "Silver smoke"
+        case .ember:
+            return "Warm violet"
+        }
+    }
 
-    /// Whether to show the transcription dots animation
-    @State private var showTranscriptionDots: Bool = false
+    var isLiquid: Bool {
+        self != .classic
+    }
 
-    /// Start time for GPU-synced animations
-    @State private var animationStartTime: Date = Date()
+    var glowPalette: FluidGlowPalette {
+        switch self {
+        case .classic, .glow:
+            return .glow
+        case .aurora:
+            return .aurora
+        case .prism:
+            return .prism
+        case .graphite:
+            return .graphite
+        case .ember:
+            return .ember
+        }
+    }
+}
 
-    /// Wave spawn timestamps — each entry is when a wave was born
-    @State private var waveSpawnTimes: [Date] = []
+struct FluidGlowPalette {
+    let baseStart: Color
+    let baseMid: Color
+    let baseEnd: Color
+    let lowerStart: Color
+    let lowerMid: Color
+    let lowerEnd: Color
+    let upperStart: Color
+    let upperMid: Color
+    let upperEnd: Color
+    let ribbonA: Color
+    let ribbonB: Color
+    let separator: Color
+    let grain: Color
 
-    /// Detect light/dark mode
+    static let glow = FluidGlowPalette(
+        baseStart: Color(red: 0.01, green: 0.04, blue: 0.14),
+        baseMid: Color(red: 0.01, green: 0.32, blue: 0.72),
+        baseEnd: Color(red: 0.60, green: 0.94, blue: 1.00),
+        lowerStart: Color(red: 0.00, green: 0.10, blue: 0.58),
+        lowerMid: Color(red: 0.00, green: 0.42, blue: 1.00),
+        lowerEnd: Color(red: 0.07, green: 0.82, blue: 0.98),
+        upperStart: Color(red: 0.84, green: 0.99, blue: 1.00),
+        upperMid: Color(red: 0.96, green: 1.00, blue: 0.93),
+        upperEnd: Color(red: 0.10, green: 0.60, blue: 0.70),
+        ribbonA: Color(red: 0.70, green: 0.95, blue: 1.00),
+        ribbonB: Color(red: 0.95, green: 1.00, blue: 0.88),
+        separator: Color(red: 0.96, green: 1.00, blue: 0.98),
+        grain: Color(red: 0.78, green: 0.97, blue: 1.00)
+    )
+
+    static let aurora = FluidGlowPalette(
+        baseStart: Color(red: 0.00, green: 0.03, blue: 0.10),
+        baseMid: Color(red: 0.00, green: 0.66, blue: 0.46),
+        baseEnd: Color(red: 0.70, green: 0.30, blue: 1.00),
+        lowerStart: Color(red: 0.00, green: 0.08, blue: 0.28),
+        lowerMid: Color(red: 0.00, green: 0.88, blue: 0.56),
+        lowerEnd: Color(red: 0.34, green: 0.18, blue: 0.95),
+        upperStart: Color(red: 0.72, green: 1.00, blue: 0.78),
+        upperMid: Color(red: 0.42, green: 0.94, blue: 1.00),
+        upperEnd: Color(red: 0.30, green: 0.04, blue: 0.78),
+        ribbonA: Color(red: 0.42, green: 1.00, blue: 0.66),
+        ribbonB: Color(red: 0.74, green: 0.42, blue: 1.00),
+        separator: Color(red: 0.78, green: 1.00, blue: 0.82),
+        grain: Color(red: 0.62, green: 1.00, blue: 0.80)
+    )
+
+    static let prism = FluidGlowPalette(
+        baseStart: Color(red: 0.13, green: 0.00, blue: 0.08),
+        baseMid: Color(red: 0.94, green: 0.05, blue: 0.34),
+        baseEnd: Color(red: 1.00, green: 0.78, blue: 0.28),
+        lowerStart: Color(red: 0.34, green: 0.00, blue: 0.18),
+        lowerMid: Color(red: 1.00, green: 0.12, blue: 0.40),
+        lowerEnd: Color(red: 1.00, green: 0.67, blue: 0.18),
+        upperStart: Color(red: 1.00, green: 0.94, blue: 0.70),
+        upperMid: Color(red: 1.00, green: 0.50, blue: 0.78),
+        upperEnd: Color(red: 0.46, green: 0.03, blue: 0.54),
+        ribbonA: Color(red: 1.00, green: 0.54, blue: 0.78),
+        ribbonB: Color(red: 1.00, green: 0.83, blue: 0.34),
+        separator: Color(red: 1.00, green: 0.88, blue: 0.58),
+        grain: Color(red: 1.00, green: 0.74, blue: 0.62)
+    )
+
+    static let graphite = FluidGlowPalette(
+        baseStart: Color(red: 0.00, green: 0.00, blue: 0.01),
+        baseMid: Color(red: 0.24, green: 0.28, blue: 0.32),
+        baseEnd: Color(red: 0.88, green: 0.94, blue: 0.98),
+        lowerStart: Color(red: 0.02, green: 0.03, blue: 0.045),
+        lowerMid: Color(red: 0.30, green: 0.38, blue: 0.46),
+        lowerEnd: Color(red: 0.86, green: 0.94, blue: 1.00),
+        upperStart: Color(red: 0.98, green: 1.00, blue: 1.00),
+        upperMid: Color(red: 0.62, green: 0.72, blue: 0.80),
+        upperEnd: Color(red: 0.08, green: 0.10, blue: 0.13),
+        ribbonA: Color(red: 0.78, green: 0.90, blue: 1.00),
+        ribbonB: Color(red: 0.34, green: 0.42, blue: 0.50),
+        separator: Color(red: 0.74, green: 0.90, blue: 1.00),
+        grain: Color(red: 0.86, green: 0.95, blue: 1.00)
+    )
+
+    static let ember = FluidGlowPalette(
+        baseStart: Color(red: 0.11, green: 0.00, blue: 0.12),
+        baseMid: Color(red: 0.48, green: 0.08, blue: 0.92),
+        baseEnd: Color(red: 1.00, green: 0.38, blue: 0.08),
+        lowerStart: Color(red: 0.20, green: 0.00, blue: 0.34),
+        lowerMid: Color(red: 0.66, green: 0.08, blue: 1.00),
+        lowerEnd: Color(red: 1.00, green: 0.24, blue: 0.05),
+        upperStart: Color(red: 1.00, green: 0.76, blue: 0.52),
+        upperMid: Color(red: 0.95, green: 0.30, blue: 1.00),
+        upperEnd: Color(red: 0.24, green: 0.00, blue: 0.42),
+        ribbonA: Color(red: 1.00, green: 0.42, blue: 0.92),
+        ribbonB: Color(red: 1.00, green: 0.62, blue: 0.24),
+        separator: Color(red: 1.00, green: 0.68, blue: 0.42),
+        grain: Color(red: 1.00, green: 0.58, blue: 0.82)
+    )
+}
+
+struct RecordingIndicatorMiniVisual: View {
+    let style: RecordingIndicatorStyle
+    let level: CGFloat
+    let now: Date
+    let animationStartTime: Date
+    let fluidPhase: Double
+    let waveProgresses: [CGFloat]
+    let showsTranscriptionDots: Bool
+    let showsOnlyTranscriptionDots: Bool
+
     @Environment(\.colorScheme) private var colorScheme
 
-    /// Core circle size
     private let coreSize: CGFloat = 22
 
-    /// Wave arc parameters
-    private let waveLifetime: Double = 1.3     // faster expansion
-    private let maxWaveOffset: CGFloat = 11    // fade well before capsule edge
-    private let volumeThreshold: CGFloat = 0.10
-
     var body: some View {
-        TimelineView(.animation(minimumInterval: nil, paused: false)) { timeline in
-            let now = timeline.date
+        ZStack {
+            if showsOnlyTranscriptionDots {
+                transcriptionDots
+            } else {
+                switch style {
+                case .classic:
+                    if !showsTranscriptionDots {
+                        classicWaveArcs
+                    }
 
-            ZStack {
-                // Side-wave arcs (recording mode)
-                if !showTranscriptionDots {
-                    waveArcs(now: now)
-                }
+                    coreCircle
 
-                // Core circle — layered glass effect
-                coreCircle
+                    if showsTranscriptionDots {
+                        transcriptionDots
+                    }
+                case .glow, .aurora, .prism, .graphite, .ember:
+                    liquidGradientField
 
-                // Transcription dots
-                if showTranscriptionDots {
-                    transcriptionDots(now: now)
-                }
-            }
-            .frame(width: 64, height: 36)
-            .background(glassBackground)
-            .overlay(glassStroke)
-            .scaleEffect(appearScale)
-            .opacity(appearOpacity)
-        }
-        .onAppear {
-            animationStartTime = Date()
-            if !hasAppeared {
-                appearScale = 0.3
-                appearOpacity = 0
-                hasAppeared = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                        appearScale = 1.0
-                        appearOpacity = 1.0
+                    if showsTranscriptionDots {
+                        transcriptionDots
                     }
                 }
             }
         }
-        .onDisappear {
-            hasAppeared = false
-            waveSpawnTimes.removeAll()
-        }
-        .onChange(of: controller.currentVolume) { _, newVolume in
-            if !controller.isTranscribing {
-                updateSmoothedVolume(newVolume)
-                spawnWaveIfNeeded()
-            }
-        }
-        .onChange(of: controller.isTranscribing) { _, isTranscribing in
-            if isTranscribing {
-                waveSpawnTimes.removeAll()
-                smoothedVolume = 0
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    animationStartTime = Date()
-                    showTranscriptionDots = true
-                }
-            } else {
-                showTranscriptionDots = false
-            }
-        }
-        .onChange(of: controller.isDisappearing) { _, isDisappearing in
-            if isDisappearing {
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    appearScale = 0.3
-                    appearOpacity = 0
-                }
-            }
+        .frame(width: 64, height: 36)
+        .accessibilityHidden(true)
+    }
+
+    private var normalizedLevel: CGFloat {
+        min(max(level, 0), 1)
+    }
+
+    private var elapsed: TimeInterval {
+        now.timeIntervalSince(animationStartTime)
+    }
+
+    @ViewBuilder
+    private var classicWaveArcs: some View {
+        ForEach(Array(waveProgresses.enumerated()), id: \.offset) { _, progress in
+            let clampedProgress = min(max(progress, 0), 1)
+            let opacity = classicWaveOpacity(for: clampedProgress)
+            let waveOffset = 5 + clampedProgress * 11
+            let arcColor = colorScheme == .dark
+                ? Color.white.opacity(opacity)
+                : Color.black.opacity(opacity * 0.6)
+            let arcSize = classicWaveSize(for: clampedProgress)
+
+            SemiCircleArc()
+                .stroke(arcColor, style: StrokeStyle(lineWidth: 0.8, lineCap: .round))
+                .frame(width: arcSize, height: arcSize)
+                .offset(x: waveOffset)
+
+            SemiCircleArc()
+                .stroke(arcColor, style: StrokeStyle(lineWidth: 0.8, lineCap: .round))
+                .frame(width: arcSize, height: arcSize)
+                .scaleEffect(x: -1)
+                .offset(x: -waveOffset)
         }
     }
 
-    // MARK: - Glass Background
+    private func classicWaveOpacity(for progress: CGFloat) -> Double {
+        if progress < 0.25 {
+            return Double(progress / 0.25) * 0.35
+        }
 
-    private var glassBackground: some View {
-        Capsule()
-            .fill(
-                colorScheme == .dark
-                    ? Color(white: 0.12, opacity: 0.72)
-                    : Color(white: 0.92, opacity: 0.85)
-            )
-            .overlay(
-                // Inner highlight — top edge glow for glass depth
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: colorScheme == .dark
-                                ? [Color.white.opacity(0.12), Color.clear]
-                                : [Color.white.opacity(0.5), Color.clear],
-                            startPoint: .top,
-                            endPoint: .center
-                        )
-                    )
-            )
-            .overlay(
-                // Subtle inner shadow at bottom
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.clear, Color.black.opacity(colorScheme == .dark ? 0.2 : 0.06)],
-                            startPoint: .center,
-                            endPoint: .bottom
-                        )
-                    )
-            )
+        let fadeProgress = (progress - 0.25) / 0.75
+        return Double(max(0, 0.35 * (1 - fadeProgress)))
     }
 
-    private var glassStroke: some View {
-        Capsule()
-            .stroke(
-                LinearGradient(
-                    colors: colorScheme == .dark
-                        ? [Color.white.opacity(0.25), Color.white.opacity(0.06)]
-                        : [Color.white.opacity(0.6), Color.black.opacity(0.08)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                ),
-                lineWidth: 0.5
-            )
+    private func classicWaveSize(for progress: CGFloat) -> CGFloat {
+        coreSize * (0.8 + progress * 0.6)
     }
 
-    // MARK: - Core Circle
+    private var liquidGradientField: some View {
+        let activeLevel = reactiveLevel
+        let voiceEase = Double(activeLevel * activeLevel * (3 - 2 * activeLevel))
+        let phaseA = fluidPhase * 1.42 + 0.12 * sin(elapsed * 0.18) + voiceEase * 0.04 * sin(elapsed * 0.72)
+        let phaseB = -fluidPhase * 1.08 + 1.20 + 0.10 * cos(elapsed * 0.15) + voiceEase * 0.03 * sin(elapsed * 0.58)
+        let phaseC = fluidPhase * 1.74 + 2.10 + 0.14 * sin(elapsed * 0.14 + 0.90) + voiceEase * 0.04 * sin(elapsed * 0.66)
+
+        return FluidGlowTexture(
+            palette: style.glowPalette,
+            level: activeLevel,
+            phaseA: phaseA,
+            phaseB: phaseB,
+            phaseC: phaseC
+        )
+        .frame(width: 64, height: 36)
+        .scaleEffect(1 + activeLevel * 0.022)
+        .animation(.easeOut(duration: 0.42), value: activeLevel)
+    }
+
+    private var reactiveLevel: CGFloat {
+        CGFloat(pow(Double(normalizedLevel), 0.72))
+    }
 
     private var coreCircle: some View {
         Circle()
@@ -197,7 +312,6 @@ struct RecordingIndicatorView: View {
             )
             .frame(width: coreSize, height: coreSize)
             .overlay(
-                // Glass highlight on core
                 Circle()
                     .fill(
                         LinearGradient(
@@ -225,53 +339,10 @@ struct RecordingIndicatorView: View {
             )
     }
 
-    // MARK: - Side Wave Arcs
-
     @ViewBuilder
-    private func waveArcs(now: Date) -> some View {
-        let liveWaves = waveSpawnTimes.filter { now.timeIntervalSince($0) < waveLifetime }
-
-        ForEach(Array(liveWaves.enumerated()), id: \.offset) { _, spawnTime in
-            let age = now.timeIntervalSince(spawnTime)
-            let progress = CGFloat(age / waveLifetime)
-
-            let opacity = progress < 0.25
-                ? Double(progress / 0.25) * 0.35
-                : Double(max(0, 0.35 * (1 - (progress - 0.25) / 0.75)))
-
-            // All waves use the same radius (= core circle radius), just offset outward
-            let waveOffset = 5 + progress * maxWaveOffset
-            let arcColor = colorScheme == .dark
-                ? Color.white.opacity(opacity)
-                : Color.black.opacity(opacity * 0.6)
-
-            // Arc grows as it travels: starts at 80% of coreSize, grows to 140%
-            let growFactor = 0.8 + progress * 0.6
-            let arcSize = coreSize * growFactor
-
-            // Right  )
-            SemiCircleArc()
-                .stroke(arcColor, style: StrokeStyle(lineWidth: 0.8, lineCap: .round))
-                .frame(width: arcSize, height: arcSize)
-                .offset(x: waveOffset)
-
-            // Left  (
-            SemiCircleArc()
-                .stroke(arcColor, style: StrokeStyle(lineWidth: 0.8, lineCap: .round))
-                .frame(width: arcSize, height: arcSize)
-                .scaleEffect(x: -1)
-                .offset(x: -waveOffset)
-        }
-    }
-
-    // MARK: - Transcription Dots (original — TimelineView driven)
-
-    @ViewBuilder
-    private func transcriptionDots(now: Date) -> some View {
-        let elapsed = now.timeIntervalSince(animationStartTime)
+    private var transcriptionDots: some View {
         let cycleDuration: Double = 1.2
         let phase = CGFloat(elapsed.truncatingRemainder(dividingBy: cycleDuration) / cycleDuration)
-
         let expandFactor = CoreGraphics.sin(phase * .pi)
         let maxRadius: CGFloat = 3.5
         let currentRadius = maxRadius * expandFactor
@@ -282,6 +353,7 @@ struct RecordingIndicatorView: View {
                 Circle()
                     .fill(Color.white)
                     .frame(width: 3, height: 3)
+                    .shadow(color: .blue.opacity(style == .glow ? 0.35 : 0), radius: 3)
                     .offset(
                         x: CoreGraphics.cos(angle) * currentRadius,
                         y: CoreGraphics.sin(angle) * currentRadius
@@ -291,21 +363,607 @@ struct RecordingIndicatorView: View {
         .frame(width: coreSize, height: coreSize)
         .rotationEffect(.degrees(Double(phase) * 180), anchor: .center)
     }
+}
+
+private struct FluidGlowTexture: View {
+    let palette: FluidGlowPalette
+    let level: CGFloat
+    let phaseA: Double
+    let phaseB: Double
+    let phaseC: Double
+
+    var body: some View {
+        Canvas { context, size in
+            let rect = CGRect(origin: .zero, size: size)
+            let capsulePath = Path(roundedRect: rect, cornerRadius: size.height / 2)
+            let voice = Double(min(max(level, 0), 1))
+
+            context.clip(to: capsulePath)
+
+            var rectPath = Path()
+            rectPath.addRect(rect)
+            context.fill(
+                rectPath,
+                with: .linearGradient(
+                    Gradient(stops: [
+                        .init(color: palette.baseStart.opacity(0.94), location: 0.00),
+                        .init(color: palette.baseMid.opacity(0.70 + voice * 0.22), location: 0.46),
+                        .init(color: palette.baseEnd.opacity(0.50 + voice * 0.28), location: 1.00)
+                    ]),
+                    startPoint: CGPoint(x: rect.minX, y: rect.maxY),
+                    endPoint: CGPoint(x: rect.maxX, y: rect.minY)
+                )
+            )
+
+            context.drawLayer { layer in
+                layer.addFilter(.blur(radius: 4.4))
+                layer.fill(
+                    lowerLiquidPath(size: size),
+                    with: .linearGradient(
+                        Gradient(stops: [
+                            .init(color: palette.lowerStart.opacity(0.82 + voice * 0.14), location: 0.00),
+                            .init(color: palette.lowerMid.opacity(0.72 + voice * 0.26), location: 0.52),
+                            .init(color: palette.lowerEnd.opacity(0.30 + voice * 0.28), location: 1.00)
+                        ]),
+                        startPoint: CGPoint(x: 0, y: size.height),
+                        endPoint: CGPoint(x: size.width, y: size.height * 0.18)
+                    )
+                )
+            }
+
+            context.drawLayer { layer in
+                layer.addFilter(.blur(radius: 4.4))
+                layer.fill(
+                    upperLiquidPath(size: size),
+                    with: .linearGradient(
+                        Gradient(stops: [
+                            .init(color: palette.upperStart.opacity(0.56 + voice * 0.26), location: 0.00),
+                            .init(color: palette.upperMid.opacity(0.28 + voice * 0.24), location: 0.42),
+                            .init(color: palette.upperEnd.opacity(0.28 + voice * 0.24), location: 1.00)
+                        ]),
+                        startPoint: CGPoint(x: size.width * 0.28, y: 0),
+                        endPoint: CGPoint(x: size.width, y: size.height)
+                    )
+                )
+            }
+
+            context.drawLayer { layer in
+                layer.addFilter(.blur(radius: 7.4))
+                layer.fill(
+                    boundaryRibbonPath(size: size, verticalOffset: 0, amplitudeScale: 0.84 + level * 0.28, thickness: 8.4 + level * 5.2),
+                    with: .linearGradient(
+                        Gradient(stops: [
+                            .init(color: Color.clear, location: 0.00),
+                            .init(color: palette.ribbonA.opacity(0.12 + voice * 0.18), location: 0.18),
+                            .init(color: palette.separator.opacity(0.18 + voice * 0.26), location: 0.48),
+                            .init(color: palette.ribbonB.opacity(0.10 + voice * 0.18), location: 0.72),
+                            .init(color: Color.clear, location: 1.00)
+                        ]),
+                        startPoint: CGPoint(x: 0, y: size.height * 0.46),
+                        endPoint: CGPoint(x: size.width, y: size.height * 0.62)
+                    )
+                )
+            }
+
+            for index in 0..<3 {
+                let offset = CGFloat(index - 1) * 5.8
+                let amplitude = 0.58 + CGFloat(index) * 0.18
+
+                context.drawLayer { layer in
+                    layer.addFilter(.blur(radius: 8.0 + CGFloat(index) * 0.8))
+                    layer.fill(
+                        boundaryRibbonPath(
+                            size: size,
+                            verticalOffset: offset,
+                            amplitudeScale: amplitude + level * 0.18,
+                            thickness: 4.2 + level * 3.4
+                        ),
+                        with: .linearGradient(
+                            Gradient(stops: [
+                                .init(color: Color.clear, location: 0.00),
+                                .init(color: palette.ribbonA.opacity(0.07 + voice * 0.12), location: 0.30),
+                                .init(color: palette.separator.opacity(0.045 + voice * 0.12), location: 0.56),
+                                .init(color: Color.clear, location: 1.00)
+                            ]),
+                            startPoint: CGPoint(x: size.width * 0.08, y: size.height * 0.22),
+                            endPoint: CGPoint(x: size.width * 0.92, y: size.height * 0.80)
+                        )
+                    )
+                }
+            }
+
+            context.drawLayer { layer in
+                layer.addFilter(.blur(radius: 3.4))
+
+                for index in 0..<9 {
+                    let seed = Double(index)
+                    let x = size.width * (0.08 + 0.84 * CGFloat((sin(seed * 2.31 + phaseC * 0.72) + 1) / 2))
+                    let y = size.height * (0.18 + 0.62 * CGFloat((cos(seed * 1.73 + phaseB * 0.58) + 1) / 2))
+                    let grainRect = CGRect(
+                        x: x - 8 - CGFloat(index % 3) * 1.5,
+                        y: y - 4,
+                        width: 12 + CGFloat(index % 4) * 4,
+                        height: 7 + CGFloat(index % 3) * 3
+                    )
+
+                    layer.fill(
+                        Path(ellipseIn: grainRect),
+                        with: .radialGradient(
+                            Gradient(colors: [
+                                Color.white.opacity(0.016 + voice * 0.038),
+                                palette.grain.opacity(0.010 + voice * 0.026),
+                                Color.clear
+                            ]),
+                            center: CGPoint(x: grainRect.midX, y: grainRect.midY),
+                            startRadius: 0,
+                            endRadius: max(grainRect.width, grainRect.height) * 0.58
+                        )
+                    )
+                }
+            }
+
+            context.stroke(
+                capsulePath,
+                with: .linearGradient(
+                    Gradient(colors: [
+                        Color.white.opacity(0.20),
+                        Color.white.opacity(0.035),
+                        Color.black.opacity(0.20)
+                    ]),
+                    startPoint: CGPoint(x: rect.minX, y: rect.minY),
+                    endPoint: CGPoint(x: rect.maxX, y: rect.maxY)
+                ),
+                lineWidth: 0.55
+            )
+        }
+        .compositingGroup()
+    }
+
+    private func lowerLiquidPath(size: CGSize) -> Path {
+        let padding: CGFloat = 18
+        let points = wavePoints(
+            size: size,
+            baseY: size.height * (0.48 + 0.07 * CGFloat(sin(phaseA * 0.62))),
+            amplitude: size.height * (0.10 + level * 0.045),
+            phase: phaseA,
+            tilt: size.height * (0.08 + level * 0.035)
+        )
+
+        var path = Path()
+        path.move(to: CGPoint(x: -padding, y: size.height + padding))
+        path.addLine(to: points[0])
+        appendSmoothWave(to: &path, points: points)
+        path.addLine(to: CGPoint(x: size.width + padding, y: size.height + padding))
+        path.closeSubpath()
+        return path
+    }
+
+    private func upperLiquidPath(size: CGSize) -> Path {
+        let padding: CGFloat = 18
+        let points = wavePoints(
+            size: size,
+            baseY: size.height * (0.50 + 0.06 * CGFloat(cos(phaseB * 0.58))),
+            amplitude: size.height * (0.09 + level * 0.04),
+            phase: phaseB + 1.4,
+            tilt: -size.height * (0.08 + level * 0.035)
+        )
+
+        var path = Path()
+        path.move(to: CGPoint(x: -padding, y: -padding))
+        path.addLine(to: points[0])
+        appendSmoothWave(to: &path, points: points)
+        path.addLine(to: CGPoint(x: size.width + padding, y: -padding))
+        path.closeSubpath()
+        return path
+    }
+
+    private func boundaryRibbonPath(
+        size: CGSize,
+        verticalOffset: CGFloat,
+        amplitudeScale: CGFloat,
+        thickness: CGFloat
+    ) -> Path {
+        let centerPoints = wavePoints(
+            size: size,
+            baseY: size.height * (0.50 + 0.05 * CGFloat(sin(phaseC * 0.56))) + verticalOffset,
+            amplitude: size.height * 0.12 * amplitudeScale,
+            phase: phaseC + Double(verticalOffset) * 0.08,
+            tilt: size.height * 0.02 * CGFloat(cos(phaseA * 0.44))
+        )
+
+        let topPoints = centerPoints.enumerated().map { index, point in
+            CGPoint(
+                x: point.x,
+                y: point.y - thickness - CGFloat(sin(phaseB + Double(index) * 0.72)) * 1.8
+            )
+        }
+
+        let bottomPoints = Array(centerPoints.enumerated().map { index, point in
+            CGPoint(
+                x: point.x,
+                y: point.y + thickness + CGFloat(cos(phaseA + Double(index) * 0.61)) * 1.8
+            )
+        }.reversed())
+
+        var path = Path()
+        path.move(to: topPoints[0])
+        appendSmoothWave(to: &path, points: topPoints)
+        path.addLine(to: bottomPoints[0])
+        appendSmoothWave(to: &path, points: bottomPoints)
+        path.closeSubpath()
+        return path
+    }
+
+    private func wavePoints(
+        size: CGSize,
+        baseY: CGFloat,
+        amplitude: CGFloat,
+        phase: Double,
+        tilt: CGFloat
+    ) -> [CGPoint] {
+        let padding: CGFloat = 18
+        let count = 8
+
+        return (0...count).map { index in
+            let fraction = CGFloat(index) / CGFloat(count)
+            let x = -padding + (size.width + padding * 2) * fraction
+            let primary = CGFloat(sin(Double(fraction) * .pi * 2.0 + phase)) * amplitude
+            let secondary = CGFloat(sin(Double(fraction) * .pi * 3.4 - phase * 0.72)) * amplitude * 0.24
+            let drift = (fraction - 0.5) * tilt
+
+            return CGPoint(x: x, y: baseY + primary + secondary + drift)
+        }
+    }
+
+    private func appendSmoothWave(to path: inout Path, points: [CGPoint]) {
+        guard points.count > 1 else { return }
+
+        for index in 1..<points.count {
+            let previous = points[index - 1]
+            let current = points[index]
+            let midpoint = CGPoint(
+                x: (previous.x + current.x) / 2,
+                y: (previous.y + current.y) / 2
+            )
+
+            path.addQuadCurve(to: midpoint, control: previous)
+        }
+
+        path.addLine(to: points[points.count - 1])
+    }
+}
+
+// =============================================================================
+// RECORDING INDICATOR VIEW
+// =============================================================================
+
+struct RecordingIndicatorHostView: View {
+    @ObservedObject var controller: RecordingIndicatorController
+
+    var body: some View {
+        RecordingIndicatorView(controller: controller)
+    }
+}
+
+struct RecordingIndicatorView: View {
+    /// Observe the controller for volume updates
+    @ObservedObject var controller: RecordingIndicatorController
+
+    /// Smoothed volume level (for gradual transitions)
+    @State private var smoothedVolume: CGFloat = 0
+
+    /// Appear/disappear animation state
+    @State private var appearScale: CGFloat = 1.0
+    @State private var appearOpacity: Double = 1.0
+    @State private var hasAppeared: Bool = false
+
+    /// Whether to show the transcription dots animation
+    @State private var showTranscriptionDots: Bool = false
+
+    /// Start time for GPU-synced animations
+    @State private var animationStartTime: Date = Date()
+
+    /// Wave spawn timestamps — each entry is when a wave was born
+    @State private var waveSpawnTimes: [Date] = []
+
+    /// Continuous liquid phase for Glow. Speed changes with voice, position does not jump.
+    @State private var fluidPhase: Double = 0
+    @State private var fluidSpeed: Double = 0.72
+    @State private var lastFluidPhaseDate: Date?
+
+    /// Detect light/dark mode
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var isPolishMorphing: Bool {
+        controller.polishResponseModel != nil
+    }
+
+    private var isPolishExpandingToReader: Bool {
+        controller.polishResponsePresentationPhase == .expanding
+    }
+
+    private var isPolishReader: Bool {
+        controller.polishResponsePresentationPhase == .reader
+    }
+
+    private var polishModel: PolishFloatingResponseModel? {
+        controller.polishResponseModel
+    }
+
+    private var isPolishWaitingForOutput: Bool {
+        guard let polishModel else { return false }
+        return polishModel.fullText.isEmpty
+    }
+
+    private var isPolishLoaderOnly: Bool {
+        isPolishMorphing && (!isPolishReader || isPolishWaitingForOutput)
+    }
+
+    private var indicatorStyle: RecordingIndicatorStyle {
+        controller.indicatorStyle
+    }
+
+    private var polishScreenshotImage: NSImage? {
+        guard let screenshotData = polishModel?.screenshotData else { return nil }
+        return NSImage(data: screenshotData)
+    }
+
+    private var glassCornerRadius: CGFloat {
+        guard isPolishMorphing else { return 999 }
+        return (isPolishExpandingToReader || isPolishReader) ? 28 : 999
+    }
+
+    /// Wave arc parameters
+    private let waveLifetime: Double = 1.3     // faster expansion
+    private let volumeThreshold: CGFloat = 0.10
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: nil, paused: false)) { timeline in
+            let now = timeline.date
+
+            ZStack(alignment: isPolishMorphing ? .top : .center) {
+                if isPolishReader {
+                    polishReaderContent
+                        .transition(.opacity)
+                }
+
+                if !isPolishReader || isPolishWaitingForOutput {
+                    indicatorCore(now: now)
+                        .frame(width: 64, height: 36)
+                        .padding(.top, isPolishMorphing ? 5 : 0)
+                }
+            }
+            .frame(width: isPolishMorphing ? nil : 64, height: isPolishMorphing ? nil : 36)
+            .frame(
+                maxWidth: isPolishMorphing ? .infinity : nil,
+                maxHeight: isPolishMorphing ? .infinity : nil,
+                alignment: isPolishMorphing ? .top : .center
+            )
+            .background(glassBackground)
+            .overlay(glassStroke)
+            .clipShape(RoundedRectangle(cornerRadius: glassCornerRadius, style: .continuous))
+            .scaleEffect(appearScale)
+            .opacity(appearOpacity)
+            .onChange(of: now) { _, updatedNow in
+                updateFluidPhase(now: updatedNow)
+            }
+        }
+        .onAppear {
+            let now = Date()
+            animationStartTime = now
+            lastFluidPhaseDate = now
+            if !hasAppeared {
+                appearScale = 0.3
+                appearOpacity = 0
+                hasAppeared = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                        appearScale = 1.0
+                        appearOpacity = 1.0
+                    }
+                }
+            }
+        }
+        .onDisappear {
+            hasAppeared = false
+            waveSpawnTimes.removeAll()
+            lastFluidPhaseDate = nil
+        }
+        .onChange(of: controller.currentVolume) { _, newVolume in
+            if !controller.isTranscribing {
+                updateSmoothedVolume(newVolume)
+                spawnWaveIfNeeded()
+            }
+        }
+        .onChange(of: controller.isTranscribing) { _, isTranscribing in
+            if isTranscribing {
+                waveSpawnTimes.removeAll()
+                smoothedVolume = 0
+                lastFluidPhaseDate = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    animationStartTime = Date()
+                    showTranscriptionDots = true
+                }
+            } else {
+                showTranscriptionDots = false
+            }
+        }
+        .onChange(of: controller.isDisappearing) { _, isDisappearing in
+            if isDisappearing {
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    appearScale = 0.3
+                    appearOpacity = 0
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func indicatorCore(now: Date) -> some View {
+        RecordingIndicatorMiniVisual(
+            style: indicatorStyle,
+            level: isPolishMorphing ? 0 : smoothedVolume,
+            now: now,
+            animationStartTime: animationStartTime,
+            fluidPhase: fluidPhase,
+            waveProgresses: isPolishMorphing ? [] : waveProgresses(now: now),
+            showsTranscriptionDots: showTranscriptionDots || isPolishLoaderOnly,
+            showsOnlyTranscriptionDots: isPolishLoaderOnly
+        )
+    }
+
+    private var polishReaderContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if let polishScreenshotImage {
+                        Image(nsImage: polishScreenshotImage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 560, maxHeight: 300)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+                            .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .top)))
+                    }
+
+                    if let polishModel, !polishModel.visibleText.isEmpty {
+                        PolishMarkdownView(text: polishModel.visibleText)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: 560, alignment: .topLeading)
+                            .transition(.opacity)
+                    } else {
+                        VStack(alignment: .leading, spacing: 10) {
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(.white.opacity(0.12))
+                                .frame(width: 430, height: 8)
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(.white.opacity(0.08))
+                                .frame(width: 360, height: 8)
+                        }
+                        .frame(maxWidth: 560, alignment: .topLeading)
+                        .padding(.top, polishScreenshotImage == nil ? 90 : 0)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 28)
+                .padding(.top, 58)
+                .padding(.bottom, 24)
+            }
+            .scrollIndicators(.hidden)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+
+            HStack {
+                Text(polishModel?.isComplete == true ? "\(polishModel?.fullText.split(separator: " ").count ?? 0) words" : "Streaming response...")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.tertiary)
+
+                Spacer()
+
+                Button(action: {
+                    controller.closePolishResponse()
+                }) {
+                    Text("Close")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Color.primary.opacity(0.055), in: Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Button(action: {
+                    controller.copyPolishResponseAndClose()
+                }) {
+                    Label("Copy", systemImage: "doc.on.doc")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 7)
+                        .background(Color.blue, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(polishModel?.fullText.isEmpty ?? true)
+                .opacity((polishModel?.fullText.isEmpty ?? true) ? 0.45 : 1)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 18)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Glass Background
+
+    private var glassBackground: some View {
+        let shape = RoundedRectangle(cornerRadius: glassCornerRadius, style: .continuous)
+
+        return shape
+            .fill(.ultraThinMaterial)
+            .overlay(
+                shape
+                    .fill(colorScheme == .dark ? Color.white.opacity(0.05) : Color.white.opacity(0.18))
+                    .blendMode(.screen)
+            )
+            .overlay(
+                shape
+                    .fill(colorScheme == .dark ? Color.black.opacity(0.08) : Color.black.opacity(0.015))
+                    .blendMode(.multiply)
+            )
+    }
+
+    private var glassStroke: some View {
+        RoundedRectangle(cornerRadius: glassCornerRadius, style: .continuous)
+            .strokeBorder(colorScheme == .dark ? Color.white.opacity(0.14) : Color.white.opacity(0.52), lineWidth: 0.55)
+    }
+
+    // MARK: - Wave Progress
+
+    private func waveProgresses(now: Date) -> [CGFloat] {
+        waveSpawnTimes
+            .map { CGFloat(now.timeIntervalSince($0) / waveLifetime) }
+            .filter { $0 >= 0 && $0 < 1 }
+    }
 
     // MARK: - Volume & Wave Spawning
 
     private func updateSmoothedVolume(_ volume: Double) {
-        let noiseGate: Double = 0.008
-        let gatedVolume = volume > noiseGate ? volume - noiseGate : 0
-        let amplified = min(1.0, gatedVolume * 100.0)
+        let target = min(max(volume, 0), 1)
 
         let newSmoothed: CGFloat
-        if CGFloat(amplified) > smoothedVolume {
-            newSmoothed = smoothedVolume * 0.3 + CGFloat(amplified) * 0.7
+        if CGFloat(target) > smoothedVolume {
+            newSmoothed = smoothedVolume * 0.35 + CGFloat(target) * 0.65
         } else {
-            newSmoothed = smoothedVolume * 0.70 + CGFloat(amplified) * 0.30
+            newSmoothed = smoothedVolume * 0.78 + CGFloat(target) * 0.22
         }
         smoothedVolume = newSmoothed
+    }
+
+    private func updateFluidPhase(now: Date) {
+        guard indicatorStyle.isLiquid, !showTranscriptionDots, !isPolishLoaderOnly else {
+            lastFluidPhaseDate = now
+            return
+        }
+
+        guard let lastFluidPhaseDate else {
+            self.lastFluidPhaseDate = now
+            return
+        }
+
+        let delta = min(max(now.timeIntervalSince(lastFluidPhaseDate), 0), 0.066)
+        self.lastFluidPhaseDate = now
+        guard delta > 0 else { return }
+
+        let voice = Double(min(max(smoothedVolume, 0), 1))
+        let voiceEase = pow(voice, 0.62)
+        let targetSpeed = 0.72 + voiceEase * 2.35
+        let responseRate = targetSpeed > fluidSpeed ? 5.6 : 2.4
+        let response = 1 - exp(-delta * responseRate)
+
+        fluidSpeed += (targetSpeed - fluidSpeed) * response
+        fluidPhase += fluidSpeed * delta
+
+        if fluidPhase > 10_000 {
+            fluidPhase.formTruncatingRemainder(dividingBy: 10_000)
+        }
     }
 
     private func spawnWaveIfNeeded() {
@@ -542,12 +1200,316 @@ class SnapPlaceholderController {
 // FLOATING WINDOW CONTROLLER
 // =============================================================================
 
+private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+    private enum MonitorError: Error {
+        case noDevice
+        case cannotAddInput
+        case cannotAddOutput
+    }
+
+    private static let calibratedNoiseFloorKey = "recordingIndicatorNoiseFloorRMS"
+
+    @Published private(set) var level: Double = 0
+
+    private let session = AVCaptureSession()
+    private let queue = DispatchQueue(label: "com.aitranscribe.recording-indicator.microphone-level")
+    private var isConfigured = false
+    private var smoothedLevel: Double = 0
+    private var lastPublishedAt: TimeInterval = 0
+    private var noiseFloor: Double = 0.002
+    private var hasNoiseFloor = false
+    private var usesCalibratedNoiseFloor = false
+    private var calibrationSamples: [Double]?
+
+    override init() {
+        super.init()
+        applySavedNoiseFloor()
+    }
+
+    func start() {
+        queue.async { [weak self] in
+            guard let self else { return }
+
+            do {
+                try self.configureIfNeeded()
+            } catch {
+                self.publish(level: 0)
+                return
+            }
+
+            if !self.session.isRunning {
+                self.session.startRunning()
+            }
+
+            self.publish(level: self.smoothedLevel)
+        }
+    }
+
+    func stop() {
+        queue.async { [weak self] in
+            guard let self else { return }
+
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+
+            self.smoothedLevel = 0
+            self.applySavedNoiseFloor()
+            self.publish(level: 0)
+        }
+    }
+
+    func calibrateNoiseFloor(duration: TimeInterval = 2.4, completion: @escaping (Double?) -> Void) {
+        queue.async { [weak self] in
+            guard let self else { return }
+
+            do {
+                try self.configureIfNeeded()
+            } catch {
+                DispatchQueue.main.async {
+                    completion(nil)
+                }
+                return
+            }
+
+            let wasRunning = self.session.isRunning
+            if !wasRunning {
+                self.session.startRunning()
+            }
+
+            self.calibrationSamples = []
+
+            self.queue.asyncAfter(deadline: .now() + duration) { [weak self] in
+                guard let self else { return }
+
+                let samples = self.calibrationSamples ?? []
+                self.calibrationSamples = nil
+
+                guard !samples.isEmpty else {
+                    if !wasRunning {
+                        self.session.stopRunning()
+                    }
+                    DispatchQueue.main.async {
+                        completion(nil)
+                    }
+                    return
+                }
+
+                let sortedSamples = samples.sorted()
+                let quietSampleCount = max(1, Int(Double(sortedSamples.count) * 0.80))
+                let quietSamples = sortedSamples.prefix(quietSampleCount)
+                let averageQuietRMS = quietSamples.reduce(0, +) / Double(quietSamples.count)
+                let calibratedFloor = min(max(averageQuietRMS * 1.35, 0.0008), 0.08)
+
+                self.noiseFloor = calibratedFloor
+                self.hasNoiseFloor = true
+                self.usesCalibratedNoiseFloor = true
+                self.smoothedLevel = 0
+                UserDefaults.standard.set(calibratedFloor, forKey: Self.calibratedNoiseFloorKey)
+
+                if !wasRunning {
+                    self.session.stopRunning()
+                }
+
+                DispatchQueue.main.async {
+                    completion(calibratedFloor)
+                }
+            }
+        }
+    }
+
+    func resetNoiseCalibration() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            UserDefaults.standard.removeObject(forKey: Self.calibratedNoiseFloorKey)
+            self.applySavedNoiseFloor()
+        }
+    }
+
+    private func configureIfNeeded() throws {
+        guard !isConfigured else { return }
+
+        session.beginConfiguration()
+        session.sessionPreset = .low
+        defer { session.commitConfiguration() }
+
+        guard let device = AVCaptureDevice.default(for: .audio) else {
+            throw MonitorError.noDevice
+        }
+
+        let input = try AVCaptureDeviceInput(device: device)
+        guard session.canAddInput(input) else {
+            throw MonitorError.cannotAddInput
+        }
+        session.addInput(input)
+
+        let output = AVCaptureAudioDataOutput()
+        output.setSampleBufferDelegate(self, queue: queue)
+        guard session.canAddOutput(output) else {
+            throw MonitorError.cannotAddOutput
+        }
+        session.addOutput(output)
+
+        isConfigured = true
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        let measuredLevel = normalizedLevel(from: sampleBuffer)
+        let responseWeight = measuredLevel > smoothedLevel ? 0.36 : 0.20
+        smoothedLevel = smoothedLevel * (1 - responseWeight) + measuredLevel * responseWeight
+
+        let now = Date().timeIntervalSince1970
+        guard now - lastPublishedAt > 0.05 else { return }
+        lastPublishedAt = now
+        publish(level: smoothedLevel)
+    }
+
+    private func normalizedLevel(from sampleBuffer: CMSampleBuffer) -> Double {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription),
+              let format = AVAudioFormat(streamDescription: streamDescription) else {
+            return 0
+        }
+
+        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frameCount > 0,
+              let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            return 0
+        }
+
+        pcmBuffer.frameLength = frameCount
+        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer,
+            at: 0,
+            frameCount: Int32(frameCount),
+            into: pcmBuffer.mutableAudioBufferList
+        )
+
+        guard status == noErr else {
+            return 0
+        }
+
+        let rms = rmsLevel(from: pcmBuffer)
+        if calibrationSamples != nil {
+            calibrationSamples?.append(rms)
+        }
+
+        let adjustedRMS = noiseReducedRMS(from: rms)
+        guard adjustedRMS > 0.00012 else { return 0 }
+
+        return min(1, pow(adjustedRMS * 23, 0.64))
+    }
+
+    private func applySavedNoiseFloor() {
+        let savedFloor = UserDefaults.standard.double(forKey: Self.calibratedNoiseFloorKey)
+        if savedFloor > 0 {
+            noiseFloor = savedFloor
+            hasNoiseFloor = true
+            usesCalibratedNoiseFloor = true
+        } else {
+            noiseFloor = 0.002
+            hasNoiseFloor = false
+            usesCalibratedNoiseFloor = false
+        }
+    }
+
+    private func noiseReducedRMS(from rms: Double) -> Double {
+        if !hasNoiseFloor {
+            noiseFloor = max(rms, 0.0008)
+            hasNoiseFloor = true
+        }
+
+        if !usesCalibratedNoiseFloor {
+            let ambientCeiling = max(noiseFloor * 1.75, noiseFloor + 0.0025)
+            if rms < ambientCeiling {
+                noiseFloor = noiseFloor * 0.94 + rms * 0.06
+            } else if rms < noiseFloor {
+                noiseFloor = noiseFloor * 0.98 + rms * 0.02
+            }
+        }
+
+        let subtractionFloor = max(noiseFloor * 1.12, noiseFloor + 0.00055)
+        return max(0, rms - subtractionFloor)
+    }
+
+    private func rmsLevel(from buffer: AVAudioPCMBuffer) -> Double {
+        let frames = Int(buffer.frameLength)
+        let channels = Int(buffer.format.channelCount)
+        guard frames > 0, channels > 0 else { return 0 }
+
+        if let channelData = buffer.floatChannelData {
+            return rmsLevel(channelData: channelData, frames: frames, channels: channels)
+        }
+
+        if let channelData = buffer.int16ChannelData {
+            var sum: Double = 0
+            var count = 0
+
+            for channel in 0..<channels {
+                for frame in 0..<frames {
+                    let sample = Double(channelData[channel][frame]) / Double(Int16.max)
+                    sum += sample * sample
+                    count += 1
+                }
+            }
+
+            return sqrt(sum / Double(max(count, 1)))
+        }
+
+        if let channelData = buffer.int32ChannelData {
+            var sum: Double = 0
+            var count = 0
+
+            for channel in 0..<channels {
+                for frame in 0..<frames {
+                    let sample = Double(channelData[channel][frame]) / Double(Int32.max)
+                    sum += sample * sample
+                    count += 1
+                }
+            }
+
+            return sqrt(sum / Double(max(count, 1)))
+        }
+
+        return 0
+    }
+
+    private func rmsLevel(channelData: UnsafePointer<UnsafeMutablePointer<Float>>, frames: Int, channels: Int) -> Double {
+        var sum: Double = 0
+        var count = 0
+
+        for channel in 0..<channels {
+            for frame in 0..<frames {
+                let sample = Double(channelData[channel][frame])
+                sum += sample * sample
+                count += 1
+            }
+        }
+
+        return sqrt(sum / Double(max(count, 1)))
+    }
+
+    private func publish(level: Double) {
+        DispatchQueue.main.async {
+            self.level = level
+        }
+    }
+}
+
 /// Manages the floating recording indicator window
 /// Has its own volume polling isolated from AppState to prevent cascading re-renders
 class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
+    enum PolishResponsePresentationPhase {
+        case indicator
+        case expanding
+        case reader
+    }
+
     private var window: NSWindow?
     private var appState: AppState?
     private var volumeTimer: Timer?
+    private let levelMonitor = RecordingIndicatorLevelMonitor()
+    private var levelCancellable: AnyCancellable?
 
     /// Snap placeholder controller for drag-and-snap
     private let snapPlaceholders = SnapPlaceholderController()
@@ -564,6 +1526,13 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
 
     /// Whether the indicator is in the process of disappearing (for fade-out animation)
     @Published var isDisappearing: Bool = false
+
+    /// When non-nil, the existing indicator window morphs into this Polish response.
+    @Published var polishResponseModel: PolishFloatingResponseModel?
+    @Published var polishResponsePresentationPhase: PolishResponsePresentationPhase = .indicator
+
+    /// Visual style for the small floating recording indicator.
+    @Published var indicatorStyle: RecordingIndicatorStyle = .classic
 
     /// Screen position for the indicator
     enum ScreenPosition: String, CaseIterable {
@@ -594,6 +1563,10 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
         if let savedPosition = UserDefaults.standard.string(forKey: "indicatorPosition"),
            let pos = ScreenPosition(rawValue: savedPosition) {
             position = pos
+        }
+        if let savedStyle = UserDefaults.standard.string(forKey: "recordingIndicatorStyle"),
+           let style = RecordingIndicatorStyle(rawValue: savedStyle) {
+            indicatorStyle = style
         }
     }
 
@@ -646,7 +1619,70 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
             self?.currentVolume = 0.0
             self?.isTranscribing = false
             self?.isDisappearing = false
+            self?.polishResponseModel = nil
+            self?.polishResponsePresentationPhase = .indicator
         }
+    }
+
+    func presentPolishResponse(presetName: String, screenshotData: Data?) {
+        stopVolumePolling()
+        stopDragMonitoring()
+        snapPlaceholders.hide()
+
+        if window == nil {
+            createWindow()
+            updatePosition()
+            window?.orderFront(nil)
+            isVisible = true
+        }
+
+        isDisappearing = false
+        isTranscribing = false
+
+        polishResponsePresentationPhase = .indicator
+
+        let responseModel: PolishFloatingResponseModel
+        if let existing = polishResponseModel {
+            existing.reset(presetName: presetName, screenshotData: screenshotData)
+            responseModel = existing
+        } else {
+            responseModel = PolishFloatingResponseModel(presetName: presetName, screenshotData: screenshotData)
+            polishResponseModel = responseModel
+        }
+
+        window?.hasShadow = true
+        window?.isMovableByWindowBackground = false
+        animatePolishResponseShell(screenshotData: screenshotData, model: responseModel)
+    }
+
+    func completePolishResponse(text: String, screenshotData: Data?) {
+        polishResponseModel?.complete(text: text, screenshotData: screenshotData)
+    }
+
+    func appendPolishResponse(delta: String) {
+        polishResponseModel?.append(delta: delta)
+    }
+
+    func copyPolishResponseAndClose() {
+        let text = polishResponseModel?.fullText ?? ""
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        closePolishResponse()
+    }
+
+    func closePolishResponse() {
+        polishResponseModel?.cancelReveal()
+        stopVolumePolling()
+        stopDragMonitoring()
+        snapPlaceholders.hide()
+        window?.orderOut(nil)
+        window = nil
+        isVisible = false
+        currentVolume = 0.0
+        isTranscribing = false
+        isDisappearing = false
+        polishResponseModel = nil
+        polishResponsePresentationPhase = .indicator
     }
 
     /// Set transcribing state (triggers dots rotation animation)
@@ -660,6 +1696,19 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
         if isVisible {
             updatePosition()
         }
+    }
+
+    func setStyle(_ newStyle: RecordingIndicatorStyle) {
+        indicatorStyle = newStyle
+        UserDefaults.standard.set(newStyle.rawValue, forKey: "recordingIndicatorStyle")
+    }
+
+    func calibrateNoiseFloor(completion: @escaping (Double?) -> Void) {
+        levelMonitor.calibrateNoiseFloor(completion: completion)
+    }
+
+    func resetNoiseCalibration() {
+        levelMonitor.resetNoiseCalibration()
     }
 
     // =========================================================================
@@ -752,43 +1801,33 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
     // =========================================================================
 
     private func startVolumePolling() {
-        // Poll for volume at 10Hz (every 100ms) for responsive visualization
-        volumeTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            self?.fetchVolume()
-        }
-        // Add to common run loop so it works during UI interactions
-        if let timer = volumeTimer {
-            RunLoop.main.add(timer, forMode: .common)
-        }
+        levelCancellable?.cancel()
+        levelCancellable = levelMonitor.$level
+            .receive(on: RunLoop.main)
+            .sink { [weak self] level in
+                guard let self, self.isVisible else { return }
+                self.currentVolume = level
+                self.window?.display()
+            }
+        levelMonitor.start()
     }
 
     private func stopVolumePolling() {
         volumeTimer?.invalidate()
         volumeTimer = nil
-    }
-
-    private func fetchVolume() {
-        // Get volume from Swift's AudioRecorder (not Python backend)
-        // The AudioRecorder is recording directly in the app, so we read its currentVolume
-        guard isVisible, let appState = appState else { return }
-
-        // Get volume from the Swift audio recorder
-        let volume = Double(appState.audioRecorder.currentVolume)
-
-        // Update on main thread
-        DispatchQueue.main.async { [weak self] in
-            self?.currentVolume = volume
-            // Force window to redraw
-            self?.window?.display()
-        }
+        levelCancellable?.cancel()
+        levelCancellable = nil
+        levelMonitor.stop()
+        currentVolume = 0
     }
 
     private func createWindow() {
         // Pass self to the view so it can observe our currentVolume
-        let contentView = RecordingIndicatorView(controller: self)
+        let contentView = RecordingIndicatorHostView(controller: self)
 
         let hostingView = NSHostingView(rootView: contentView)
         hostingView.frame = CGRect(x: 0, y: 0, width: 70, height: 42)
+        hostingView.autoresizingMask = [.width, .height]
 
         // Prevent NSHostingView from trying to auto-update the window's
         // content size min/max. This crashes on borderless floating windows
@@ -886,5 +1925,62 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
         }
 
         window.setFrameOrigin(newOrigin)
+    }
+
+    private func animatePolishResponseShell(screenshotData: Data?, model: PolishFloatingResponseModel) {
+        guard let window else { return }
+
+        let currentFrame = window.frame
+        let centerX = currentFrame.midX
+        let topY = currentFrame.maxY
+        let wideSize = NSSize(width: 420, height: 46)
+        let screenFrame = (window.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let finalWidth: CGFloat = min(720, max(420, screenFrame.width - 48))
+        let finalHeight: CGFloat = min(screenshotData == nil ? 560 : 720, max(420, screenFrame.height - 72))
+        let finalSize = NSSize(width: finalWidth, height: finalHeight)
+
+        let wideFrame = NSRect(
+            x: centerX - wideSize.width / 2,
+            y: topY - wideSize.height,
+            width: wideSize.width,
+            height: wideSize.height
+        )
+
+        let unclampedFinalX = centerX - finalSize.width / 2
+        let finalX = min(
+            max(unclampedFinalX, screenFrame.minX + 24),
+            screenFrame.maxX - finalSize.width - 24
+        )
+        let finalY = max(screenFrame.minY + 24, topY - finalSize.height)
+        let finalFrame = NSRect(
+            x: finalX,
+            y: finalY,
+            width: finalSize.width,
+            height: finalSize.height
+        )
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.24
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            window.animator().setFrame(wideFrame, display: true)
+        } completionHandler: {
+            DispatchQueue.main.async {
+                model.showWide()
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                self?.polishResponsePresentationPhase = .expanding
+            }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.34
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                window.animator().setFrame(finalFrame, display: true)
+            } completionHandler: { [weak self] in
+                DispatchQueue.main.async { [weak self] in
+                    model.showShell()
+                    self?.polishResponsePresentationPhase = .reader
+                }
+            }
+        }
     }
 }

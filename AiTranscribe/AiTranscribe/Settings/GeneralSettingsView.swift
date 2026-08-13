@@ -11,12 +11,18 @@ struct GeneralSettingsView: View {
     @AppStorage("autoPasteAfterTranscription") private var autoPasteAfterTranscription = false
     @AppStorage("playSounds") private var playSounds = true
     @AppStorage("indicatorPosition") private var indicatorPosition = "topCenter"
+    @AppStorage("recordingIndicatorStyle") private var recordingIndicatorStyle = "classic"
+    @AppStorage("recordingIndicatorNoiseFloorRMS") private var recordingIndicatorNoiseFloorRMS = 0.0
+    @AppStorage(MeetingPresenceMonitor.enabledKey) private var meetingRecordingReminderEnabled = true
+    @AppStorage(MeetingPresenceMonitor.preciseBrowserDetectionKey) private var preciseMeetingBrowserDetectionEnabled = true
     @AppStorage("basicTranscriptionBatchingEnabled") private var basicBatchingEnabled = true
     @AppStorage("basicTranscriptionBatchingThresholdSeconds") private var basicBatchingThresholdSeconds = 120.0
     @AppStorage("basicTranscriptionBatchingRamBudgetMB") private var basicBatchingRamBudgetMB = 4096
 
     // Init from hasAnimated so the very first frame is correct — no jump
     @State private var appeared: Bool
+    @State private var isCalibratingIndicatorNoise = false
+    @State private var noiseCalibrationMessage: String?
 
     init(hasAnimated: Bool, onAnimated: @escaping () -> Void) {
         self.hasAnimated = hasAnimated
@@ -33,7 +39,7 @@ struct GeneralSettingsView: View {
                         Text("General")
                             .font(.system(size: 22, weight: .bold, design: .rounded))
 
-                        Text("8 options")
+                        Text("12 options")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -56,6 +62,31 @@ struct GeneralSettingsView: View {
                                 if newValue {
                                     appState.checkAccessibilityPermissionsIfNeeded()
                                 }
+                            }
+                    }
+
+                    SettingsRow(
+                        title: "Meeting recording reminders",
+                        description: "Show a compact prompt when Google Meet or Zoom appears active so you can start a session recording before the call gets going."
+                    ) {
+                        Toggle("", isOn: $meetingRecordingReminderEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .onChange(of: meetingRecordingReminderEnabled) { _, newValue in
+                                MeetingPresenceMonitor.shared.refresh()
+                            }
+                    }
+
+                    SettingsRow(
+                        title: "Precise browser detection",
+                        description: "Read the active browser tab URL for exact Google Meet detection and meeting-link copy in Safari, Chrome, Edge, Brave, Arc, Vivaldi, Chromium, and Helium. Firefox and Zen fall back to window detection."
+                    ) {
+                        Toggle("", isOn: $preciseMeetingBrowserDetectionEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .disabled(!meetingRecordingReminderEnabled)
+                            .onChange(of: preciseMeetingBrowserDetectionEnabled) { _, _ in
+                                MeetingPresenceMonitor.shared.refresh()
                             }
                     }
                 }
@@ -81,28 +112,14 @@ struct GeneralSettingsView: View {
                         title: "Chunk length",
                         description: "Shorter chunks finish sooner and use less memory. 30 seconds is experimental; two minutes is the validated stable default."
                     ) {
-                        Picker("", selection: $basicBatchingThresholdSeconds) {
-                            ForEach(batchLengthPresets) { preset in
-                                Text(preset.title).tag(preset.seconds)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 210)
-                        .disabled(!basicBatchingEnabled)
+                        batchLengthMenu
                     }
 
                     SettingsRow(
                         title: "Local memory budget",
                         description: "Used by fallback post-stop batching. Rolling batches usually stay below this because chunks are small."
                     ) {
-                        Picker("", selection: $basicBatchingRamBudgetMB) {
-                            ForEach(ramBudgetPresets) { preset in
-                                Text(preset.title).tag(preset.megabytes)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 132)
-                        .disabled(!basicBatchingEnabled)
+                        ramBudgetMenu
                     }
 
                     batchInfoPanel
@@ -120,19 +137,12 @@ struct GeneralSettingsView: View {
                         title: "Position",
                         description: "Where the recording indicator appears on screen."
                     ) {
-                        Picker("", selection: $indicatorPosition) {
-                            ForEach(RecordingIndicatorController.ScreenPosition.allCases, id: \.rawValue) { pos in
-                                Text(pos.displayName).tag(pos.rawValue)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 140)
-                        .onChange(of: indicatorPosition) { _, newValue in
-                            if let pos = RecordingIndicatorController.ScreenPosition(rawValue: newValue) {
-                                appState.recordingIndicator.setPosition(pos)
-                            }
-                        }
+                        indicatorPositionMenu
                     }
+
+                    indicatorStyleSelector
+
+                    indicatorNoiseCalibrationPanel
                 }
                 .staggerIn(index: 5, appeared: appeared)
 
@@ -187,8 +197,9 @@ struct GeneralSettingsView: View {
                             Button("Request") {
                                 requestMicrophonePermission()
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+                            .buttonStyle(.plain)
+                            .labelStyle(.titleOnly)
+                            .modifier(SettingsActionPillStyle(tint: .accentColor, prominent: true))
                         }
                     }
 
@@ -199,7 +210,8 @@ struct GeneralSettingsView: View {
                         Button("Open") {
                             openMicrophoneSettings()
                         }
-                        .controlSize(.small)
+                        .buttonStyle(.plain)
+                        .modifier(SettingsActionPillStyle(tint: .secondary, prominent: false))
                     }
                 }
                 .staggerIn(index: 11, appeared: appeared)
@@ -242,12 +254,16 @@ struct GeneralSettingsView: View {
         HStack(spacing: 5) {
             Circle()
                 .fill(microphoneStatus == .authorized ? .green : (microphoneStatus == .notDetermined ? .orange : .red))
-                .frame(width: 8, height: 8)
+                .frame(width: 6, height: 6)
 
             Text(microphoneStatus == .authorized ? "Granted" : (microphoneStatus == .notDetermined ? "Not Requested" : "Denied"))
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(microphoneStatus == .authorized ? .green : (microphoneStatus == .notDetermined ? .orange : .red))
         }
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .background(.thinMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
     }
 
     private func requestMicrophonePermission() {
@@ -265,6 +281,218 @@ struct GeneralSettingsView: View {
     private func openMicrophoneSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
             NSWorkspace.shared.open(url)
+        }
+    }
+
+    // MARK: - Pill Controls
+
+    private var batchLengthMenu: some View {
+        Menu {
+            ForEach(batchLengthPresets) { preset in
+                Button(preset.title) {
+                    basicBatchingThresholdSeconds = preset.seconds
+                }
+            }
+        } label: {
+            settingsSelectPill(
+                title: batchLengthPresets.first(where: { $0.seconds == basicBatchingThresholdSeconds })?.title ?? formattedBatchLength,
+                icon: "timer",
+                width: 224
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .disabled(!basicBatchingEnabled)
+        .opacity(basicBatchingEnabled ? 1 : 0.55)
+    }
+
+    private var ramBudgetMenu: some View {
+        Menu {
+            ForEach(ramBudgetPresets) { preset in
+                Button(preset.title) {
+                    basicBatchingRamBudgetMB = preset.megabytes
+                }
+            }
+        } label: {
+            settingsSelectPill(
+                title: ramBudgetPresets.first(where: { $0.megabytes == basicBatchingRamBudgetMB })?.title ?? formattedRAMBudget,
+                icon: "memorychip",
+                width: 132
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .disabled(!basicBatchingEnabled)
+        .opacity(basicBatchingEnabled ? 1 : 0.55)
+    }
+
+    private var indicatorPositionMenu: some View {
+        Menu {
+            ForEach(RecordingIndicatorController.ScreenPosition.allCases, id: \.rawValue) { pos in
+                Button(pos.displayName) {
+                    indicatorPosition = pos.rawValue
+                    appState.recordingIndicator.setPosition(pos)
+                }
+            }
+        } label: {
+            settingsSelectPill(
+                title: RecordingIndicatorController.ScreenPosition(rawValue: indicatorPosition)?.displayName ?? "Top Center",
+                icon: "rectangle.inset.filled",
+                width: 160
+            )
+        }
+        .menuStyle(.borderlessButton)
+    }
+
+    private func settingsSelectPill(title: String, icon: String, width: CGFloat) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 8)
+
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 11)
+        .frame(width: width, height: 30)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+        .contentShape(Capsule())
+    }
+
+    // MARK: - Recording Indicator
+
+    private var selectedIndicatorStyle: RecordingIndicatorStyle {
+        RecordingIndicatorStyle(rawValue: recordingIndicatorStyle) ?? .classic
+    }
+
+    private var indicatorStyleColumns: [GridItem] {
+        [
+            GridItem(.flexible(), spacing: 10),
+            GridItem(.flexible(), spacing: 10)
+        ]
+    }
+
+    private var indicatorStyleSelector: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Style")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.primary)
+
+                    Text("Choose the floating indicator shown while recording.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+            }
+
+            LazyVGrid(columns: indicatorStyleColumns, alignment: .leading, spacing: 10) {
+                ForEach(RecordingIndicatorStyle.allCases) { style in
+                    RecordingIndicatorStyleOption(
+                        style: style,
+                        isSelected: selectedIndicatorStyle == style
+                    ) {
+                        recordingIndicatorStyle = style.rawValue
+                        appState.recordingIndicator.setStyle(style)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(.thinMaterial, in: .rect(cornerRadius: 10, style: .continuous))
+        .padding(.vertical, 2)
+    }
+
+    private var indicatorNoiseCalibrationPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Noise sensitivity")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.primary)
+
+                    Text(noiseCalibrationDescription)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 14)
+
+                HStack(spacing: 8) {
+                    if recordingIndicatorNoiseFloorRMS > 0 {
+                        Button("Reset") {
+                            appState.recordingIndicator.resetNoiseCalibration()
+                            recordingIndicatorNoiseFloorRMS = 0
+                            noiseCalibrationMessage = "Automatic noise floor restored."
+                        }
+                        .buttonStyle(.plain)
+                        .modifier(SettingsActionPillStyle(tint: .secondary, prominent: false))
+                        .disabled(isCalibratingIndicatorNoise)
+                    }
+
+                    Button {
+                        calibrateIndicatorNoiseFloor()
+                    } label: {
+                        Label(isCalibratingIndicatorNoise ? "Listening..." : "Calibrate", systemImage: "waveform")
+                    }
+                    .buttonStyle(.plain)
+                    .modifier(SettingsActionPillStyle(tint: .accentColor, prominent: true))
+                    .disabled(isCalibratingIndicatorNoise || microphoneStatus != .authorized)
+                }
+            }
+
+            if let noiseCalibrationMessage {
+                Text(noiseCalibrationMessage)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(.thinMaterial, in: .rect(cornerRadius: 10, style: .continuous))
+        .padding(.vertical, 2)
+    }
+
+    private var noiseCalibrationDescription: String {
+        if microphoneStatus != .authorized {
+            return "Grant microphone access before calibrating the indicator noise floor."
+        }
+
+        if recordingIndicatorNoiseFloorRMS > 0 {
+            return "Saved quiet-room floor: \(formattedNoiseFloor). This is subtracted before voice is mapped to the glow."
+        }
+
+        return "Measure the current room while quiet so background noise does not drive the glow."
+    }
+
+    private var formattedNoiseFloor: String {
+        String(format: "%.5f RMS", recordingIndicatorNoiseFloorRMS)
+    }
+
+    private func calibrateIndicatorNoiseFloor() {
+        guard !isCalibratingIndicatorNoise else { return }
+
+        isCalibratingIndicatorNoise = true
+        noiseCalibrationMessage = "Stay quiet for a moment..."
+
+        appState.recordingIndicator.calibrateNoiseFloor { floor in
+            isCalibratingIndicatorNoise = false
+            if let floor {
+                recordingIndicatorNoiseFloorRMS = floor
+                noiseCalibrationMessage = "Noise floor saved: \(String(format: "%.5f RMS", floor))."
+            } else {
+                noiseCalibrationMessage = "Could not read microphone noise. Check microphone access."
+            }
         }
     }
 
@@ -361,6 +589,161 @@ struct GeneralSettingsView: View {
 }
 
 // MARK: - Reusable Settings Components
+
+private struct SettingsActionPillStyle: ViewModifier {
+    let tint: Color
+    let prominent: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(prominent ? .white : tint)
+            .padding(.horizontal, 12)
+            .frame(height: 28)
+            .background(prominent ? AnyShapeStyle(tint) : AnyShapeStyle(Color.primary.opacity(0.075)), in: Capsule())
+            .overlay(Capsule().strokeBorder(prominent ? tint.opacity(0.28) : .white.opacity(0.06), lineWidth: 0.6))
+            .contentShape(Capsule())
+    }
+}
+
+private struct RecordingIndicatorStyleOption: View {
+    let style: RecordingIndicatorStyle
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHoveringPreview = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                RecordingIndicatorStylePreview(
+                    style: style,
+                    isActive: isSelected || isHoveringPreview
+                )
+                    .frame(width: 70, height: 42)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(style.displayName)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.primary)
+
+                    Text(style.description)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                Image(systemName: selectionIconName)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(selectionIconColor)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, minHeight: 66, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isSelected ? Color.green.opacity(0.10) : Color.primary.opacity(0.045))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(isSelected ? Color.green.opacity(0.42) : Color.white.opacity(0.08), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHoveringPreview = $0 }
+        .accessibilityLabel("\(style.displayName) recording indicator style")
+        .accessibilityValue(isSelected ? "Selected" : "Not selected")
+    }
+
+    private var selectionIconName: String {
+        isSelected ? "checkmark.circle.fill" : "circle"
+    }
+
+    private var selectionIconColor: Color {
+        isSelected ? .green : .secondary.opacity(0.55)
+    }
+}
+
+private struct RecordingIndicatorStylePreview: View {
+    let style: RecordingIndicatorStyle
+    let isActive: Bool
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Group {
+            if isActive {
+                TimelineView(.periodic(from: Self.animationStartTime, by: 1.0 / 18.0)) { timeline in
+                    previewContent(date: timeline.date)
+                }
+            } else {
+                previewContent(date: inactivePreviewDate)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private static let animationStartTime = Date(timeIntervalSinceReferenceDate: 0)
+
+    private var inactivePreviewDate: Date {
+        Date(timeIntervalSinceReferenceDate: Double(styleIndex) * 0.23 + 0.42)
+    }
+
+    private var styleIndex: Int {
+        RecordingIndicatorStyle.allCases.firstIndex(of: style) ?? 0
+    }
+
+    @ViewBuilder
+    private func previewContent(date: Date) -> some View {
+        let level = isActive ? previewLevel(at: date) : 0.58
+
+        ZStack {
+            Capsule()
+                .fill(
+                    colorScheme == .dark
+                        ? Color(white: 0.12, opacity: 0.72)
+                        : Color(white: 0.92, opacity: 0.85)
+                )
+                .overlay(
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: colorScheme == .dark
+                                    ? [Color.white.opacity(0.12), Color.clear]
+                                    : [Color.white.opacity(0.5), Color.clear],
+                                startPoint: .top,
+                                endPoint: .center
+                            )
+                        )
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.22 : 0.56), lineWidth: 0.5)
+                )
+
+            RecordingIndicatorMiniVisual(
+                style: style,
+                level: level,
+                now: date,
+                animationStartTime: Self.animationStartTime,
+                fluidPhase: date.timeIntervalSinceReferenceDate * 0.72,
+                waveProgresses: previewWaveProgresses(at: date),
+                showsTranscriptionDots: false,
+                showsOnlyTranscriptionDots: false
+            )
+        }
+    }
+
+    private func previewLevel(at date: Date) -> CGFloat {
+        let phase = (sin(date.timeIntervalSinceReferenceDate * 2.2) + 1) / 2
+        return CGFloat(0.38 + phase * 0.42)
+    }
+
+    private func previewWaveProgresses(at date: Date) -> [CGFloat] {
+        let cycle = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.4) / 1.4
+        let first = CGFloat(cycle)
+        let second = CGFloat((cycle + 0.52).truncatingRemainder(dividingBy: 1))
+        return [first, second]
+    }
+}
 
 /// Section header — small caps title above a group of rows
 struct SettingsSectionHeader: View {

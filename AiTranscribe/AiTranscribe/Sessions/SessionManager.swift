@@ -200,6 +200,180 @@ enum SummaryLengthOption: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+enum SessionAutomationSource: String, CaseIterable, Codable, Identifiable {
+    case local
+    case `public`
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .local: return "Local"
+        case .public: return "Public API"
+        }
+    }
+}
+
+enum SessionAutomationStatus: String, Codable, Equatable {
+    case queued
+    case transcribing
+    case transcriptionFailed = "transcription_failed"
+    case summarizing
+    case summaryFailed = "summary_failed"
+    case completed
+    case skipped
+
+    var displayName: String {
+        switch self {
+        case .queued: return "Queued"
+        case .transcribing: return "Auto-transcribing"
+        case .transcriptionFailed: return "Auto-transcription failed"
+        case .summarizing: return "Auto-summarizing"
+        case .summaryFailed: return "Auto-summary failed"
+        case .completed: return "Auto-processed"
+        case .skipped: return "Skipped"
+        }
+    }
+}
+
+struct SessionAutomationMetadata: Codable, Equatable {
+    var status: SessionAutomationStatus
+    var message: String?
+    var startedAt: Date
+    var updatedAt: Date
+    var completedAt: Date?
+    var transcribeEnabled: Bool
+    var summarizeEnabled: Bool
+    var transcriptionSource: SessionAutomationSource
+    var transcriptionProviderId: String?
+    var transcriptionModelId: String?
+    var summarySource: SessionAutomationSource?
+    var summaryProviderId: String?
+    var summaryModelId: String?
+    var summaryPresetIds: [String]
+
+    var isActive: Bool {
+        status == .queued || status == .transcribing || status == .summarizing
+    }
+
+    static func queued(settings: SessionAutomationPreferences) -> SessionAutomationMetadata {
+        let now = Date()
+        return SessionAutomationMetadata(
+            status: .queued,
+            message: settings.autoSummarize ? "Waiting to transcribe, then summarize." : "Waiting to transcribe.",
+            startedAt: now,
+            updatedAt: now,
+            completedAt: nil,
+            transcribeEnabled: settings.autoTranscribe,
+            summarizeEnabled: settings.autoSummarize,
+            transcriptionSource: settings.transcriptionSource,
+            transcriptionProviderId: settings.transcriptionProviderId,
+            transcriptionModelId: settings.transcriptionSource == .local
+                ? settings.localTranscriptionModelId
+                : settings.transcriptionModelId,
+            summarySource: settings.summarySource,
+            summaryProviderId: settings.summaryProviderId,
+            summaryModelId: settings.summarySource == .local
+                ? settings.localSummaryModelId
+                : settings.summaryModelId,
+            summaryPresetIds: settings.summaryPresetIds
+        )
+    }
+}
+
+struct SessionAutomationPreferences {
+    static let autoTranscribeKey = "sessionAutomationAutoTranscribe"
+    static let transcriptionSourceKey = "sessionAutomationTranscriptionSource"
+    static let localTranscriptionModelKey = "sessionAutomationLocalTranscriptionModelId"
+    static let transcriptionProviderKey = "sessionAutomationTranscriptionProviderId"
+    static let transcriptionModelKey = "sessionAutomationTranscriptionModelId"
+    static let localRamBudgetGBKey = "sessionAutomationLocalRamBudgetGB"
+    static let publicBatchTargetKey = "sessionAutomationPublicBatchTarget"
+    static let autoSummarizeKey = "sessionAutomationAutoSummarize"
+    static let summarySourceKey = "sessionAutomationSummarySource"
+    static let localSummaryModelKey = "sessionAutomationLocalSummaryModelId"
+    static let summaryProviderKey = "sessionAutomationSummaryProviderId"
+    static let summaryModelKey = "sessionAutomationSummaryModelId"
+    static let summaryPresetIdsKey = "sessionAutomationSummaryPresetIds"
+    static let summaryLengthOptionKey = "sessionAutomationSummaryLengthOption"
+    static let summaryCustomWordsKey = "sessionAutomationSummaryCustomWords"
+
+    var autoTranscribe: Bool
+    var transcriptionSource: SessionAutomationSource
+    var localTranscriptionModelId: String
+    var transcriptionProviderId: String
+    var transcriptionModelId: String
+    var localRamBudgetGB: Double
+    var publicBatchTarget: Int
+    var autoSummarize: Bool
+    var summarySource: SessionAutomationSource
+    var localSummaryModelId: String
+    var summaryProviderId: String
+    var summaryModelId: String
+    var summaryPresetIds: [String]
+    var summaryLengthOption: SummaryLengthOption
+    var summaryCustomWords: Int
+
+    var targetSummaryWords: Int {
+        summaryLengthOption == .custom ? max(120, summaryCustomWords) : summaryLengthOption.defaultWordTarget
+    }
+
+    static func load() -> SessionAutomationPreferences {
+        let defaults = UserDefaults.standard
+        let apiTranscriptionModels = APITranscriptionModelStore.load()
+        let firstPublicTranscription = apiTranscriptionModels.first {
+            APITranscriptionModelStore.isSupportedModel($0.modelId, providerId: $0.providerId)
+        }
+        let apiLanguageModels = APILanguageModelStore.load()
+        let firstLanguageModel = apiLanguageModels.first
+
+        let transcriptionSource = SessionAutomationSource(
+            rawValue: defaults.string(forKey: transcriptionSourceKey) ?? SessionAutomationSource.local.rawValue
+        ) ?? .local
+        let summarySource = SessionAutomationSource(
+            rawValue: defaults.string(forKey: summarySourceKey) ?? SessionAutomationSource.local.rawValue
+        ) ?? .local
+        let presetIds = defaults.stringArray(forKey: summaryPresetIdsKey)
+            ?? [SessionSummaryPreset.meetingNotes.rawValue]
+
+        return SessionAutomationPreferences(
+            autoTranscribe: defaults.bool(forKey: autoTranscribeKey),
+            transcriptionSource: transcriptionSource,
+            localTranscriptionModelId: defaults.string(forKey: localTranscriptionModelKey)
+                ?? defaults.string(forKey: "preferredModelId")
+                ?? "parakeet-v2",
+            transcriptionProviderId: defaults.string(forKey: transcriptionProviderKey)
+                ?? firstPublicTranscription?.providerId
+                ?? TranscriptionProviderDescriptor.openAI.id,
+            transcriptionModelId: defaults.string(forKey: transcriptionModelKey)
+                ?? firstPublicTranscription?.modelId
+                ?? TranscriptionModelDescriptor.openAIModels[0].id,
+            localRamBudgetGB: defaults.object(forKey: localRamBudgetGBKey) == nil
+                ? 4.0
+                : defaults.double(forKey: localRamBudgetGBKey),
+            publicBatchTarget: defaults.integer(forKey: publicBatchTargetKey),
+            autoSummarize: defaults.bool(forKey: autoSummarizeKey),
+            summarySource: summarySource,
+            localSummaryModelId: defaults.string(forKey: localSummaryModelKey)
+                ?? defaults.string(forKey: "preferredSummaryModelId")
+                ?? "gemma-4-e2b-it-4bit",
+            summaryProviderId: defaults.string(forKey: summaryProviderKey)
+                ?? firstLanguageModel?.providerId
+                ?? TranscriptionProviderDescriptor.openAI.id,
+            summaryModelId: defaults.string(forKey: summaryModelKey)
+                ?? firstLanguageModel?.modelId
+                ?? APILanguageModelStore.defaultModels[0].modelId,
+            summaryPresetIds: presetIds.isEmpty ? [SessionSummaryPreset.meetingNotes.rawValue] : presetIds,
+            summaryLengthOption: SummaryLengthOption(
+                rawValue: defaults.string(forKey: summaryLengthOptionKey) ?? SummaryLengthOption.medium.rawValue
+            ) ?? .medium,
+            summaryCustomWords: defaults.object(forKey: summaryCustomWordsKey) == nil
+                ? SummaryLengthOption.custom.defaultWordTarget
+                : defaults.integer(forKey: summaryCustomWordsKey)
+        )
+    }
+}
+
 struct SummaryPresetDefinition: Codable, Equatable, Identifiable {
     var id: String
     var displayName: String
@@ -397,6 +571,7 @@ struct Session: Identifiable, Codable, Equatable {
     var transcriptionEstimatedCostUSD: Double?
     var status: SessionStatus
     var summaries: [String: SessionSummaryMetadata]
+    var automation: SessionAutomationMetadata?
 
     /// The directory name used for storage (based on date)
     var directoryName: String {
@@ -419,6 +594,7 @@ struct Session: Identifiable, Codable, Equatable {
         self.transcriptionEstimatedCostUSD = nil
         self.status = .idle
         self.summaries = SessionSummaryMetadata.defaultMap()
+        self.automation = nil
 
         // Auto-generate name from date if not provided
         if let name = name {
@@ -442,6 +618,7 @@ struct BatchProgress: Equatable {
     var memoryMB: Double?
     var etaSeconds: Double?
     var textSoFar: String?
+    var isUltraInstinct: Bool = false
 }
 
 struct SessionSummaryProgress: Equatable {
@@ -484,6 +661,13 @@ private struct PublicSessionTranscriptionResult: Sendable {
     let batchCount: Int
 }
 
+private struct PublicSessionTranscriptionRoute: Sendable {
+    let providerId: String
+    let modelId: String
+    let displayName: String
+    let apiKey: String
+}
+
 // MARK: - Session Metadata (for JSON persistence)
 
 /// The metadata.json structure stored in each session directory
@@ -504,6 +688,7 @@ private struct SessionMetadata: Codable {
     var status: String
     var statusMessage: String?
     var summaries: [String: SessionSummaryMetadata]?
+    var automation: SessionAutomationMetadata?
 
     init(from session: Session) {
         self.id = session.id.uuidString
@@ -521,6 +706,7 @@ private struct SessionMetadata: Codable {
         self.wordCount = session.wordCount
         self.transcriptionEstimatedCostUSD = session.transcriptionEstimatedCostUSD
         self.summaries = session.summaries
+        self.automation = session.automation
 
         switch session.status {
         case .idle: self.status = "idle"; self.statusMessage = nil
@@ -548,6 +734,7 @@ private struct SessionMetadata: Codable {
         session.wordCount = wordCount
         session.transcriptionEstimatedCostUSD = transcriptionEstimatedCostUSD
         session.summaries = summaries ?? SessionSummaryMetadata.defaultMap()
+        session.automation = automation
 
         switch status {
         case "recording": session.status = .recording
@@ -595,6 +782,9 @@ class SessionManager: ObservableObject {
     /// Current summary progress
     @Published var summaryProgress: SessionSummaryProgress? = nil
 
+    /// Sessions waiting for automatic post-processing.
+    @Published var automationQueue: [UUID] = []
+
     // MARK: - Recording
 
     /// The session recorder that handles mic + system audio capture
@@ -613,6 +803,7 @@ class SessionManager: ObservableObject {
     private let decoder = JSONDecoder()
     private var durationTimer: Timer?
     private var durationObserver: AnyCancellable?
+    private var isAutomationPumpScheduled = false
 
     /// Base directory for all sessions
     var sessionsDirectory: URL {
@@ -960,6 +1151,282 @@ class SessionManager: ObservableObject {
         currentRecordingSessionId = nil
         sessionDuration = 0
         appState?.isSessionRecordingActive = false
+
+        enqueueAutomationIfNeeded(for: sessionId)
+    }
+
+    // MARK: - Session Automation
+
+    private func enqueueAutomationIfNeeded(for sessionId: UUID) {
+        let settings = SessionAutomationPreferences.load()
+        guard settings.autoTranscribe else { return }
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }),
+              sessions[index].hasAudio else { return }
+
+        sessions[index].automation = .queued(settings: settings)
+        saveMetadata(for: sessions[index])
+
+        if !automationQueue.contains(sessionId) {
+            automationQueue.append(sessionId)
+        }
+        pumpAutomationQueue()
+    }
+
+    private func pumpAutomationQueue() {
+        guard !isAutomationPumpScheduled else { return }
+        isAutomationPumpScheduled = true
+        Task { @MainActor in
+            defer { isAutomationPumpScheduled = false }
+            guard currentTranscribingSessionId == nil,
+                  currentSummarizingSessionId == nil,
+                  !isSessionRecording else { return }
+
+            while let sessionId = automationQueue.first {
+                automationQueue.removeFirst()
+                guard let index = sessions.firstIndex(where: { $0.id == sessionId }),
+                      sessions[index].hasAudio,
+                      sessions[index].automation?.isActive == true else {
+                    continue
+                }
+
+                beginAutomationTranscription(sessionId: sessionId)
+                return
+            }
+        }
+    }
+
+    private func beginAutomationTranscription(sessionId: UUID) {
+        let settings = SessionAutomationPreferences.load()
+        guard sessions.contains(where: { $0.id == sessionId }) else { return }
+
+        updateAutomation(
+            sessionId: sessionId,
+            status: .transcribing,
+            message: "Starting automatic transcription."
+        )
+
+        switch settings.transcriptionSource {
+        case .public:
+            let model = APITranscriptionModelStore.load().first {
+                $0.providerId == settings.transcriptionProviderId &&
+                    $0.modelId == settings.transcriptionModelId &&
+                    APITranscriptionModelStore.isSupportedModel($0.modelId, providerId: $0.providerId)
+            } ?? APITranscriptionModelStore.load().first {
+                APITranscriptionModelStore.isSupportedModel($0.modelId, providerId: $0.providerId)
+            }
+
+            guard let model else {
+                markAutomationFailed(
+                    sessionId: sessionId,
+                    status: .transcriptionFailed,
+                    message: "No supported public transcription model is configured."
+                )
+                return
+            }
+
+            guard let apiKey = try? APIKeychainStore.apiKey(providerId: model.providerId),
+                  !apiKey.isEmpty else {
+                markAutomationFailed(
+                    sessionId: sessionId,
+                    status: .transcriptionFailed,
+                    message: "Add \(model.providerName) API key first."
+                )
+                return
+            }
+
+            startPublicTranscription(
+                sessionId: sessionId,
+                providerId: model.providerId,
+                modelId: model.modelId,
+                displayName: model.displayName,
+                targetBatchCount: settings.publicBatchTarget > 0 ? settings.publicBatchTarget : nil
+            )
+
+        case .local:
+            guard let appState else {
+                markAutomationFailed(
+                    sessionId: sessionId,
+                    status: .transcriptionFailed,
+                    message: "App state is unavailable."
+                )
+                return
+            }
+
+            guard appState.isServerConnected else {
+                markAutomationFailed(
+                    sessionId: sessionId,
+                    status: .transcriptionFailed,
+                    message: "Backend is not connected."
+                )
+                return
+            }
+
+            let modelId = settings.localTranscriptionModelId
+            guard appState.availableModels.contains(where: { $0.id == modelId && $0.downloaded == true && $0.sessionCompatible }) else {
+                markAutomationFailed(
+                    sessionId: sessionId,
+                    status: .transcriptionFailed,
+                    message: "Download the selected session transcription model first."
+                )
+                return
+            }
+
+            Task { @MainActor in
+                if appState.isModelLoaded && appState.loadedModelId != modelId {
+                    await appState.unloadModel()
+                }
+                if !appState.isModelLoaded || appState.loadedModelId != modelId {
+                    updateAutomation(
+                        sessionId: sessionId,
+                        status: .transcribing,
+                        message: "Loading \(modelId)."
+                    )
+                    await appState.loadModel(modelId: modelId)
+                }
+
+                guard appState.isModelLoaded && appState.loadedModelId == modelId else {
+                    markAutomationFailed(
+                        sessionId: sessionId,
+                        status: .transcriptionFailed,
+                        message: "Could not load \(modelId)."
+                    )
+                    return
+                }
+
+                startTranscription(
+                    sessionId: sessionId,
+                    modelId: modelId,
+                    ramBudgetMB: Int(max(1.0, settings.localRamBudgetGB) * 1024),
+                    apiClient: appState.apiClient
+                )
+            }
+        }
+    }
+
+    private func continueAutomationAfterTranscription(sessionId: UUID) {
+        let settings = SessionAutomationPreferences.load()
+        guard settings.autoSummarize else {
+            completeAutomation(sessionId: sessionId, message: "Automatic transcription complete.")
+            pumpAutomationQueue()
+            return
+        }
+
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }),
+              sessions[index].hasTranscription else {
+            markAutomationFailed(
+                sessionId: sessionId,
+                status: .summaryFailed,
+                message: "Summary skipped because transcription did not complete."
+            )
+            return
+        }
+
+        let presetRequests = automationSummaryPresetRequests(settings: settings)
+        guard !presetRequests.isEmpty else {
+            completeAutomation(sessionId: sessionId, message: "Automatic transcription complete. No summary presets selected.")
+            pumpAutomationQueue()
+            return
+        }
+
+        updateAutomation(
+            sessionId: sessionId,
+            status: .summarizing,
+            message: "Generating \(presetRequests.count) automatic summar\(presetRequests.count == 1 ? "y" : "ies")."
+        )
+
+        switch settings.summarySource {
+        case .public:
+            let model = APILanguageModelStore.load().first {
+                $0.providerId == settings.summaryProviderId &&
+                    $0.modelId == settings.summaryModelId
+            } ?? APILanguageModelStore.load().first
+
+            guard let model else {
+                markAutomationFailed(
+                    sessionId: sessionId,
+                    status: .summaryFailed,
+                    message: "No public language model is configured."
+                )
+                return
+            }
+
+            guard let apiKey = try? APIKeychainStore.apiKey(providerId: model.providerId),
+                  !apiKey.isEmpty else {
+                markAutomationFailed(
+                    sessionId: sessionId,
+                    status: .summaryFailed,
+                    message: "Add \(model.providerName) API key first."
+                )
+                return
+            }
+
+            startPublicSummary(
+                sessionId: sessionId,
+                providerId: model.providerId,
+                modelId: model.modelId,
+                modelName: model.displayName,
+                presetRequests: presetRequests
+            )
+
+        case .local:
+            guard let appState else {
+                markAutomationFailed(
+                    sessionId: sessionId,
+                    status: .summaryFailed,
+                    message: "App state is unavailable."
+                )
+                return
+            }
+
+            guard appState.availableSummaryModels.contains(where: { $0.id == settings.localSummaryModelId && $0.downloaded }) else {
+                markAutomationFailed(
+                    sessionId: sessionId,
+                    status: .summaryFailed,
+                    message: "Download the selected local summary model first."
+                )
+                return
+            }
+
+            startSummary(
+                sessionId: sessionId,
+                modelId: settings.localSummaryModelId,
+                presetRequests: presetRequests,
+                apiClient: appState.apiClient
+            )
+        }
+    }
+
+    private func automationSummaryPresetRequests(settings: SessionAutomationPreferences) -> [SummaryGenerationPresetRequest] {
+        let targetWords = settings.targetSummaryWords
+        let selectedIds = Set(settings.summaryPresetIds)
+        return SummaryPresetLibrary.load()
+            .filter {
+                selectedIds.contains($0.id) &&
+                    !$0.instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            .map { SummaryGenerationPresetRequest.make(from: $0, targetWords: targetWords) }
+    }
+
+    private func updateAutomation(sessionId: UUID, status: SessionAutomationStatus, message: String?) {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        var metadata = sessions[index].automation ?? .queued(settings: SessionAutomationPreferences.load())
+        metadata.status = status
+        metadata.message = message
+        metadata.updatedAt = Date()
+        if status == .completed || status == .skipped || status == .summaryFailed || status == .transcriptionFailed {
+            metadata.completedAt = Date()
+        }
+        sessions[index].automation = metadata
+        saveMetadata(for: sessions[index])
+    }
+
+    private func completeAutomation(sessionId: UUID, message: String?) {
+        updateAutomation(sessionId: sessionId, status: .completed, message: message)
+    }
+
+    private func markAutomationFailed(sessionId: UUID, status: SessionAutomationStatus, message: String) {
+        updateAutomation(sessionId: sessionId, status: status, message: message)
+        pumpAutomationQueue()
     }
 
     // MARK: - Session Rename
@@ -1013,6 +1480,13 @@ class SessionManager: ObservableObject {
                 }
                 currentTranscribingSessionId = nil
                 transcriptionProgress = nil
+                if sessions.first(where: { $0.id == sessionId })?.automation?.status == .transcribing {
+                    markAutomationFailed(
+                        sessionId: sessionId,
+                        status: .transcriptionFailed,
+                        message: error.localizedDescription
+                    )
+                }
             }
         }
     }
@@ -1024,7 +1498,8 @@ class SessionManager: ObservableObject {
         providerId: String,
         modelId: String,
         displayName: String,
-        targetBatchCount: Int? = nil
+        targetBatchCount: Int? = nil,
+        ultraInstinctModels: [APITranscriptionModel] = []
     ) {
         guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
         guard sessions[index].hasAudio else {
@@ -1042,20 +1517,59 @@ class SessionManager: ObservableObject {
             return
         }
 
-        guard let apiKey = try? APIKeychainStore.apiKey(providerId: providerId),
-              !apiKey.isEmpty else {
-            sessions[index].status = .failed("Add \(publicTranscriptionProviderName(for: providerId)) API key first.")
-            saveMetadata(for: sessions[index])
-            return
+        let requestedRoutes: [PublicSessionTranscriptionRoute]
+        if ultraInstinctModels.count >= 2 {
+            var routes: [PublicSessionTranscriptionRoute] = []
+            for model in ultraInstinctModels.prefix(3) {
+                guard let apiKey = try? APIKeychainStore.apiKey(providerId: model.providerId),
+                      !apiKey.isEmpty else {
+                    sessions[index].status = .failed("Add \(publicTranscriptionProviderName(for: model.providerId)) API key first.")
+                    saveMetadata(for: sessions[index])
+                    return
+                }
+                routes.append(
+                    PublicSessionTranscriptionRoute(
+                        providerId: model.providerId,
+                        modelId: model.modelId,
+                        displayName: model.displayName,
+                        apiKey: apiKey
+                    )
+                )
+            }
+            requestedRoutes = routes
+        } else {
+            guard let apiKey = try? APIKeychainStore.apiKey(providerId: providerId),
+                  !apiKey.isEmpty else {
+                sessions[index].status = .failed("Add \(publicTranscriptionProviderName(for: providerId)) API key first.")
+                saveMetadata(for: sessions[index])
+                return
+            }
+            requestedRoutes = [
+                PublicSessionTranscriptionRoute(
+                    providerId: providerId,
+                    modelId: modelId,
+                    displayName: displayName,
+                    apiKey: apiKey
+                )
+            ]
         }
+        let isUltraInstinct = requestedRoutes.count > 1
+        let routeDisplayName = isUltraInstinct
+            ? "Ultra Instinct: \(requestedRoutes.map(\.displayName).joined(separator: " + "))"
+            : displayName
 
         clearSummaries(sessionIndex: index)
 
         sessions[index].status = .transcribing
-        sessions[index].modelUsed = modelId
+        sessions[index].modelUsed = isUltraInstinct ? routeDisplayName : modelId
         sessions[index].ramBudgetMB = nil
         currentTranscribingSessionId = sessionId
-        transcriptionProgress = BatchProgress(batch: 0, totalBatches: 0, progress: 0.02)
+        transcriptionProgress = BatchProgress(
+            batch: 0,
+            totalBatches: 0,
+            progress: 0.02,
+            isUltraInstinct: isUltraInstinct
+        )
         saveMetadata(for: sessions[index])
 
         Task {
@@ -1077,16 +1591,18 @@ class SessionManager: ObservableObject {
                         batch: 0,
                         totalBatches: plan.batches.count,
                         progress: 0.08,
-                        textSoFar: "Prepared \(plan.batches.count) API batch\(plan.batches.count == 1 ? "" : "es")"
+                        textSoFar: isUltraInstinct
+                            ? "Ultra Instinct prepared \(plan.batches.count) API batches across \(requestedRoutes.count) routes"
+                            : "Prepared \(plan.batches.count) API batch\(plan.batches.count == 1 ? "" : "es")",
+                        isUltraInstinct: isUltraInstinct
                     )
-                    print("SessionManager: public session batching provider=\(providerId) model=\(modelId) batches=\(plan.batches.count) targetBatches=\(targetBatchCount ?? 0) fileSizeMB=\(Double(fileSize) / 1_000_000.0)")
+                    let routeLog = requestedRoutes.map { "\($0.providerId):\($0.modelId)" }.joined(separator: ",")
+                    print("SessionManager: public session batching routes=\(routeLog) ultraInstinct=\(isUltraInstinct) batches=\(plan.batches.count) targetBatches=\(targetBatchCount ?? 0) fileSizeMB=\(Double(fileSize) / 1_000_000.0)")
                 }
 
                 let result = try await Self.transcribePublicSessionBatches(
                     plan.batches,
-                    providerId: providerId,
-                    modelId: modelId,
-                    apiKey: apiKey
+                    routes: requestedRoutes
                 ) { completed, total, preview in
                     await MainActor.run {
                         let progress = total > 0 ? 0.08 + (Double(completed) / Double(total) * 0.90) : 0.08
@@ -1094,7 +1610,8 @@ class SessionManager: ObservableObject {
                             batch: completed,
                             totalBatches: total,
                             progress: min(progress, 0.98),
-                            textSoFar: preview
+                            textSoFar: preview,
+                            isUltraInstinct: isUltraInstinct
                         )
                     }
                 }
@@ -1108,25 +1625,28 @@ class SessionManager: ObservableObject {
                     sessions[idx].wordCount = text.split(separator: " ").count
                     sessions[idx].batchCount = result.batchCount
                     sessions[idx].transcriptionTime = Date().timeIntervalSince(startedAt)
-                    sessions[idx].modelUsed = displayName
+                    sessions[idx].modelUsed = routeDisplayName
                     sessions[idx].transcriptionEstimatedCostUSD = result.estimatedCostUSD
-                        ?? APITranscriptionModelStore.load()
+                        ?? (isUltraInstinct ? nil : APITranscriptionModelStore.load()
                             .first(where: { $0.providerId == providerId && $0.modelId == modelId })?
-                            .estimatedCost(durationSeconds: sessions[idx].duration)
+                            .estimatedCost(durationSeconds: sessions[idx].duration))
                     saveTranscriptionText(for: sessions[idx], text: text)
                     saveMetadata(for: sessions[idx])
                     currentTranscribingSessionId = nil
                     transcriptionProgress = nil
                     print(String(
-                        format: "SessionManager: public session transcription complete provider=%@ model=%@ batches=%d elapsed=%.2fs requestElapsed=%.2fs words=%d estimatedCost=$%.6f",
-                        providerId,
-                        modelId,
+                        format: "SessionManager: public session transcription complete routes=%@ ultraInstinct=%@ batches=%d elapsed=%.2fs requestElapsed=%.2fs words=%d estimatedCost=$%.6f",
+                        requestedRoutes.map { "\($0.providerId):\($0.modelId)" }.joined(separator: ","),
+                        isUltraInstinct.description,
                         result.batchCount,
                         Date().timeIntervalSince(startedAt),
                         result.processingTimeSeconds,
                         sessions[idx].wordCount ?? 0,
                         sessions[idx].transcriptionEstimatedCostUSD ?? 0
                     ))
+                    if sessions[idx].automation?.status == .transcribing {
+                        continueAutomationAfterTranscription(sessionId: sessionId)
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -1136,6 +1656,13 @@ class SessionManager: ObservableObject {
                     }
                     currentTranscribingSessionId = nil
                     transcriptionProgress = nil
+                    if sessions.first(where: { $0.id == sessionId })?.automation?.status == .transcribing {
+                        markAutomationFailed(
+                            sessionId: sessionId,
+                            status: .transcriptionFailed,
+                            message: error.localizedDescription
+                        )
+                    }
                 }
             }
         }
@@ -1279,42 +1806,60 @@ class SessionManager: ObservableObject {
 
     private nonisolated static func transcribePublicSessionBatches(
         _ batches: [PublicSessionAudioBatch],
-        providerId: String,
-        modelId: String,
-        apiKey: String,
+        routes: [PublicSessionTranscriptionRoute],
         onBatchComplete: @escaping @Sendable (_ completed: Int, _ total: Int, _ preview: String?) async -> Void
     ) async throws -> PublicSessionTranscriptionResult {
+        guard !routes.isEmpty else {
+            throw NSError(
+                domain: "AiTranscribe.SessionManager",
+                code: 2006,
+                userInfo: [NSLocalizedDescriptionKey: "No public API transcription route selected."]
+            )
+        }
+
         let startedAt = Date()
-        let maxConcurrent = min(maxPublicSessionConcurrentUploads(), max(1, batches.count))
+        let perRouteConcurrent = maxPublicSessionConcurrentUploads()
+        let batchesByRoute = routes.indices.map { routeIndex in
+            batches.filter { $0.index % routes.count == routeIndex }
+        }
         var results = Array<PublicSessionBatchResult?>(repeating: nil, count: batches.count)
-        var nextIndex = 0
+        var nextIndexByRoute = Array(repeating: 0, count: routes.count)
         var completed = 0
 
-        try await withThrowingTaskGroup(of: PublicSessionBatchResult.self) { group in
-            func scheduleNext() {
-                guard nextIndex < batches.count else { return }
-                let batch = batches[nextIndex]
-                nextIndex += 1
+        try await withThrowingTaskGroup(of: (Int, PublicSessionBatchResult).self) { group in
+            func scheduleNext(for routeIndex: Int) {
+                guard routeIndex < routes.count else { return }
+                let routeBatches = batchesByRoute[routeIndex]
+                let nextIndex = nextIndexByRoute[routeIndex]
+                guard nextIndex < routeBatches.count else { return }
+
+                let route = routes[routeIndex]
+                let batch = routeBatches[nextIndex]
+                nextIndexByRoute[routeIndex] += 1
                 group.addTask {
-                    try await Self.transcribePublicSessionBatch(
+                    let result = try await Self.transcribePublicSessionBatch(
                         batch,
-                        providerId: providerId,
-                        modelId: modelId,
-                        apiKey: apiKey
+                        providerId: route.providerId,
+                        modelId: route.modelId,
+                        apiKey: route.apiKey
                     )
+                    return (routeIndex, result)
                 }
             }
 
-            for _ in 0..<maxConcurrent {
-                scheduleNext()
+            for routeIndex in routes.indices {
+                let initialCount = min(perRouteConcurrent, batchesByRoute[routeIndex].count)
+                for _ in 0..<initialCount {
+                    scheduleNext(for: routeIndex)
+                }
             }
 
-            while let result = try await group.next() {
+            while let (routeIndex, result) = try await group.next() {
                 completed += 1
                 results[result.index] = result
                 let preview = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 await onBatchComplete(completed, batches.count, preview.isEmpty ? nil : preview)
-                scheduleNext()
+                scheduleNext(for: routeIndex)
             }
         }
 
@@ -1523,6 +2068,13 @@ class SessionManager: ObservableObject {
                 markSummaryRunFailed(sessionId: sessionId, message: error.localizedDescription)
                 currentSummarizingSessionId = nil
                 summaryProgress = nil
+                if sessions.first(where: { $0.id == sessionId })?.automation?.status == .summarizing {
+                    markAutomationFailed(
+                        sessionId: sessionId,
+                        status: .summaryFailed,
+                        message: error.localizedDescription
+                    )
+                }
             }
         }
     }
@@ -1618,6 +2170,13 @@ class SessionManager: ObservableObject {
                         )
                     }
 
+                    summaryProgress?.stage = "Streaming \(request.displayName)"
+                    await streamPublicSummaryPreview(
+                        result.text,
+                        sessionId: sessionId,
+                        presetId: request.presetId
+                    )
+
                     guard let doneIndex = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
                     var doneMetadata = sessions[doneIndex].summaries[request.presetId]
                         ?? .empty(displayName: request.displayName, fileName: request.fileName)
@@ -1648,11 +2207,53 @@ class SessionManager: ObservableObject {
 
                 currentSummarizingSessionId = nil
                 summaryProgress = nil
+                if sessions.first(where: { $0.id == sessionId })?.automation?.status == .summarizing {
+                    completeAutomation(sessionId: sessionId, message: "Automatic transcription and summary complete.")
+                    pumpAutomationQueue()
+                }
             } catch {
                 markSummaryRunFailed(sessionId: sessionId, message: error.localizedDescription)
                 currentSummarizingSessionId = nil
                 summaryProgress = nil
+                if sessions.first(where: { $0.id == sessionId })?.automation?.status == .summarizing {
+                    markAutomationFailed(
+                        sessionId: sessionId,
+                        status: .summaryFailed,
+                        message: error.localizedDescription
+                    )
+                }
             }
+        }
+    }
+
+    private func streamPublicSummaryPreview(
+        _ text: String,
+        sessionId: UUID,
+        presetId: String
+    ) async {
+        let characters = Array(text)
+        guard !characters.isEmpty else { return }
+
+        let chunkSize = max(1, characters.count / 140)
+        var index = 0
+        while index < characters.count {
+            guard currentSummarizingSessionId == sessionId,
+                  summaryProgress?.activePresetId == presetId else {
+                return
+            }
+
+            index = min(characters.count, index + chunkSize)
+            let partial = String(characters.prefix(index))
+
+            if let sessionIndex = sessions.firstIndex(where: { $0.id == sessionId }),
+               var metadata = sessions[sessionIndex].summaries[presetId] {
+                metadata.text = partial
+                metadata.status = "generating"
+                sessions[sessionIndex].summaries[presetId] = metadata
+            }
+            summaryProgress?.partialText = partial
+
+            try? await Task.sleep(nanoseconds: 9_000_000)
         }
     }
 
@@ -1713,12 +2314,22 @@ class SessionManager: ObservableObject {
             currentTranscribingSessionId = nil
             transcriptionProgress = nil
             print("SessionManager: Transcription complete — \(event.wordCount ?? 0) words")
+            if sessions[index].automation?.status == .transcribing {
+                continueAutomationAfterTranscription(sessionId: sessionId)
+            }
 
         case "error":
             sessions[index].status = .failed(event.message ?? "Unknown error")
             saveMetadata(for: sessions[index])
             currentTranscribingSessionId = nil
             transcriptionProgress = nil
+            if sessions[index].automation?.status == .transcribing {
+                markAutomationFailed(
+                    sessionId: sessionId,
+                    status: .transcriptionFailed,
+                    message: event.message ?? "Unknown error"
+                )
+            }
             print("SessionManager: Transcription error — \(event.message ?? "unknown")")
 
         case "cancelled":
@@ -1731,6 +2342,13 @@ class SessionManager: ObservableObject {
             saveMetadata(for: sessions[index])
             currentTranscribingSessionId = nil
             transcriptionProgress = nil
+            if sessions[index].automation?.status == .transcribing {
+                markAutomationFailed(
+                    sessionId: sessionId,
+                    status: .transcriptionFailed,
+                    message: "Automatic transcription was cancelled."
+                )
+            }
 
         default:
             break
@@ -1868,15 +2486,33 @@ class SessionManager: ObservableObject {
             }
             currentSummarizingSessionId = nil
             summaryProgress = nil
+            if sessions[index].automation?.status == .summarizing {
+                markAutomationFailed(
+                    sessionId: sessionId,
+                    status: .summaryFailed,
+                    message: event.message ?? "Unknown error"
+                )
+            }
 
         case "cancelled":
             markSummaryRunCancelled(sessionId: sessionId, message: "Cancelled by user")
             currentSummarizingSessionId = nil
             summaryProgress = nil
+            if sessions[index].automation?.status == .summarizing {
+                markAutomationFailed(
+                    sessionId: sessionId,
+                    status: .summaryFailed,
+                    message: "Automatic summary was cancelled."
+                )
+            }
 
         case "batch_complete":
             currentSummarizingSessionId = nil
             summaryProgress = nil
+            if sessions[index].automation?.status == .summarizing {
+                completeAutomation(sessionId: sessionId, message: "Automatic transcription and summary complete.")
+                pumpAutomationQueue()
+            }
 
         default:
             break

@@ -14,7 +14,15 @@ struct SessionCardView: View {
     @State private var editedName = ""
     @State private var cardAppeared = false
 
+    private var automationStatus: SessionAutomationStatus? {
+        session.automation?.status
+    }
+
     private var statusColor: Color {
+        if session.automation?.isActive == true { return .orange }
+        if automationStatus == .transcriptionFailed || automationStatus == .summaryFailed { return .red }
+        if automationStatus == .completed { return .green }
+
         switch session.status {
         case .completed: return .green
         case .recording: return .blue
@@ -26,6 +34,14 @@ struct SessionCardView: View {
     }
 
     private var statusText: String {
+        if let automationStatus,
+           session.automation?.isActive == true ||
+            automationStatus == .transcriptionFailed ||
+            automationStatus == .summaryFailed ||
+            automationStatus == .completed {
+            return automationStatus.displayName
+        }
+
         switch session.status {
         case .completed: return "Transcribed"
         case .recording: return "Recording"
@@ -37,6 +53,10 @@ struct SessionCardView: View {
     }
 
     private var statusIcon: String {
+        if session.automation?.isActive == true { return "arrow.triangle.2.circlepath" }
+        if automationStatus == .transcriptionFailed || automationStatus == .summaryFailed { return "exclamationmark.circle.fill" }
+        if automationStatus == .completed { return "checkmark.circle.fill" }
+
         switch session.status {
         case .completed: return "checkmark.circle.fill"
         case .recording: return "record.circle"

@@ -18,100 +18,64 @@ struct ShortcutsOnboardingView: View {
     
     @AppStorage("toggleRecordingShortcut") private var toggleShortcut = "⌃P"
     @AppStorage("cancelRecordingShortcut") private var cancelShortcut = "⌃K"
+    @State private var isRecordingToggleShortcut = false
+    @State private var isRecordingCancelShortcut = false
     
     var body: some View {
-        VStack(spacing: 24) {
-            // Header
-            VStack(spacing: 8) {
-                Text("Keyboard Shortcuts")
-                    .font(.system(size: 32, weight: .bold))
-                
-                Text("Global shortcuts are pre-configured and ready to use")
-                    .font(.title3)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-            .padding(.top, 30)
+        VStack(spacing: 22) {
+            OnboardingHeader(
+                eyebrow: "Shortcuts",
+                title: "Pick fast global controls",
+                subtitle: "Click a shortcut pill and press new keys. These work globally, even in the background."
+            )
             
-            // Shortcuts Display - CENTERED
-            VStack(spacing: 20) {
-                // Toggle Recording
-                ShortcutDisplayRow(
+            VStack(spacing: 14) {
+                EditableShortcutOnboardingRow(
                     icon: "play.circle.fill",
                     title: "Toggle Recording",
                     description: "Start or stop recording",
-                    shortcut: toggleShortcut,
+                    shortcut: $toggleShortcut,
+                    isRecording: $isRecordingToggleShortcut,
                     color: .green
                 )
-                
-                Divider()
-                    .padding(.horizontal, 20)
-                
-                // Cancel Recording
-                ShortcutDisplayRow(
+
+                EditableShortcutOnboardingRow(
                     icon: "xmark.circle.fill",
                     title: "Cancel Recording",
                     description: "Discard current recording",
-                    shortcut: cancelShortcut,
+                    shortcut: $cancelShortcut,
+                    isRecording: $isRecordingCancelShortcut,
                     color: .red
                 )
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 20)
-            .background(Color.gray.opacity(0.05))
-            .cornerRadius(12)
-            .frame(maxWidth: 600) // Constrain width for better centering
-            .padding(.horizontal, 80) // Center it in the window
             
-            // Info box
-            HStack(spacing: 12) {
+            HStack(alignment: .top, spacing: 9) {
                 Image(systemName: "info.circle.fill")
-                    .foregroundColor(.blue)
-                
-                Text("You can customize these shortcuts later in Settings")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.blue)
+                    .padding(.top, 1)
+
+                Text("More recording, session, and Polish shortcuts are available later in Settings.")
+                    .font(.system(size: 13, weight: .medium))
+                    .lineSpacing(2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Spacer()
             }
-            .padding()
-            .background(Color.blue.opacity(0.05))
-            .cornerRadius(10)
-            .padding(.horizontal, 40)
+            .padding(.top, 2)
             
             Spacer()
             
-            // Action Buttons
-            VStack(spacing: 12) {
-                Button(action: {
-                    // Refresh hotkeys and continue
+            OnboardingNavBar(
+                onBack: onBack,
+                onNext: {
                     HotkeyManager.shared.refreshHotkeys()
                     onNext()
-                }) {
-                    HStack {
-                        Text("Continue")
-                            .font(.title3.weight(.semibold))
-                        Image(systemName: "arrow.right")
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .padding(.horizontal, 60)
-                
-                // Back button - more visible
-                Button(action: onBack) {
-                    HStack {
-                        Image(systemName: "chevron.left")
-                        Text("Back")
-                    }
-                    .font(.body.weight(.medium))
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .padding(.bottom, 20)
-            }
+            )
         }
-        .padding()
+        .padding(34)
     }
 }
 
@@ -163,6 +127,46 @@ fileprivate struct ShortcutDisplayRow: View {
         }
         .padding()
         .background(Color.white.opacity(0.001)) // Invisible background for better tap area
+    }
+}
+
+private struct EditableShortcutOnboardingRow: View {
+    let icon: String
+    let title: String
+    let description: String
+    @Binding var shortcut: String
+    @Binding var isRecording: Bool
+    let color: Color
+
+    var body: some View {
+        OnboardingGlassCard {
+            HStack(spacing: 16) {
+                Image(systemName: icon)
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundColor(color)
+                    .frame(width: 48, height: 48)
+                    .background(color.opacity(0.14), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+
+                    Text(description)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                ShortcutPill(
+                    shortcut: $shortcut,
+                    isRecording: $isRecording,
+                    onChanged: {
+                        HotkeyManager.shared.refreshHotkeys()
+                    }
+                )
+            }
+        }
     }
 }
 
