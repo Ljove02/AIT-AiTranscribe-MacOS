@@ -50,6 +50,10 @@ class SessionRecorder: NSObject, ObservableObject {
     private struct AudioLevelAnalysis {
         let activeRMS: Float
         let peak: Float
+        /// 99.9th percentile magnitude across active samples. Used instead of
+        /// `peak` when planning the mix so a single transient (a cough, a
+        /// notification chime) cannot dictate the gain for a whole session.
+        let loudPeak: Float
         let activeSamples: Int64
         let totalSamples: Int64
     }
@@ -162,88 +166,6 @@ class SessionRecorder: NSObject, ObservableObject {
             return false
         }
         return true
-    }
-
-    private func applyGain(_ gain: Float, to buffer: AVAudioPCMBuffer) {
-        guard gain != 1.0 else { return }
-
-        let format = buffer.format
-        let frames = Int(buffer.frameLength)
-        guard frames > 0 else { return }
-
-        let channels = max(Int(format.channelCount), 1)
-        let audioBuffers = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
-
-        switch format.commonFormat {
-        case .pcmFormatFloat32:
-            if format.isInterleaved {
-                guard let rawData = audioBuffers[0].mData?.assumingMemoryBound(to: Float.self) else { return }
-                for index in 0..<(frames * channels) {
-                    rawData[index] = Self.clampUnit(rawData[index] * gain)
-                }
-            } else {
-                for channel in 0..<channels {
-                    guard let rawData = audioBuffers[channel].mData?.assumingMemoryBound(to: Float.self) else { return }
-                    for frame in 0..<frames {
-                        rawData[frame] = Self.clampUnit(rawData[frame] * gain)
-                    }
-                }
-            }
-        case .pcmFormatFloat64:
-            if format.isInterleaved {
-                guard let rawData = audioBuffers[0].mData?.assumingMemoryBound(to: Double.self) else { return }
-                for index in 0..<(frames * channels) {
-                    rawData[index] = Double(Self.clampUnit(Float(rawData[index]) * gain))
-                }
-            } else {
-                for channel in 0..<channels {
-                    guard let rawData = audioBuffers[channel].mData?.assumingMemoryBound(to: Double.self) else { return }
-                    for frame in 0..<frames {
-                        rawData[frame] = Double(Self.clampUnit(Float(rawData[frame]) * gain))
-                    }
-                }
-            }
-        case .pcmFormatInt16:
-            let maxValue = Float(Int16.max)
-            let minValue = Float(Int16.min)
-            if format.isInterleaved {
-                guard let rawData = audioBuffers[0].mData?.assumingMemoryBound(to: Int16.self) else { return }
-                for index in 0..<(frames * channels) {
-                    let scaled = Float(rawData[index]) * gain
-                    rawData[index] = Int16(min(max(scaled, minValue), maxValue))
-                }
-            } else {
-                for channel in 0..<channels {
-                    guard let rawData = audioBuffers[channel].mData?.assumingMemoryBound(to: Int16.self) else { return }
-                    for frame in 0..<frames {
-                        let scaled = Float(rawData[frame]) * gain
-                        rawData[frame] = Int16(min(max(scaled, minValue), maxValue))
-                    }
-                }
-            }
-        case .pcmFormatInt32:
-            let maxValue = Float(Int32.max)
-            let minValue = Float(Int32.min)
-            if format.isInterleaved {
-                guard let rawData = audioBuffers[0].mData?.assumingMemoryBound(to: Int32.self) else { return }
-                for index in 0..<(frames * channels) {
-                    let scaled = Float(rawData[index]) * gain
-                    rawData[index] = Int32(min(max(scaled, minValue), maxValue))
-                }
-            } else {
-                for channel in 0..<channels {
-                    guard let rawData = audioBuffers[channel].mData?.assumingMemoryBound(to: Int32.self) else { return }
-                    for frame in 0..<frames {
-                        let scaled = Float(rawData[frame]) * gain
-                        rawData[frame] = Int32(min(max(scaled, minValue), maxValue))
-                    }
-                }
-            }
-        case .otherFormat:
-            return
-        @unknown default:
-            return
-        }
     }
 
     private func normalizeMicBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
@@ -412,22 +334,29 @@ class SessionRecorder: NSObject, ObservableObject {
     private var micFormatSummary: String?
     private var micCaptureSummary: String?
 
-    /// Adaptive mic gain — compensates for hardware gain changes
-    /// (e.g. Google Meet lowering mic volume when joining a call)
-    private var micGain: Float = 2.0
     private var appliedMixMicGain: Float = 1.0
     private var appliedMixSystemGain: Float = 1.0
     private var analyzedMixMicRMS: Float = 0
     private var analyzedMixMicPeak: Float = 0
     private var analyzedMixSystemRMS: Float = 0
     private var analyzedMixSystemPeak: Float = 0
-    private var sessionRecordedMicGain: Float = SessionAudioMixPreferences.baselineMicGain
-    private var sessionRecordedSystemGain: Float = SessionAudioMixPreferences.baselineSystemGain
+
+    /// User trim from the Audio Mix sheet, applied on top of auto make-up gain
+    /// at mix time. Captured at session start so mid-session changes to the
+    /// sliders cannot alter a recording already in progress.
+    private var sessionMicTrimMultiplier: Float = SessionAudioMixPreferences.baselineMicGain
+    private var sessionSystemTrimMultiplier: Float = SessionAudioMixPreferences.baselineSystemGain
     private var sessionMicTrimDB: Double = SessionAudioMixPreferences.defaultMicTrimDB
     private var sessionSystemTrimDB: Double = SessionAudioMixPreferences.defaultSystemTrimDB
+
+    /// Auto make-up target for each track, in RMS over active samples.
+    /// 0.09 ≈ -21 dBFS, matching the level of sessions that record cleanly.
+    private let sessionMixTargetRMS: Float = 0.09
+    private let sessionMixMakeupRange: ClosedRange<Float> = 0.25...8.0
+    /// Loud passages (99.9th percentile) must sum below this.
     private let sessionMixPeakCeiling: Float = 0.94
-    private let sessionMixFixedMicGain: Float = 1.0
-    private let sessionMixFixedSystemGain: Float = 1.0
+    /// Absolute peaks must sum below this. Guarantees the mix cannot clip.
+    private let sessionMixAbsoluteCeiling: Float = 0.99
 
     /// Final output format: 16kHz mono AAC
     private let outputSampleRate: Double = 16000
@@ -488,8 +417,8 @@ class SessionRecorder: NSObject, ObservableObject {
         analyzedMixSystemPeak = 0
         sessionMicTrimDB = SessionAudioMixPreferences.micTrimDB()
         sessionSystemTrimDB = SessionAudioMixPreferences.systemTrimDB()
-        sessionRecordedMicGain = SessionAudioMixPreferences.effectiveMicGain()
-        sessionRecordedSystemGain = SessionAudioMixPreferences.effectiveSystemGain()
+        sessionMicTrimMultiplier = SessionAudioMixPreferences.effectiveMicGain()
+        sessionSystemTrimMultiplier = SessionAudioMixPreferences.effectiveSystemGain()
 
         // System audio capture via ScreenCaptureKit.
         // Only attempt if Screen Recording permission is already granted.
@@ -668,7 +597,7 @@ class SessionRecorder: NSObject, ObservableObject {
         guard copyPCMData(from: sampleBuffer, frameCount: frameCount, into: pcmBuffer, sourceName: "system") else {
             return
         }
-        applyGain(sessionRecordedSystemGain, to: pcmBuffer)
+        // Written at its true level; desktop audio gain is decided at mix time.
 
         // Write directly — no lock needed, only this callback writes to sysFile
         guard let sysFile else { return }
@@ -761,15 +690,13 @@ class SessionRecorder: NSObject, ObservableObject {
             }
         }
 
-        // Adaptive mic gain — compensates for hardware gain changes
-        // (e.g. Google Meet lowering mic volume when joining a call).
-        // Targets a comfortable speech RMS (~0.05). Gain adjusts smoothly
-        // to avoid pumping artifacts: fast attack, slow release.
+        // Measure only — the mic track is written at its true level. All gain
+        // is decided in `determineMixVolumePlan` once both tracks have been
+        // analysed, so a hot mic can no longer be clipped into the temp file
+        // (and can no longer poison the mix by pinning its measured peak).
         if let channelData = pcmBuffer.floatChannelData {
             let frames = Int(pcmBuffer.frameLength)
-            let channels = Int(sourceFormat.channelCount)
 
-            // Calculate RMS from first channel
             var sum: Float = 0
             var peak: Float = 0
             for i in 0..<frames {
@@ -783,24 +710,7 @@ class SessionRecorder: NSObject, ObservableObject {
             if rms > 0.0005 || peak > 0.001 {
                 micActiveBuffers += 1
             }
-
-            // Adjust gain toward target RMS (only when speech detected)
-            let targetRMS: Float = 0.05
-            if rms > 0.002 {
-                let desiredGain = min(targetRMS / rms, 10.0)
-                let alpha: Float = desiredGain > micGain ? 0.3 : 0.05
-                micGain += alpha * (desiredGain - micGain)
-            }
-            micGain = max(micGain, 1.0) // Never go below unity
-
-            for ch in 0..<channels {
-                for i in 0..<frames {
-                    channelData[ch][i] = min(max(channelData[ch][i] * micGain, -1.0), 1.0)
-                }
-            }
         }
-
-        applyGain(sessionRecordedMicGain, to: pcmBuffer)
 
         // Update volume meter
         updateMicVolume(from: pcmBuffer)
@@ -837,9 +747,11 @@ class SessionRecorder: NSObject, ObservableObject {
         }
         let rms = sqrt(sum / Float(frameCount))
 
-        let noiseGateThreshold: Float = 0.008
+        // The buffer is now at its true level (gain moved to mix time), so the
+        // meter compensates on its own to stay as responsive as before.
+        let noiseGateThreshold: Float = 0.004
         let gatedRMS = rms > noiseGateThreshold ? rms : 0
-        let scaledVolume = min(gatedRMS * 3.0, 1.0)
+        let scaledVolume = min(gatedRMS * 6.0, 1.0)
 
         Task { @MainActor in
             self.micVolume = scaledVolume
@@ -907,8 +819,8 @@ class SessionRecorder: NSObject, ObservableObject {
             "micMaxPeak=\(micMaxPeak)",
             "sessionMicTrimDB=\(sessionMicTrimDB)",
             "sessionSystemTrimDB=\(sessionSystemTrimDB)",
-            "sessionRecordedMicGain=\(sessionRecordedMicGain)",
-            "sessionRecordedSystemGain=\(sessionRecordedSystemGain)",
+            "micTrimMultiplier=\(sessionMicTrimMultiplier)",
+            "systemTrimMultiplier=\(sessionSystemTrimMultiplier)",
             "mixMicRMS=\(analyzedMixMicRMS)",
             "mixMicPeak=\(analyzedMixMicPeak)",
             "mixSystemRMS=\(analyzedMixSystemRMS)",
@@ -945,8 +857,8 @@ class SessionRecorder: NSObject, ObservableObject {
             "micMaxPeak=\(micMaxPeak)",
             "sessionMicTrimDB=\(sessionMicTrimDB)",
             "sessionSystemTrimDB=\(sessionSystemTrimDB)",
-            "sessionRecordedMicGain=\(sessionRecordedMicGain)",
-            "sessionRecordedSystemGain=\(sessionRecordedSystemGain)",
+            "micTrimMultiplier=\(sessionMicTrimMultiplier)",
+            "systemTrimMultiplier=\(sessionSystemTrimMultiplier)",
             "mixMicRMS=\(analyzedMixMicRMS)",
             "mixMicPeak=\(analyzedMixMicPeak)",
             "mixSystemRMS=\(analyzedMixSystemRMS)",
@@ -1092,6 +1004,8 @@ class SessionRecorder: NSObject, ObservableObject {
             var activeSumSquares: Double = 0
             var peak: Float = 0
             let activityThreshold: Float = 0.004
+            let histogramBins = 2048
+            var histogram = [Int64](repeating: 0, count: histogramBins)
 
             while true {
                 try audioFile.read(into: buffer, frameCount: chunkSize)
@@ -1110,6 +1024,8 @@ class SessionRecorder: NSObject, ObservableObject {
                     if magnitude >= activityThreshold {
                         activeSamples += 1
                         activeSumSquares += square
+                        let bin = min(Int(magnitude * Float(histogramBins - 1)), histogramBins - 1)
+                        histogram[bin] += 1
                     }
                 }
             }
@@ -1119,9 +1035,25 @@ class SessionRecorder: NSObject, ObservableObject {
             let rmsSumSquares = activeSamples > 0 ? activeSumSquares : totalSumSquares
             let activeRMS = sqrt(rmsSumSquares / Double(rmsSamples))
 
+            // 99.9th percentile over active samples, so one transient does not
+            // set the gain for the whole session.
+            var loudPeak = peak
+            if activeSamples > 0 {
+                let threshold = Int64(Double(activeSamples) * 0.999)
+                var cumulative: Int64 = 0
+                for (bin, count) in histogram.enumerated() {
+                    cumulative += count
+                    if cumulative >= threshold {
+                        loudPeak = min(Float(bin + 1) / Float(histogramBins - 1), peak)
+                        break
+                    }
+                }
+            }
+
             return AudioLevelAnalysis(
                 activeRMS: Float(activeRMS),
                 peak: peak,
+                loudPeak: loudPeak,
                 activeSamples: activeSamples,
                 totalSamples: totalSamples
             )
@@ -1129,6 +1061,16 @@ class SessionRecorder: NSObject, ObservableObject {
             print("SessionRecorder: Failed to analyze levels for \(url.lastPathComponent): \(error)")
             return nil
         }
+    }
+
+    /// Gain needed to bring a track to `sessionMixTargetRMS`, bounded so a
+    /// near-silent or absent track cannot produce an absurd multiplier.
+    private func makeupGain(for analysis: AudioLevelAnalysis?) -> Float {
+        guard let analysis, analysis.activeSamples > 0, analysis.activeRMS > 0.0002 else {
+            return 1.0
+        }
+        let desired = sessionMixTargetRMS / analysis.activeRMS
+        return min(max(desired, sessionMixMakeupRange.lowerBound), sessionMixMakeupRange.upperBound)
     }
 
     private func determineMixVolumePlan(micURL: URL, sysURL: URL) -> MixVolumePlan {
@@ -1140,25 +1082,32 @@ class SessionRecorder: NSObject, ObservableObject {
         analyzedMixSystemRMS = systemAnalysis?.activeRMS ?? 0
         analyzedMixSystemPeak = systemAnalysis?.peak ?? 0
 
-        var micGain: Float = sessionMixFixedMicGain
-        var systemGain: Float = systemAnalysis == nil ? 1.0 : sessionMixFixedSystemGain
+        // Auto make-up: bring each track to a target speech level on its own
+        // merits, then apply the user's trim. Neither track's gain is derived
+        // from the other, so a loud mic can no longer bury desktop audio.
+        var micGain = makeupGain(for: micAnalysis) * sessionMicTrimMultiplier
+        var systemGain = makeupGain(for: systemAnalysis) * sessionSystemTrimMultiplier
 
-        if let micAnalysis, let systemAnalysis {
-            let combinedPeak = (micAnalysis.peak * micGain) + (systemAnalysis.peak * systemGain)
-            if combinedPeak > sessionMixPeakCeiling, systemAnalysis.peak > 0.001 {
-                let allowableSystemPeak = max(sessionMixPeakCeiling - (micAnalysis.peak * micGain), 0)
-                let duckedSystemGain = allowableSystemPeak / systemAnalysis.peak
-                systemGain = max(0.25, min(systemGain, duckedSystemGain))
-            }
+        // Limiter: scale both tracks by the same factor so the summed mix stays
+        // under the ceiling. Scaling together preserves the mic/desktop balance
+        // instead of taking all the reduction out of one track.
+        let micLoud = (micAnalysis?.loudPeak ?? 0) * micGain
+        let sysLoud = (systemAnalysis?.loudPeak ?? 0) * systemGain
+        let micPeak = (micAnalysis?.peak ?? 0) * micGain
+        let sysPeak = (systemAnalysis?.peak ?? 0) * systemGain
 
-            let adjustedCombinedPeak = (micAnalysis.peak * micGain) + (systemAnalysis.peak * systemGain)
-            if adjustedCombinedPeak > sessionMixPeakCeiling {
-                let safeMicGain = max(
-                    1.0,
-                    (sessionMixPeakCeiling - (systemAnalysis.peak * systemGain)) / max(micAnalysis.peak, 0.001)
-                )
-                micGain = min(micGain, safeMicGain)
-            }
+        var scale: Float = 1.0
+        let loudSum = micLoud + sysLoud
+        if loudSum > sessionMixPeakCeiling {
+            scale = min(scale, sessionMixPeakCeiling / loudSum)
+        }
+        let peakSum = micPeak + sysPeak
+        if peakSum > sessionMixAbsoluteCeiling {
+            scale = min(scale, sessionMixAbsoluteCeiling / peakSum)
+        }
+        if scale < 1.0 {
+            micGain *= scale
+            systemGain *= scale
         }
 
         appliedMixMicGain = micGain

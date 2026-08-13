@@ -7,10 +7,11 @@ enum SessionAudioMixPreferences {
     static let defaultMicTrimDB: Double = 0
     static let defaultSystemTrimDB: Double = 0
 
-    // These preserve the current working session balance. User sliders
-    // apply trim around this baseline instead of replacing it.
-    static let baselineMicGain: Float = 1.9
-    static let baselineSystemGain: Float = 0.3
+    // Unity baselines: SessionRecorder now auto-levels each track to a target
+    // RMS at mix time, so these sliders are a pure user offset around that.
+    // "0 dB" means 0 dB — no hidden boost or cut.
+    static let baselineMicGain: Float = 1.0
+    static let baselineSystemGain: Float = 1.0
 
     static let micTrimRange: ClosedRange<Double> = -6...18
     static let systemTrimRange: ClosedRange<Double> = -18...6
