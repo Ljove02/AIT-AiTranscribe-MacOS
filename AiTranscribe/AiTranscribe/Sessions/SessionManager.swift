@@ -618,7 +618,6 @@ struct BatchProgress: Equatable {
     var memoryMB: Double?
     var etaSeconds: Double?
     var textSoFar: String?
-    var isUltraInstinct: Bool = false
 }
 
 struct SessionSummaryProgress: Equatable {
@@ -659,13 +658,6 @@ private struct PublicSessionTranscriptionResult: Sendable {
     let processingTimeSeconds: Double
     let estimatedCostUSD: Double?
     let batchCount: Int
-}
-
-private struct PublicSessionTranscriptionRoute: Sendable {
-    let providerId: String
-    let modelId: String
-    let displayName: String
-    let apiKey: String
 }
 
 // MARK: - Session Metadata (for JSON persistence)
@@ -1498,8 +1490,7 @@ class SessionManager: ObservableObject {
         providerId: String,
         modelId: String,
         displayName: String,
-        targetBatchCount: Int? = nil,
-        ultraInstinctModels: [APITranscriptionModel] = []
+        targetBatchCount: Int? = nil
     ) {
         guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
         guard sessions[index].hasAudio else {
@@ -1517,58 +1508,23 @@ class SessionManager: ObservableObject {
             return
         }
 
-        let requestedRoutes: [PublicSessionTranscriptionRoute]
-        if ultraInstinctModels.count >= 2 {
-            var routes: [PublicSessionTranscriptionRoute] = []
-            for model in ultraInstinctModels.prefix(3) {
-                guard let apiKey = try? APIKeychainStore.apiKey(providerId: model.providerId),
-                      !apiKey.isEmpty else {
-                    sessions[index].status = .failed("Add \(publicTranscriptionProviderName(for: model.providerId)) API key first.")
-                    saveMetadata(for: sessions[index])
-                    return
-                }
-                routes.append(
-                    PublicSessionTranscriptionRoute(
-                        providerId: model.providerId,
-                        modelId: model.modelId,
-                        displayName: model.displayName,
-                        apiKey: apiKey
-                    )
-                )
-            }
-            requestedRoutes = routes
-        } else {
-            guard let apiKey = try? APIKeychainStore.apiKey(providerId: providerId),
-                  !apiKey.isEmpty else {
-                sessions[index].status = .failed("Add \(publicTranscriptionProviderName(for: providerId)) API key first.")
-                saveMetadata(for: sessions[index])
-                return
-            }
-            requestedRoutes = [
-                PublicSessionTranscriptionRoute(
-                    providerId: providerId,
-                    modelId: modelId,
-                    displayName: displayName,
-                    apiKey: apiKey
-                )
-            ]
+        guard let apiKey = try? APIKeychainStore.apiKey(providerId: providerId),
+              !apiKey.isEmpty else {
+            sessions[index].status = .failed("Add \(publicTranscriptionProviderName(for: providerId)) API key first.")
+            saveMetadata(for: sessions[index])
+            return
         }
-        let isUltraInstinct = requestedRoutes.count > 1
-        let routeDisplayName = isUltraInstinct
-            ? "Ultra Instinct: \(requestedRoutes.map(\.displayName).joined(separator: " + "))"
-            : displayName
 
         clearSummaries(sessionIndex: index)
 
         sessions[index].status = .transcribing
-        sessions[index].modelUsed = isUltraInstinct ? routeDisplayName : modelId
+        sessions[index].modelUsed = modelId
         sessions[index].ramBudgetMB = nil
         currentTranscribingSessionId = sessionId
         transcriptionProgress = BatchProgress(
             batch: 0,
             totalBatches: 0,
-            progress: 0.02,
-            isUltraInstinct: isUltraInstinct
+            progress: 0.02
         )
         saveMetadata(for: sessions[index])
 
@@ -1591,18 +1547,16 @@ class SessionManager: ObservableObject {
                         batch: 0,
                         totalBatches: plan.batches.count,
                         progress: 0.08,
-                        textSoFar: isUltraInstinct
-                            ? "Ultra Instinct prepared \(plan.batches.count) API batches across \(requestedRoutes.count) routes"
-                            : "Prepared \(plan.batches.count) API batch\(plan.batches.count == 1 ? "" : "es")",
-                        isUltraInstinct: isUltraInstinct
+                        textSoFar: "Prepared \(plan.batches.count) API batch\(plan.batches.count == 1 ? "" : "es")"
                     )
-                    let routeLog = requestedRoutes.map { "\($0.providerId):\($0.modelId)" }.joined(separator: ",")
-                    print("SessionManager: public session batching routes=\(routeLog) ultraInstinct=\(isUltraInstinct) batches=\(plan.batches.count) targetBatches=\(targetBatchCount ?? 0) fileSizeMB=\(Double(fileSize) / 1_000_000.0)")
+                    print("SessionManager: public session batching route=\(providerId):\(modelId) batches=\(plan.batches.count) targetBatches=\(targetBatchCount ?? 0) fileSizeMB=\(Double(fileSize) / 1_000_000.0)")
                 }
 
                 let result = try await Self.transcribePublicSessionBatches(
                     plan.batches,
-                    routes: requestedRoutes
+                    providerId: providerId,
+                    modelId: modelId,
+                    apiKey: apiKey
                 ) { completed, total, preview in
                     await MainActor.run {
                         let progress = total > 0 ? 0.08 + (Double(completed) / Double(total) * 0.90) : 0.08
@@ -1610,8 +1564,7 @@ class SessionManager: ObservableObject {
                             batch: completed,
                             totalBatches: total,
                             progress: min(progress, 0.98),
-                            textSoFar: preview,
-                            isUltraInstinct: isUltraInstinct
+                            textSoFar: preview
                         )
                     }
                 }
@@ -1625,19 +1578,18 @@ class SessionManager: ObservableObject {
                     sessions[idx].wordCount = text.split(separator: " ").count
                     sessions[idx].batchCount = result.batchCount
                     sessions[idx].transcriptionTime = Date().timeIntervalSince(startedAt)
-                    sessions[idx].modelUsed = routeDisplayName
+                    sessions[idx].modelUsed = displayName
                     sessions[idx].transcriptionEstimatedCostUSD = result.estimatedCostUSD
-                        ?? (isUltraInstinct ? nil : APITranscriptionModelStore.load()
+                        ?? APITranscriptionModelStore.load()
                             .first(where: { $0.providerId == providerId && $0.modelId == modelId })?
-                            .estimatedCost(durationSeconds: sessions[idx].duration))
+                            .estimatedCost(durationSeconds: sessions[idx].duration)
                     saveTranscriptionText(for: sessions[idx], text: text)
                     saveMetadata(for: sessions[idx])
                     currentTranscribingSessionId = nil
                     transcriptionProgress = nil
                     print(String(
-                        format: "SessionManager: public session transcription complete routes=%@ ultraInstinct=%@ batches=%d elapsed=%.2fs requestElapsed=%.2fs words=%d estimatedCost=$%.6f",
-                        requestedRoutes.map { "\($0.providerId):\($0.modelId)" }.joined(separator: ","),
-                        isUltraInstinct.description,
+                        format: "SessionManager: public session transcription complete route=%@ batches=%d elapsed=%.2fs requestElapsed=%.2fs words=%d estimatedCost=$%.6f",
+                        "\(providerId):\(modelId)",
                         result.batchCount,
                         Date().timeIntervalSince(startedAt),
                         result.processingTimeSeconds,
@@ -1806,60 +1758,43 @@ class SessionManager: ObservableObject {
 
     private nonisolated static func transcribePublicSessionBatches(
         _ batches: [PublicSessionAudioBatch],
-        routes: [PublicSessionTranscriptionRoute],
+        providerId: String,
+        modelId: String,
+        apiKey: String,
         onBatchComplete: @escaping @Sendable (_ completed: Int, _ total: Int, _ preview: String?) async -> Void
     ) async throws -> PublicSessionTranscriptionResult {
-        guard !routes.isEmpty else {
-            throw NSError(
-                domain: "AiTranscribe.SessionManager",
-                code: 2006,
-                userInfo: [NSLocalizedDescriptionKey: "No public API transcription route selected."]
-            )
-        }
-
         let startedAt = Date()
-        let perRouteConcurrent = maxPublicSessionConcurrentUploads()
-        let batchesByRoute = routes.indices.map { routeIndex in
-            batches.filter { $0.index % routes.count == routeIndex }
-        }
+        let maxConcurrent = maxPublicSessionConcurrentUploads()
         var results = Array<PublicSessionBatchResult?>(repeating: nil, count: batches.count)
-        var nextIndexByRoute = Array(repeating: 0, count: routes.count)
+        var nextIndex = 0
         var completed = 0
 
-        try await withThrowingTaskGroup(of: (Int, PublicSessionBatchResult).self) { group in
-            func scheduleNext(for routeIndex: Int) {
-                guard routeIndex < routes.count else { return }
-                let routeBatches = batchesByRoute[routeIndex]
-                let nextIndex = nextIndexByRoute[routeIndex]
-                guard nextIndex < routeBatches.count else { return }
+        try await withThrowingTaskGroup(of: PublicSessionBatchResult.self) { group in
+            func scheduleNext() {
+                guard nextIndex < batches.count else { return }
 
-                let route = routes[routeIndex]
-                let batch = routeBatches[nextIndex]
-                nextIndexByRoute[routeIndex] += 1
+                let batch = batches[nextIndex]
+                nextIndex += 1
                 group.addTask {
-                    let result = try await Self.transcribePublicSessionBatch(
+                    try await Self.transcribePublicSessionBatch(
                         batch,
-                        providerId: route.providerId,
-                        modelId: route.modelId,
-                        apiKey: route.apiKey
+                        providerId: providerId,
+                        modelId: modelId,
+                        apiKey: apiKey
                     )
-                    return (routeIndex, result)
                 }
             }
 
-            for routeIndex in routes.indices {
-                let initialCount = min(perRouteConcurrent, batchesByRoute[routeIndex].count)
-                for _ in 0..<initialCount {
-                    scheduleNext(for: routeIndex)
-                }
+            for _ in 0..<min(maxConcurrent, batches.count) {
+                scheduleNext()
             }
 
-            while let (routeIndex, result) = try await group.next() {
+            while let result = try await group.next() {
                 completed += 1
                 results[result.index] = result
                 let preview = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 await onBatchComplete(completed, batches.count, preview.isEmpty ? nil : preview)
-                scheduleNext(for: routeIndex)
+                scheduleNext()
             }
         }
 

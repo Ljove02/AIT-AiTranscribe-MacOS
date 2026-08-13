@@ -42,8 +42,6 @@ struct SessionDetailView: View {
     @State private var openedSummaryPresetId: String? = nil
     @State private var apiTranscriptionModels: [APITranscriptionModel] = APITranscriptionModelStore.load()
     @State private var apiLanguageModels: [APILanguageModel] = APILanguageModelStore.load()
-    @State private var showUltraInstinctSheet = false
-    @State private var ultraInstinctModelIds: [UUID] = []
 
     private var session: Session? {
         sessionManager.sessions.first(where: { $0.id == sessionId })
@@ -100,16 +98,6 @@ struct SessionDetailView: View {
         }
         ?? publicTranscriptionModels.first { $0.providerId == selectedTranscriptionProviderId }
         ?? publicTranscriptionModels.first
-    }
-
-    private var ultraInstinctSelectedModels: [APITranscriptionModel] {
-        ultraInstinctModelIds.compactMap { modelId in
-            publicTranscriptionModels.first(where: { $0.id == modelId })
-        }
-    }
-
-    private var canStartUltraInstinct: Bool {
-        ultraInstinctSelectedModels.count >= 2
     }
 
     private var selectedAPILanguageModel: APILanguageModel? {
@@ -294,19 +282,6 @@ struct SessionDetailView: View {
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .sheet(isPresented: $showUltraInstinctSheet) {
-            if let session {
-                UltraInstinctConfigurationSheet(
-                    session: session,
-                    models: publicTranscriptionModels,
-                    selectedModelIds: $ultraInstinctModelIds,
-                    batchTarget: manualPublicBatchBinding,
-                    concurrentUploads: max(1, min(publicSessionConcurrentUploads, 6))
-                ) {
-                    startUltraInstinctTranscription(session)
-                }
             }
         }
     }
@@ -584,40 +559,35 @@ struct SessionDetailView: View {
                     }
                 }
 
-                HStack(spacing: 10) {
-                    Button {
-                        if let selectedAPITranscriptionModel {
-                            sessionManager.startPublicTranscription(
-                                sessionId: session.id,
-                                providerId: selectedAPITranscriptionModel.providerId,
-                                modelId: selectedAPITranscriptionModel.modelId,
-                                displayName: selectedAPITranscriptionModel.displayName,
-                                targetBatchCount: publicSessionTargetBatchCount > 0 ? normalizedManualPublicBatchTarget : nil
-                            )
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "network")
-                                .font(.system(size: 10))
-                            Text("Start Public Transcription")
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(Color.accentColor, in: Capsule())
+                Button {
+                    if let selectedAPITranscriptionModel {
+                        sessionManager.startPublicTranscription(
+                            sessionId: session.id,
+                            providerId: selectedAPITranscriptionModel.providerId,
+                            modelId: selectedAPITranscriptionModel.modelId,
+                            displayName: selectedAPITranscriptionModel.displayName,
+                            targetBatchCount: publicSessionTargetBatchCount > 0 ? normalizedManualPublicBatchTarget : nil
+                        )
                     }
-                    .buttonStyle(.plain)
-                    .disabled(apiTranscriptionModels.isEmpty || !session.hasAudio)
-
-                    ultraInstinctActionButton(session)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "network")
+                            .font(.system(size: 10))
+                        Text("Start Public Transcription")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.accentColor, in: Capsule())
                 }
+                .buttonStyle(.plain)
+                .disabled(apiTranscriptionModels.isEmpty || !session.hasAudio)
             }
         }
         .task {
             apiTranscriptionModels = APITranscriptionModelStore.load()
             normalizePublicBatchTarget()
-            normalizeUltraInstinctSelection()
             if !publicTranscriptionModels.contains(where: {
                 $0.providerId == selectedTranscriptionProviderId &&
                 $0.modelId == selectedOpenAITranscriptionModel
@@ -670,56 +640,6 @@ struct SessionDetailView: View {
             return String(format: "Auto: %.0f min session / %d wave-aligned batches = %@.", minutes, batchCount, publicBatchMinutesText(for: session))
         }
         return String(format: "%.0f min session / %d batches = %@.", minutes, batchCount, publicBatchMinutesText(for: session))
-    }
-
-    private func ultraInstinctActionButton(_ session: Session) -> some View {
-        Button {
-            seedUltraInstinctSelection()
-            showUltraInstinctSheet = true
-        } label: {
-            UltraInstinctElectricButtonLabel()
-        }
-        .buttonStyle(.plain)
-        .disabled(publicTranscriptionModels.count < 2 || !session.hasAudio)
-        .opacity((publicTranscriptionModels.count < 2 || !session.hasAudio) ? 0.45 : 1)
-        .accessibilityLabel("Ultra Instinct")
-    }
-
-    private func seedUltraInstinctSelection() {
-        var ids: [UUID] = ultraInstinctModelIds.filter { id in
-            publicTranscriptionModels.contains(where: { $0.id == id })
-        }
-
-        if ids.isEmpty, let selectedAPITranscriptionModel {
-            ids.append(selectedAPITranscriptionModel.id)
-        }
-
-        for model in publicTranscriptionModels where ids.count < 3 && !ids.contains(model.id) {
-            ids.append(model.id)
-        }
-
-        ultraInstinctModelIds = Array(ids.prefix(3))
-    }
-
-    private func normalizeUltraInstinctSelection() {
-        ultraInstinctModelIds = ultraInstinctModelIds.filter { id in
-            publicTranscriptionModels.contains(where: { $0.id == id })
-        }
-        if ultraInstinctModelIds.count > 3 {
-            ultraInstinctModelIds = Array(ultraInstinctModelIds.prefix(3))
-        }
-    }
-
-    private func startUltraInstinctTranscription(_ session: Session) {
-        guard canStartUltraInstinct else { return }
-        sessionManager.startPublicTranscription(
-            sessionId: session.id,
-            providerId: ultraInstinctSelectedModels[0].providerId,
-            modelId: ultraInstinctSelectedModels[0].modelId,
-            displayName: ultraInstinctSelectedModels[0].displayName,
-            targetBatchCount: publicSessionTargetBatchCount > 0 ? normalizedManualPublicBatchTarget : nil,
-            ultraInstinctModels: ultraInstinctSelectedModels
-        )
     }
 
     private func localNotTranscribedControls(_ session: Session) -> some View {
@@ -841,13 +761,9 @@ struct SessionDetailView: View {
                             .font(.system(size: 12, weight: .bold, design: .monospaced))
                     }
 
-                    if progress.isUltraInstinct {
-                        UltraInstinctProgressBar(progress: progress.progress)
-                    } else {
-                        ProgressView(value: progress.progress)
-                            .progressViewStyle(.linear)
-                            .tint(.accentColor)
-                    }
+                    ProgressView(value: progress.progress)
+                        .progressViewStyle(.linear)
+                        .tint(.accentColor)
 
                     HStack(spacing: 10) {
                         if let cpu = progress.cpuPercent {
@@ -2063,425 +1979,6 @@ struct SessionDetailView: View {
     private func formatMB(_ mb: Int) -> String {
         if mb >= 1024 { return String(format: "%.1f GB", Double(mb) / 1024.0) }
         return "\(mb) MB"
-    }
-}
-
-private struct UltraInstinctProgressBar: View {
-    let progress: Double
-
-    var body: some View {
-        GeometryReader { proxy in
-            let width = max(0, min(progress, 1)) * proxy.size.width
-
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.purple.opacity(0.14))
-
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.58, green: 0.18, blue: 0.95),
-                                Color(red: 0.86, green: 0.96, blue: 1.0),
-                                Color(red: 0.28, green: 0.78, blue: 1.0),
-                                Color(red: 0.26, green: 0.16, blue: 0.92)
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .frame(width: width)
-                    .shadow(color: Color(red: 0.34, green: 0.76, blue: 1.0).opacity(0.38), radius: 5)
-
-                Capsule()
-                    .strokeBorder(Color.white.opacity(0.28), lineWidth: 0.8)
-            }
-        }
-        .frame(height: 7)
-        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: progress)
-    }
-}
-
-private struct UltraInstinctElectricButtonLabel: View {
-    var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "bolt.horizontal.circle.fill")
-                .font(.system(size: 11, weight: .black))
-            Text("Ultra Instinct")
-                .font(.system(size: 11, weight: .black, design: .rounded))
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 15)
-        .padding(.vertical, 8)
-        .background(
-            LinearGradient(
-                colors: [
-                    Color(red: 0.86, green: 0.96, blue: 1.0),
-                    Color(red: 0.28, green: 0.78, blue: 1.0),
-                    Color(red: 0.26, green: 0.16, blue: 0.92),
-                    Color(red: 0.58, green: 0.18, blue: 0.95)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: Capsule()
-        )
-        .overlay(
-            Capsule()
-                .strokeBorder(Color.white.opacity(0.42), lineWidth: 0.8)
-        )
-        .shadow(color: Color(red: 0.34, green: 0.76, blue: 1.0).opacity(0.34), radius: 8, x: 0, y: 0)
-        .shadow(color: Color.purple.opacity(0.24), radius: 12, x: 0, y: 0)
-    }
-}
-
-private struct UltraInstinctConfigurationSheet: View {
-    @Environment(\.dismiss) private var dismiss
-
-    let session: Session
-    let models: [APITranscriptionModel]
-    @Binding var selectedModelIds: [UUID]
-    @Binding var batchTarget: Int
-    let concurrentUploads: Int
-    let onStart: () -> Void
-
-    private var selectedModels: [APITranscriptionModel] {
-        selectedModelIds.compactMap { modelId in
-            models.first(where: { $0.id == modelId })
-        }
-    }
-
-    private var routeCount: Int {
-        selectedModels.count
-    }
-
-    private var canStart: Bool {
-        routeCount >= 2
-    }
-
-    private var effectiveBatchCount: Int {
-        if batchTarget > 0 {
-            let rounded = Int(round(Double(batchTarget) / 6.0)) * 6
-            return max(6, min(rounded, 30))
-        }
-
-        let minutes = max(session.duration / 60.0, 0.1)
-        let rawCount = Int(ceil(minutes / 15.0))
-        let roundedToWave = Int(ceil(Double(rawCount) / 6.0)) * 6
-        return max(6, min(roundedToWave, 30))
-    }
-
-    private var sessionMinutes: Double {
-        max(session.duration / 60.0, 0)
-    }
-
-    private var perBatchMinutes: Double {
-        sessionMinutes / Double(max(effectiveBatchCount, 1))
-    }
-
-    private var maxParallelUploads: Int {
-        max(1, routeCount) * concurrentUploads
-    }
-
-    var body: some View {
-        ZStack {
-            UltraInstinctAuraBackdrop()
-
-            VStack(alignment: .leading, spacing: 18) {
-                header
-                modelGrid
-                batchCalculator
-                footer
-            }
-            .padding(22)
-        }
-        .frame(width: 640)
-        .fixedSize(horizontal: false, vertical: true)
-        .onAppear {
-            normalizeSelection()
-        }
-    }
-
-    private var header: some View {
-        HStack(alignment: .top, spacing: 14) {
-            ZStack {
-                Circle()
-                    .fill(Color.white.opacity(0.12))
-                    .frame(width: 44, height: 44)
-                Circle()
-                    .strokeBorder(Color(red: 0.68, green: 0.91, blue: 1.0).opacity(0.56), lineWidth: 1)
-                    .frame(width: 44, height: 44)
-                Image(systemName: "bolt.badge.clock.fill")
-                    .font(.system(size: 18, weight: .black))
-                    .foregroundStyle(.white)
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Ultra Instinct")
-                    .font(.system(size: 24, weight: .black, design: .rounded))
-                    .foregroundStyle(.white)
-                Text("Split the session across 2 or 3 public API models, then stitch batches back in order.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color.white.opacity(0.76))
-            }
-
-            Spacer()
-
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.78))
-                    .frame(width: 28, height: 28)
-                    .background(Color.white.opacity(0.1), in: Circle())
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private var modelGrid: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Public API Models")
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.78))
-                    .textCase(.uppercase)
-                Spacer()
-                Text("\(routeCount)/3 selected")
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .foregroundStyle(canStart ? Color(red: 0.68, green: 0.91, blue: 1.0) : Color.white.opacity(0.58))
-            }
-
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 8)], spacing: 8) {
-                ForEach(models) { model in
-                    modelChip(model)
-                }
-            }
-        }
-    }
-
-    private func modelChip(_ model: APITranscriptionModel) -> some View {
-        let isSelected = selectedModelIds.contains(model.id)
-        let isCapped = !isSelected && selectedModelIds.count >= 3
-
-        return Button {
-            toggleModel(model)
-        } label: {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack {
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 12, weight: .bold))
-                    Text(model.providerName)
-                        .font(.system(size: 11, weight: .bold))
-                    Spacer()
-                }
-                Text(model.displayName)
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(isSelected ? .white : Color.white.opacity(0.72))
-            .padding(11)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                isSelected
-                    ? AnyShapeStyle(LinearGradient(colors: [
-                        Color(red: 0.62, green: 0.88, blue: 1.0).opacity(0.34),
-                        Color(red: 0.35, green: 0.32, blue: 1.0).opacity(0.42),
-                        Color(red: 0.64, green: 0.22, blue: 0.94).opacity(0.38)
-                    ], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    : AnyShapeStyle(Color.white.opacity(0.07)),
-                in: .rect(cornerRadius: 10, style: .continuous)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(isSelected ? Color.white.opacity(0.36) : Color.white.opacity(0.1), lineWidth: 0.8)
-            )
-            .opacity(isCapped ? 0.42 : 1)
-        }
-        .buttonStyle(.plain)
-        .disabled(isCapped)
-    }
-
-    private var batchCalculator: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Batch Calculation")
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .foregroundStyle(Color.white.opacity(0.78))
-                        .textCase(.uppercase)
-                    Text(String(format: "%.0f min / %d batches = %.2f min each", sessionMinutes, effectiveBatchCount, perBatchMinutes))
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white)
-                }
-
-                Spacer()
-
-                sheetIntegerStepper(
-                    label: "Batches",
-                    value: $batchTarget,
-                    in: 0...30,
-                    step: 6,
-                    zeroLabel: "Auto"
-                )
-            }
-
-            HStack(spacing: 8) {
-                sheetStatPill(icon: "square.stack.3d.up", text: "\(effectiveBatchCount) batches")
-                sheetStatPill(icon: "clock", text: String(format: "%.2f min/batch", perBatchMinutes))
-                sheetStatPill(icon: "bolt.horizontal.fill", text: "\(routeCount) routes x \(concurrentUploads) = \(maxParallelUploads) parallel")
-            }
-        }
-        .padding(12)
-        .background(Color.black.opacity(0.18), in: .rect(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8)
-        )
-    }
-
-    private var footer: some View {
-        HStack(spacing: 10) {
-            Text(canStart ? "Ready: \(selectedModels.map(\.providerName).joined(separator: " + "))" : "Choose at least 2 models.")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(canStart ? Color(red: 0.68, green: 0.91, blue: 1.0) : Color.white.opacity(0.62))
-
-            Spacer()
-
-            Button("Cancel") {
-                dismiss()
-            }
-            .buttonStyle(.plain)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(Color.white.opacity(0.72))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-
-            Button {
-                onStart()
-                dismiss()
-            } label: {
-                UltraInstinctElectricButtonLabel()
-            }
-            .buttonStyle(.plain)
-            .disabled(!canStart)
-            .opacity(canStart ? 1 : 0.42)
-        }
-    }
-
-    private func toggleModel(_ model: APITranscriptionModel) {
-        if let index = selectedModelIds.firstIndex(of: model.id) {
-            selectedModelIds.remove(at: index)
-        } else if selectedModelIds.count < 3 {
-            selectedModelIds.append(model.id)
-        }
-    }
-
-    private func normalizeSelection() {
-        selectedModelIds = selectedModelIds.filter { id in
-            models.contains(where: { $0.id == id })
-        }
-        if selectedModelIds.count > 3 {
-            selectedModelIds = Array(selectedModelIds.prefix(3))
-        }
-    }
-
-    private func sheetStatPill(icon: String, text: String) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: icon)
-                .font(.system(size: 9, weight: .bold))
-            Text(text)
-                .font(.system(size: 10, weight: .semibold))
-        }
-        .foregroundStyle(Color.white.opacity(0.78))
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .background(Color.white.opacity(0.08), in: Capsule())
-    }
-
-    private func sheetIntegerStepper(
-        label: String,
-        value: Binding<Int>,
-        in range: ClosedRange<Int>,
-        step: Int,
-        zeroLabel: String
-    ) -> some View {
-        let displayValue = value.wrappedValue == 0 ? zeroLabel : "\(value.wrappedValue)"
-        return HStack(spacing: 7) {
-            Text(label)
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(Color.white.opacity(0.62))
-
-            Button {
-                value.wrappedValue = max(range.lowerBound, value.wrappedValue - step)
-            } label: {
-                Image(systemName: "minus")
-                    .font(.system(size: 8, weight: .bold))
-                    .frame(width: 18, height: 18)
-                    .background(Color.white.opacity(0.1), in: Circle())
-            }
-            .buttonStyle(.plain)
-            .disabled(value.wrappedValue <= range.lowerBound)
-
-            Text(displayValue)
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white)
-                .frame(width: 46)
-
-            Button {
-                value.wrappedValue = min(range.upperBound, value.wrappedValue + step)
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 8, weight: .bold))
-                    .frame(width: 18, height: 18)
-                    .background(Color.white.opacity(0.1), in: Circle())
-            }
-            .buttonStyle(.plain)
-            .disabled(value.wrappedValue >= range.upperBound)
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 30)
-        .background(Color.white.opacity(0.08), in: Capsule())
-        .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.7))
-    }
-}
-
-private struct UltraInstinctAuraBackdrop: View {
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.02, green: 0.03, blue: 0.12),
-                    Color(red: 0.07, green: 0.05, blue: 0.24),
-                    Color(red: 0.03, green: 0.02, blue: 0.12)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            RadialGradient(
-                colors: [
-                    Color.white.opacity(0.13),
-                    Color(red: 0.48, green: 0.88, blue: 1.0).opacity(0.18),
-                    Color.clear
-                ],
-                center: .top,
-                startRadius: 10,
-                endRadius: 330
-            )
-
-            RadialGradient(
-                colors: [
-                    Color(red: 0.66, green: 0.25, blue: 0.96).opacity(0.14),
-                    Color(red: 0.17, green: 0.22, blue: 0.95).opacity(0.12),
-                    Color.clear
-                ],
-                center: .bottomTrailing,
-                startRadius: 24,
-                endRadius: 420
-            )
-        }
     }
 }
 
