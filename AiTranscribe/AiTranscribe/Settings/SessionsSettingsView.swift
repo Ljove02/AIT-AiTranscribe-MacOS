@@ -23,6 +23,7 @@ struct SessionsSettingsView: View {
     @State private var selectedSessionIds: Set<UUID> = []
     @State private var showAudioMixSheet = false
     @State private var showAutomationSheet = false
+    @State private var showImportPage = false
     @State private var selectedDate: Date? = nil
     @State private var showDatePicker = false
     @State private var apiTranscriptionModels: [APITranscriptionModel] = APITranscriptionModelStore.load()
@@ -144,7 +145,17 @@ struct SessionsSettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if let selectedId = selectedSessionId,
+            if showImportPage {
+                SessionImportView(
+                    onBack: { showImportPage = false },
+                    onImported: { sessionId in
+                        showImportPage = false
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            selectedSessionId = sessionId
+                        }
+                    }
+                )
+            } else if let selectedId = selectedSessionId,
                sessionManager.sessions.contains(where: { $0.id == selectedId }) {
                 SessionDetailView(sessionId: selectedId, onBack: {
                     selectedSessionId = nil
@@ -275,6 +286,26 @@ struct SessionsSettingsView: View {
                 }
 
                 Spacer()
+
+                // Import audio button
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        showImportPage = true
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "square.and.arrow.down")
+                            .font(.system(size: 10, weight: .medium))
+                        Text("Import")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(.thinMaterial, in: Capsule())
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
 
                 // Audio mix button
                 Button {
@@ -1207,9 +1238,28 @@ struct SessionsSettingsView: View {
             Text("No sessions yet")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text("Record your first session from the menu bar.")
+            Text("Record your first session from the menu bar, or import an audio file.")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    showImportPage = true
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 10, weight: .medium))
+                    Text("Import Audio File")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Color.accentColor, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 4)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 60)
