@@ -49,6 +49,9 @@ import AVFAudio
 class SessionRecorder: NSObject, ObservableObject {
     private struct AudioLevelAnalysis {
         let activeRMS: Float
+        /// RMS over every sample, ungated. Kept for diagnostics: comparing it
+        /// against activeRMS shows how much of the track is silence.
+        let ungatedRMS: Float
         let peak: Float
         /// 99.9th percentile magnitude across active samples. Used instead of
         /// `peak` when planning the mix so a single transient (a cough, a
@@ -518,9 +521,15 @@ class SessionRecorder: NSObject, ObservableObject {
             if micActiveBuffers == 0 || micMaxPeak < 0.001 || outputSize < 10_000 {
                 writeLowAudioDiagnostics(outputURL: m4aURL)
             }
-            try? FileManager.default.removeItem(at: micURL)
-            if let sysURL = tempSysURL {
-                try? FileManager.default.removeItem(at: sysURL)
+            if UserDefaults.standard.bool(forKey: "sessionKeepTempTracks") {
+                // Diagnostic opt-in: the mixed file cannot tell you what each
+                // source actually contributed, so keep the separate tracks.
+                print("SessionRecorder: sessionKeepTempTracks set — preserving mic/system tracks")
+            } else {
+                try? FileManager.default.removeItem(at: micURL)
+                if let sysURL = tempSysURL {
+                    try? FileManager.default.removeItem(at: sysURL)
+                }
             }
             print("SessionRecorder: Recording stopped. Duration: \(Self.formatDuration(duration))")
             return m4aURL
@@ -1118,6 +1127,7 @@ class SessionRecorder: NSObject, ObservableObject {
 
         return AudioLevelAnalysis(
             activeRMS: Float(gated.rms),
+            ungatedRMS: Float(coarse.rms),
             peak: coarse.peak,
             loudPeak: gated.loudPeak,
             activeSamples: gated.gated,
@@ -1196,12 +1206,20 @@ class SessionRecorder: NSObject, ObservableObject {
 
     private func describe(_ label: String, _ analysis: AudioLevelAnalysis?) -> [String] {
         guard let analysis else { return ["\(label)=nil"] }
+        let activeFraction = analysis.totalSamples > 0
+            ? Double(analysis.activeSamples) / Double(analysis.totalSamples)
+            : 0
         return [
             "\(label).activeRMS=\(analysis.activeRMS)",
+            "\(label).ungatedRMS=\(analysis.ungatedRMS)",
             "\(label).loudPeak=\(analysis.loudPeak)",
             "\(label).peak=\(analysis.peak)",
             "\(label).activeSamples=\(analysis.activeSamples)",
             "\(label).totalSamples=\(analysis.totalSamples)",
+            "\(label).activeFraction=\(activeFraction)",
+            // A high crest ratio with a low active fraction points at a noise
+            // floor inflating the measurement rather than at real speech.
+            "\(label).crest=\(analysis.activeRMS > 0 ? analysis.loudPeak / analysis.activeRMS : 0)",
         ]
     }
 
