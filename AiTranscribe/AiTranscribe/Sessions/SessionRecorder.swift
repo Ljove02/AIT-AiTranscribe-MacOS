@@ -1309,19 +1309,32 @@ class SessionRecorder: NSObject, ObservableObject {
         return GainEnvelope(blockSeconds: blockSeconds, gains: smooth(desired))
     }
 
-    /// Two-pass smoothing. Running the filter forwards and then backwards
-    /// keeps the curve from lagging the audio, which is possible here because
-    /// the whole file is available and nothing is real-time.
+    /// Smooths the gain curve asymmetrically: it rises slowly and falls
+    /// quickly.
+    ///
+    /// The asymmetry is the point. Smoothing symmetrically lets the curve
+    /// climb *ahead* of a quiet section, so the loud audio just before a
+    /// mid-session drop gets the gain intended for the audio after it — the
+    /// part before a call is joined comes out overboosted by several dB.
+    /// The backward pass is therefore allowed only to lower the curve, which
+    /// ducks ahead of loud content without ever boosting early.
     private func smooth(_ values: [Float]) -> [Float] {
         guard values.count > 2 else { return values }
-        let coefficient: Float = 0.25
+        let rise: Float = 0.12
+        let fall: Float = 0.40
+
         var forward = values
         for index in 1..<forward.count {
-            forward[index] = forward[index - 1] + coefficient * (forward[index] - forward[index - 1])
+            let previous = forward[index - 1]
+            let coefficient = forward[index] > previous ? rise : fall
+            forward[index] = previous + coefficient * (forward[index] - previous)
         }
+
         var backward = forward
         for index in stride(from: backward.count - 2, through: 0, by: -1) {
-            backward[index] = backward[index + 1] + coefficient * (backward[index] - backward[index + 1])
+            let next = backward[index + 1]
+            let candidate = next + fall * (backward[index] - next)
+            backward[index] = min(backward[index], candidate)
         }
         return backward
     }
