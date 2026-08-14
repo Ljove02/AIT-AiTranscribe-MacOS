@@ -64,6 +64,8 @@ class SessionRecorder: NSObject, ObservableObject {
     private struct MixVolumePlan {
         let micGain: Float
         let systemGain: Float
+        var micEnvelope: GainEnvelope?
+        var systemEnvelope: GainEnvelope?
         let micAnalysis: AudioLevelAnalysis?
         let systemAnalysis: AudioLevelAnalysis?
     }
@@ -1234,6 +1236,182 @@ class SessionRecorder: NSObject, ObservableObject {
         ]
     }
 
+
+    // MARK: - Gain Envelope
+
+    /// A time-varying gain curve for one track.
+    ///
+    /// A single gain per session cannot correct a level that changes partway
+    /// through, and it does change: joining a video call drops the microphone
+    /// by 25-30 dB mid-recording. A session-wide average is dominated by
+    /// whichever side of that change was longer, so one part ends up correct
+    /// and the other unusable.
+    private struct GainEnvelope {
+        let blockSeconds: Double
+        let gains: [Float]
+
+        func gain(atSeconds time: Double) -> Float {
+            guard !gains.isEmpty else { return 1.0 }
+            let position = time / blockSeconds
+            let index = Int(position)
+            if index < 0 { return gains[0] }
+            if index >= gains.count - 1 { return gains[gains.count - 1] }
+            // Interpolate so the gain slides rather than steps.
+            let fraction = Float(position - Double(index))
+            return gains[index] + (gains[index + 1] - gains[index]) * fraction
+        }
+
+        var summary: String {
+            guard let low = gains.min(), let high = gains.max() else { return "empty" }
+            return String(format: "%d blocks, %.2fx..%.2fx", gains.count, low, high)
+        }
+    }
+
+    /// Measures the track in blocks and builds a smoothed gain curve that
+    /// brings each part of it toward the target level.
+    private func computeGainEnvelope(
+        at url: URL,
+        analysis: AudioLevelAnalysis,
+        trimMultiplier: Float
+    ) -> GainEnvelope? {
+        let blockSeconds = 0.5
+        guard let blockLevels = measureBlockLevels(at: url, blockSeconds: blockSeconds),
+              !blockLevels.isEmpty else { return nil }
+
+        // Separate speech from silence using the track's own noise floor —
+        // estimated from its quietest blocks — rather than a fraction of its
+        // average speech level. A threshold derived from the average breaks
+        // exactly when the level shifts mid-recording: speech after a 25 dB
+        // drop falls below it, gets misread as silence, and is never brought
+        // back up. That is the case this whole envelope exists to fix.
+        let sortedLevels = blockLevels.sorted()
+        let noiseIndex = max(0, min(sortedLevels.count - 1, sortedLevels.count / 10))
+        let noiseFloor = sortedLevels[noiseIndex]
+        let speechThreshold = max(noiseFloor * 3.0, 0.0015)
+
+        var desired = [Float](repeating: 0, count: blockLevels.count)
+        var lastKnown = sessionMixTargetRMS / max(analysis.activeRMS, 0.0002)
+
+        for index in 0..<blockLevels.count {
+            let level = blockLevels[index]
+            if level > speechThreshold {
+                lastKnown = sessionMixTargetRMS / level
+            }
+            desired[index] = lastKnown
+        }
+
+        let lower = sessionMixMakeupRange.lowerBound
+        let upper = sessionMixMakeupRange.upperBound
+        for index in 0..<desired.count {
+            desired[index] = min(max(desired[index] * trimMultiplier, lower), upper)
+        }
+
+        return GainEnvelope(blockSeconds: blockSeconds, gains: smooth(desired))
+    }
+
+    /// Two-pass smoothing. Running the filter forwards and then backwards
+    /// keeps the curve from lagging the audio, which is possible here because
+    /// the whole file is available and nothing is real-time.
+    private func smooth(_ values: [Float]) -> [Float] {
+        guard values.count > 2 else { return values }
+        let coefficient: Float = 0.25
+        var forward = values
+        for index in 1..<forward.count {
+            forward[index] = forward[index - 1] + coefficient * (forward[index] - forward[index - 1])
+        }
+        var backward = forward
+        for index in stride(from: backward.count - 2, through: 0, by: -1) {
+            backward[index] = backward[index + 1] + coefficient * (backward[index] - backward[index + 1])
+        }
+        return backward
+    }
+
+    /// Gated RMS per block, using the same relative gate as the whole-file
+    /// analysis so the two measurements are comparable.
+    private func measureBlockLevels(at url: URL, blockSeconds: Double) -> [Float]? {
+        guard let file = try? AVAudioFile(forReading: url) else { return nil }
+        let format = file.processingFormat
+        let framesPerBlock = AVAudioFrameCount(max(format.sampleRate * blockSeconds, 1))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: framesPerBlock) else {
+            return nil
+        }
+
+        var levels: [Float] = []
+        while true {
+            do {
+                try file.read(into: buffer, frameCount: framesPerBlock)
+            } catch {
+                break
+            }
+            let frames = Int(buffer.frameLength)
+            if frames == 0 { break }
+
+            var sumSquares = 0.0
+            var count = 0
+            enumerateMonoSamples(in: buffer) { sample in
+                sumSquares += Double(sample) * Double(sample)
+                count += 1
+            }
+            let rms = count > 0 ? (sumSquares / Double(count)).squareRoot() : 0
+            levels.append(Float(rms))
+        }
+        return levels
+    }
+
+    /// Applies a gain curve to a track as a series of volume ramps. Adjacent
+    /// blocks whose gain barely differs are merged, so a long recording does
+    /// not produce thousands of near-identical ramps.
+    private func applyEnvelope(
+        _ envelope: GainEnvelope?,
+        fallback: Float,
+        to parameters: AVMutableAudioMixInputParameters,
+        duration: CMTime
+    ) {
+        guard let envelope, envelope.gains.count > 1 else {
+            parameters.setVolume(fallback, at: .zero)
+            return
+        }
+
+        let totalSeconds = CMTimeGetSeconds(duration)
+        var segmentStart = 0.0
+        var segmentStartGain = envelope.gains[0]
+        var index = 1
+
+        while index < envelope.gains.count {
+            let time = Double(index) * envelope.blockSeconds
+            let gain = envelope.gains[index]
+            let changed = abs(gain - segmentStartGain) > 0.02
+            let isLast = index == envelope.gains.count - 1
+            if changed || isLast {
+                let end = min(time, totalSeconds)
+                if end > segmentStart {
+                    parameters.setVolumeRamp(
+                        fromStartVolume: segmentStartGain,
+                        toEndVolume: gain,
+                        timeRange: CMTimeRange(
+                            start: CMTime(seconds: segmentStart, preferredTimescale: 600),
+                            duration: CMTime(seconds: end - segmentStart, preferredTimescale: 600)
+                        )
+                    )
+                }
+                segmentStart = end
+                segmentStartGain = gain
+            }
+            index += 1
+        }
+
+        if segmentStart < totalSeconds {
+            parameters.setVolumeRamp(
+                fromStartVolume: segmentStartGain,
+                toEndVolume: segmentStartGain,
+                timeRange: CMTimeRange(
+                    start: CMTime(seconds: segmentStart, preferredTimescale: 600),
+                    duration: CMTime(seconds: totalSeconds - segmentStart, preferredTimescale: 600)
+                )
+            )
+        }
+    }
+
     private func determineMixVolumePlan(micURL: URL, sysURL: URL) -> MixVolumePlan {
         let micAnalysis = analyzeAudioLevels(at: micURL)
         let systemAnalysis = analyzeAudioLevels(at: sysURL)
@@ -1323,9 +1501,25 @@ class SessionRecorder: NSObject, ObservableObject {
         diagnostics.append("appliedSystemGain=\(systemGain)")
         writeLevelDiagnostics(diagnostics, nextTo: micURL)
 
+        var micEnvelope: GainEnvelope?
+        if let micAnalysis {
+            micEnvelope = computeGainEnvelope(
+                at: micURL, analysis: micAnalysis, trimMultiplier: sessionMicTrimMultiplier * scale
+            )
+        }
+        var systemEnvelope: GainEnvelope?
+        if let systemAnalysis {
+            systemEnvelope = computeGainEnvelope(
+                at: sysURL, analysis: systemAnalysis, trimMultiplier: sessionSystemTrimMultiplier * scale
+            )
+        }
+        print("SessionRecorder: mic envelope \(micEnvelope?.summary ?? "none"), sys envelope \(systemEnvelope?.summary ?? "none")")
+
         return MixVolumePlan(
             micGain: micGain,
             systemGain: systemGain,
+            micEnvelope: micEnvelope,
+            systemEnvelope: systemEnvelope,
             micAnalysis: micAnalysis,
             systemAnalysis: systemAnalysis
         )
@@ -1363,7 +1557,12 @@ class SessionRecorder: NSObject, ObservableObject {
                     at: .zero
                 )
                 let parameters = AVMutableAudioMixInputParameters(track: compTrack)
-                parameters.setVolume(mixVolumePlan.micGain, at: .zero)
+                applyEnvelope(
+                    mixVolumePlan.micEnvelope,
+                    fallback: mixVolumePlan.micGain,
+                    to: parameters,
+                    duration: micDuration
+                )
                 mixParameters.append(parameters)
             }
 
@@ -1379,7 +1578,12 @@ class SessionRecorder: NSObject, ObservableObject {
                         at: .zero
                     )
                     let parameters = AVMutableAudioMixInputParameters(track: compTrack)
-                    parameters.setVolume(mixVolumePlan.systemGain, at: .zero)
+                    applyEnvelope(
+                        mixVolumePlan.systemEnvelope,
+                        fallback: mixVolumePlan.systemGain,
+                        to: parameters,
+                        duration: sysDuration
+                    )
                     mixParameters.append(parameters)
                 }
             }
