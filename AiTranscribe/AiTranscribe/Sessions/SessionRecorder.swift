@@ -349,11 +349,14 @@ class SessionRecorder: NSObject, ObservableObject {
     private var sessionMicTrimDB: Double = SessionAudioMixPreferences.defaultMicTrimDB
     private var sessionSystemTrimDB: Double = SessionAudioMixPreferences.defaultSystemTrimDB
 
-    /// Auto make-up target for each track, in RMS over active samples.
-    /// 0.10 ≈ -20 dBFS, measured from sessions that recorded cleanly at a
-    /// level that sounded right (they cluster tightly at 0.101–0.104).
-    private let sessionMixTargetRMS: Float = 0.10
-    private let sessionMixMakeupRange: ClosedRange<Float> = 0.25...8.0
+    /// Auto make-up target for each track, as gated RMS (see
+    /// `analyzeAudioLevels`). Measured from sessions that recorded cleanly at
+    /// a level that sounded right; on this metric they cluster at 0.129–0.137.
+    private let sessionMixTargetRMS: Float = 0.13
+    /// Wide enough to rescue a mic the system has turned right down — a device
+    /// at 5-10% input needs 25-30x, and capping below that is what left
+    /// quiet sessions quiet.
+    private let sessionMixMakeupRange: ClosedRange<Float> = 0.25...32.0
     /// Loud passages (99.9th percentile) must sum below this.
     private let sessionMixPeakCeiling: Float = 0.94
     /// Absolute peaks may overshoot into the soft limiter, but not without
@@ -1008,77 +1011,108 @@ class SessionRecorder: NSObject, ObservableObject {
         }
     }
 
-    private func analyzeAudioLevels(at url: URL) -> AudioLevelAnalysis? {
+    /// Scans a file once, accumulating level statistics. When `gate` is nil it
+    /// measures the ungated RMS and peak; when supplied, it measures RMS over
+    /// samples at or above the gate plus a peak-normalised magnitude histogram.
+    private func scanAudioLevels(
+        at url: URL,
+        gate: Float?,
+        peakReference: Float
+    ) -> (rms: Double, peak: Float, samples: Int64, gated: Int64, loudPeak: Float)? {
         do {
             let audioFile = try AVAudioFile(forReading: url)
             let chunkSize: AVAudioFrameCount = 8192
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: chunkSize) else {
-                return nil
-            }
+            guard let buffer = AVAudioPCMBuffer(
+                pcmFormat: audioFile.processingFormat,
+                frameCapacity: chunkSize
+            ) else { return nil }
 
             var totalSamples: Int64 = 0
-            var activeSamples: Int64 = 0
-            var totalSumSquares: Double = 0
-            var activeSumSquares: Double = 0
+            var gatedSamples: Int64 = 0
+            var sumSquares: Double = 0
+            var gatedSumSquares: Double = 0
             var peak: Float = 0
-            let activityThreshold: Float = 0.004
             let histogramBins = 2048
             var histogram = [Int64](repeating: 0, count: histogramBins)
+            // Bin against the measured peak rather than full scale, so a quiet
+            // file gets the same histogram resolution as a loud one.
+            let binScale = Float(histogramBins - 1) / max(peakReference, 1e-9)
 
             while true {
                 try audioFile.read(into: buffer, frameCount: chunkSize)
                 let frames = Int(buffer.frameLength)
-                if frames == 0 {
-                    break
-                }
+                if frames == 0 { break }
 
                 enumerateMonoSamples(in: buffer) { sample in
                     let magnitude = abs(sample)
-                    let square = Double(sample * sample)
+                    let square = Double(sample) * Double(sample)
                     totalSamples += 1
-                    totalSumSquares += square
+                    sumSquares += square
                     peak = max(peak, magnitude)
 
-                    if magnitude >= activityThreshold {
-                        activeSamples += 1
-                        activeSumSquares += square
-                        let bin = min(Int(magnitude * Float(histogramBins - 1)), histogramBins - 1)
+                    if let gate, magnitude >= gate {
+                        gatedSamples += 1
+                        gatedSumSquares += square
+                        let bin = min(Int(magnitude * binScale), histogramBins - 1)
                         histogram[bin] += 1
                     }
                 }
             }
 
             guard totalSamples > 0 else { return nil }
-            let rmsSamples = max(activeSamples, 1)
-            let rmsSumSquares = activeSamples > 0 ? activeSumSquares : totalSumSquares
-            let activeRMS = sqrt(rmsSumSquares / Double(rmsSamples))
 
-            // 99.9th percentile over active samples, so one transient does not
-            // set the gain for the whole session.
+            // 99.9th percentile over gated samples, so one transient cannot set
+            // the gain for a whole session.
             var loudPeak = peak
-            if activeSamples > 0 {
-                let threshold = Int64(Double(activeSamples) * 0.999)
+            if gatedSamples > 0 {
+                let target = Int64(Double(gatedSamples) * 0.999)
                 var cumulative: Int64 = 0
-                for (bin, count) in histogram.enumerated() {
+                for (bin, count) in histogram.enumerated() where count > 0 {
                     cumulative += count
-                    if cumulative >= threshold {
-                        loudPeak = min(Float(bin + 1) / Float(histogramBins - 1), peak)
+                    if cumulative >= target {
+                        loudPeak = min(Float(bin + 1) / binScale, peak)
                         break
                     }
                 }
             }
 
-            return AudioLevelAnalysis(
-                activeRMS: Float(activeRMS),
-                peak: peak,
-                loudPeak: loudPeak,
-                activeSamples: activeSamples,
-                totalSamples: totalSamples
-            )
+            let rms = gatedSamples > 0
+                ? sqrt(gatedSumSquares / Double(gatedSamples))
+                : sqrt(sumSquares / Double(totalSamples))
+
+            return (rms, peak, totalSamples, gatedSamples, loudPeak)
         } catch {
             print("SessionRecorder: Failed to analyze levels for \(url.lastPathComponent): \(error)")
             return nil
         }
+    }
+
+    /// Measures a track's speech level using a gate placed relative to the
+    /// track's own loudness (-10 dB below ungated RMS, mirroring EBU R128
+    /// relative gating) rather than at a fixed magnitude.
+    ///
+    /// This matters because the result feeds a make-up gain calculation. A
+    /// fixed gate is not scale-invariant: quieter recordings fall further
+    /// below it, so more of the speech is excluded, the level reads too high
+    /// and the gain comes out too small — the quieter the input, the worse the
+    /// error. A relative gate scales with the signal, so halving the input
+    /// exactly halves the measurement and doubles the resulting gain.
+    private func analyzeAudioLevels(at url: URL) -> AudioLevelAnalysis? {
+        guard let coarse = scanAudioLevels(at: url, gate: nil, peakReference: 1.0),
+              coarse.samples > 0, coarse.peak > 0 else { return nil }
+
+        let gate = max(Float(coarse.rms) * 0.316, 1e-7)
+        guard let gated = scanAudioLevels(at: url, gate: gate, peakReference: coarse.peak) else {
+            return nil
+        }
+
+        return AudioLevelAnalysis(
+            activeRMS: Float(gated.rms),
+            peak: coarse.peak,
+            loudPeak: gated.loudPeak,
+            activeSamples: gated.gated,
+            totalSamples: coarse.samples
+        )
     }
 
     /// Applies make-up gain and a soft limiter to one buffer of the 32-bit
