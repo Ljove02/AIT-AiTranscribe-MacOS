@@ -306,6 +306,7 @@ class AudioRecorder: NSObject, ObservableObject {
 
     /// Adaptive gain — compensates for hardware gain changes
     private var micGain: Float = 2.0
+    private let inputGainGuard = InputGainGuard()
 
     /// All recorded buffers (16kHz mono)
     private var recordedBuffers: [AVAudioPCMBuffer] = []
@@ -369,6 +370,7 @@ class AudioRecorder: NSObject, ObservableObject {
         micCallbackCount = 0
         fallbackMonitorTask?.cancel()
         recordingToken = UUID()
+        inputGainGuard.begin(deviceId: deviceId)
 
         // Create our target format (16kHz mono for speech recognition)
         guard let targetFormat = AVAudioFormat(
@@ -471,6 +473,7 @@ class AudioRecorder: NSObject, ObservableObject {
         durationTimer = nil
         fallbackMonitorTask?.cancel()
         fallbackMonitorTask = nil
+        inputGainGuard.end()
 
         if usingCompatibilityMicrophone {
             compatibilityMicCapture.stop()
@@ -520,6 +523,7 @@ class AudioRecorder: NSObject, ObservableObject {
         durationTimer = nil
         fallbackMonitorTask?.cancel()
         fallbackMonitorTask = nil
+        inputGainGuard.end()
 
         if usingCompatibilityMicrophone {
             compatibilityMicCapture.stop()
@@ -1265,5 +1269,113 @@ struct InputDevice: Identifiable, Equatable, Hashable {
 
     var displayName: String {
         name + (isDefault ? " (Default)" : "")
+    }
+}
+
+// MARK: - Input Gain Guard
+
+/// Keeps the microphone's *hardware* input gain at full while recording.
+///
+/// Video call apps — Chrome/WebRTC most aggressively — run automatic gain
+/// control that adjusts `kAudioDevicePropertyVolumeScalar` on the input
+/// device. That is a persistent, system-wide device property, not something
+/// scoped to the call: it stays lowered after the meeting ends, and survives
+/// quitting the app. Anything recorded afterwards is quiet at the source.
+///
+/// This cannot be repaired downstream. Make-up gain applied to an already
+/// attenuated signal raises the noise floor with it, so the recording gets
+/// louder without getting clearer. The only real fix is to stop losing the
+/// headroom in the first place.
+///
+/// The guard restores full gain when recording starts and installs a property
+/// listener, so a call that lowers the gain part-way through a recording is
+/// corrected rather than quietly ruining the rest of the session.
+final class InputGainGuard {
+    /// Below this, the device is considered to have been turned down by
+    /// something else and is restored.
+    private let minimumAcceptable: Float = 0.95
+
+    private var guardedDeviceId: AudioDeviceID?
+    private var listener: AudioObjectPropertyListenerBlock?
+    private let queue = DispatchQueue(label: "com.aitranscribe.inputgain")
+
+    /// Gain the device was found at when guarding began, for diagnostics.
+    private(set) var originalVolume: Float?
+
+    private static var volumeAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyVolumeScalar,
+        mScope: kAudioDevicePropertyScopeInput,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    /// Current hardware input gain, or nil if the device exposes no such
+    /// control (many USB interfaces and virtual devices do not).
+    static func inputVolume(deviceId: AudioDeviceID) -> Float? {
+        var address = volumeAddress
+        guard AudioObjectHasProperty(deviceId, &address) else { return nil }
+        var value: Float32 = 0
+        var size = UInt32(MemoryLayout<Float32>.size)
+        guard AudioObjectGetPropertyData(deviceId, &address, 0, nil, &size, &value) == noErr else {
+            return nil
+        }
+        return value
+    }
+
+    @discardableResult
+    static func setInputVolume(_ volume: Float, deviceId: AudioDeviceID) -> Bool {
+        var address = volumeAddress
+        guard AudioObjectHasProperty(deviceId, &address) else { return false }
+        var settable = DarwinBoolean(false)
+        guard AudioObjectIsPropertySettable(deviceId, &address, &settable) == noErr,
+              settable.boolValue else { return false }
+        var value = Float32(max(0, min(volume, 1)))
+        return AudioObjectSetPropertyData(
+            deviceId, &address, 0, nil,
+            UInt32(MemoryLayout<Float32>.size), &value
+        ) == noErr
+    }
+
+    /// Restore full gain and keep watching for as long as recording runs.
+    func begin(deviceId: AudioDeviceID?) {
+        let device = deviceId ?? AudioRecorder.getDefaultInputDeviceId()
+        guard device != 0 else { return }
+        end()
+        guardedDeviceId = device
+
+        let current = Self.inputVolume(deviceId: device)
+        originalVolume = current
+        guard let current else {
+            print("InputGainGuard: device \(device) exposes no input volume control")
+            return
+        }
+
+        if current < minimumAcceptable {
+            let restored = Self.setInputVolume(1.0, deviceId: device)
+            print(String(
+                format: "InputGainGuard: input gain was %.3f (%.1f dB down) — restore to 1.0 %@",
+                current, 20 * log10(max(current, 0.0001)), restored ? "succeeded" : "FAILED"
+            ))
+        }
+
+        var address = Self.volumeAddress
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self, let device = self.guardedDeviceId else { return }
+            guard let now = Self.inputVolume(deviceId: device), now < self.minimumAcceptable else { return }
+            // Something lowered the gain mid-recording; put it back.
+            Self.setInputVolume(1.0, deviceId: device)
+            print(String(format: "InputGainGuard: gain dropped to %.3f mid-recording — restored", now))
+        }
+        if AudioObjectAddPropertyListenerBlock(device, &address, queue, block) == noErr {
+            listener = block
+        }
+    }
+
+    func end() {
+        if let listener, let device = guardedDeviceId {
+            var address = Self.volumeAddress
+            AudioObjectRemovePropertyListenerBlock(device, &address, queue, listener)
+        }
+        listener = nil
+        guardedDeviceId = nil
     }
 }

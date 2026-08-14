@@ -321,6 +321,9 @@ class SessionRecorder: NSObject, ObservableObject {
     private var sysFileFormat: AVAudioFormat?
 
     private var outputURL: URL?       // Final audio.m4a
+    /// Keeps hardware input gain at full; call apps lower it system-wide.
+    private let inputGainGuard = InputGainGuard()
+
     private var tempMicURL: URL?      // Temporary mic_temp.caf
     private var tempSysURL: URL?      // Temporary sys_temp.caf
     private var durationTimer: Timer?
@@ -458,6 +461,10 @@ class SessionRecorder: NSObject, ObservableObject {
 
         // Start microphone capture (creates micFile from the first PCM buffer)
         micFramesWritten = 0
+        // Restore hardware input gain before opening the mic, so the very
+        // first buffers are already at full level.
+        inputGainGuard.begin(deviceId: micDeviceId)
+
         let micStarted = startMicrophoneCapture(sessionDir: sessionDir, deviceId: micDeviceId)
         if !micStarted {
             print("SessionRecorder: Failed to start microphone — aborting")
@@ -508,6 +515,8 @@ class SessionRecorder: NSObject, ObservableObject {
         startTime = nil
 
         // Mix and convert to M4A
+        inputGainGuard.end()
+
         guard let micURL = tempMicURL, let m4aURL = outputURL else { return nil }
 
         isConverting = true
@@ -548,6 +557,8 @@ class SessionRecorder: NSObject, ObservableObject {
         durationTimer = nil
         stopMicrophoneCapture()
         await systemCapture.stopCapture()
+
+        inputGainGuard.end()
 
         micFile = nil
         sysFile = nil
@@ -1282,19 +1293,26 @@ class SessionRecorder: NSObject, ObservableObject {
             "sysGain=\(systemGainDescription)"
         )
 
-        writeLevelDiagnostics(
-            ["path=mix", "targetRMS=\(sessionMixTargetRMS)"]
-                + describe("mic", micAnalysis)
-                + describe("sys", systemAnalysis)
-                + [
-                    "micTrimMultiplier=\(sessionMicTrimMultiplier)",
-                    "systemTrimMultiplier=\(sessionSystemTrimMultiplier)",
-                    "limiterScale=\(scale)",
-                    "appliedMicGain=\(micGain)",
-                    "appliedSystemGain=\(systemGain)",
-                ],
-            nextTo: micURL
-        )
+        // Built in steps: a single large array concatenation here exceeds the
+        // Swift type checker's budget.
+        let inputGainDescription: String
+        if let originalVolume = inputGainGuard.originalVolume {
+            inputGainDescription = String(originalVolume)
+        } else {
+            inputGainDescription = "unavailable"
+        }
+
+        var diagnostics: [String] = ["path=mix"]
+        diagnostics.append("targetRMS=\(sessionMixTargetRMS)")
+        diagnostics.append("inputGainAtStart=\(inputGainDescription)")
+        diagnostics.append(contentsOf: describe("mic", micAnalysis))
+        diagnostics.append(contentsOf: describe("sys", systemAnalysis))
+        diagnostics.append("micTrimMultiplier=\(sessionMicTrimMultiplier)")
+        diagnostics.append("systemTrimMultiplier=\(sessionSystemTrimMultiplier)")
+        diagnostics.append("limiterScale=\(scale)")
+        diagnostics.append("appliedMicGain=\(micGain)")
+        diagnostics.append("appliedSystemGain=\(systemGain)")
+        writeLevelDiagnostics(diagnostics, nextTo: micURL)
 
         return MixVolumePlan(
             micGain: micGain,
