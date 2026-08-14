@@ -1039,7 +1039,15 @@ class SessionRecorder: NSObject, ObservableObject {
             let binScale = Float(histogramBins - 1) / max(peakReference, 1e-9)
 
             while true {
-                try audioFile.read(into: buffer, frameCount: chunkSize)
+                do {
+                    try audioFile.read(into: buffer, frameCount: chunkSize)
+                } catch {
+                    // AVAudioFile throws on the read past the end rather than
+                    // reporting a short read, so this is the normal way a
+                    // complete scan finishes. Everything accumulated so far is
+                    // valid — treating it as a failure discards the whole file.
+                    break
+                }
                 let frames = Int(buffer.frameLength)
                 if frames == 0 { break }
 
@@ -1173,6 +1181,28 @@ class SessionRecorder: NSObject, ObservableObject {
         return min(max(desired, sessionMixMakeupRange.lowerBound), sessionMixMakeupRange.upperBound)
     }
 
+    /// Writes the level analysis next to the recording. `print` output is lost
+    /// for a normally launched app, and these numbers are the only way to tell
+    /// a mis-measured level from a mis-applied gain after the fact.
+    private func writeLevelDiagnostics(_ lines: [String], nextTo url: URL) {
+        let destination = url
+            .deletingLastPathComponent()
+            .appendingPathComponent("audio_levels.txt")
+        let text = lines.joined(separator: "\n") + "\n"
+        try? text.write(to: destination, atomically: true, encoding: .utf8)
+    }
+
+    private func describe(_ label: String, _ analysis: AudioLevelAnalysis?) -> [String] {
+        guard let analysis else { return ["\(label)=nil"] }
+        return [
+            "\(label).activeRMS=\(analysis.activeRMS)",
+            "\(label).loudPeak=\(analysis.loudPeak)",
+            "\(label).peak=\(analysis.peak)",
+            "\(label).activeSamples=\(analysis.activeSamples)",
+            "\(label).totalSamples=\(analysis.totalSamples)",
+        ]
+    }
+
     private func determineMixVolumePlan(micURL: URL, sysURL: URL) -> MixVolumePlan {
         let micAnalysis = analyzeAudioLevels(at: micURL)
         let systemAnalysis = analyzeAudioLevels(at: sysURL)
@@ -1224,6 +1254,20 @@ class SessionRecorder: NSObject, ObservableObject {
             "micPeak=\(micPeakDescription) sysRMS=\(systemRMSDescription) " +
             "sysPeak=\(systemPeakDescription) -> micGain=\(micGainDescription) " +
             "sysGain=\(systemGainDescription)"
+        )
+
+        writeLevelDiagnostics(
+            ["path=mix", "targetRMS=\(sessionMixTargetRMS)"]
+                + describe("mic", micAnalysis)
+                + describe("sys", systemAnalysis)
+                + [
+                    "micTrimMultiplier=\(sessionMicTrimMultiplier)",
+                    "systemTrimMultiplier=\(sessionSystemTrimMultiplier)",
+                    "limiterScale=\(scale)",
+                    "appliedMicGain=\(micGain)",
+                    "appliedSystemGain=\(systemGain)",
+                ],
+            nextTo: micURL
         )
 
         return MixVolumePlan(
@@ -1381,6 +1425,12 @@ class SessionRecorder: NSObject, ObservableObject {
             analysis?.peak ?? 0,
             gain
         ))
+        writeLevelDiagnostics(
+            ["path=single-track", "input=\(inputURL.lastPathComponent)", "targetRMS=\(sessionMixTargetRMS)"]
+                + describe("track", analysis)
+                + ["trimMultiplier=\(trimMultiplier)", "appliedGain=\(gain)"],
+            nextTo: inputURL
+        )
 
         let asset = AVURLAsset(url: inputURL)
 
