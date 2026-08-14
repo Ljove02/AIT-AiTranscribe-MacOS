@@ -1284,10 +1284,19 @@ class SessionRecorder: NSObject, ObservableObject {
         // exactly when the level shifts mid-recording: speech after a 25 dB
         // drop falls below it, gets misread as silence, and is never brought
         // back up. That is the case this whole envelope exists to fix.
+        // A percentile of the block levels cannot be trusted as a noise
+        // estimate here: when a large part of the recording is quiet — exactly
+        // the case this exists to fix — the percentile lands inside the quiet
+        // speech, putting the threshold above it so the whole section is read
+        // as silence and never brought back up.
+        //
+        // So the threshold is a fixed low level that speech is essentially
+        // never below, and the measured floor may only lower it further, never
+        // raise it.
         let sortedLevels = blockLevels.sorted()
         let noiseIndex = max(0, min(sortedLevels.count - 1, sortedLevels.count / 10))
         let noiseFloor = sortedLevels[noiseIndex]
-        let speechThreshold = max(noiseFloor * 3.0, 0.0015)
+        let speechThreshold = max(0.002, min(noiseFloor * 3.0, 0.003))
 
         var desired = [Float](repeating: 0, count: blockLevels.count)
         var lastKnown = sessionMixTargetRMS / max(analysis.activeRMS, 0.0002)
@@ -1320,7 +1329,7 @@ class SessionRecorder: NSObject, ObservableObject {
     /// ducks ahead of loud content without ever boosting early.
     private func smooth(_ values: [Float]) -> [Float] {
         guard values.count > 2 else { return values }
-        let rise: Float = 0.12
+        let rise: Float = 0.30
         let fall: Float = 0.40
 
         var forward = values
