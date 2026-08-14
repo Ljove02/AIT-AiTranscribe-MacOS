@@ -1284,29 +1284,23 @@ class SessionRecorder: NSObject, ObservableObject {
         // exactly when the level shifts mid-recording: speech after a 25 dB
         // drop falls below it, gets misread as silence, and is never brought
         // back up. That is the case this whole envelope exists to fix.
-        // A percentile of the block levels cannot be trusted as a noise
-        // estimate here: when a large part of the recording is quiet — exactly
-        // the case this exists to fix — the percentile lands inside the quiet
-        // speech, putting the threshold above it so the whole section is read
-        // as silence and never brought back up.
+        // No silence/speech classification. Deciding which blocks "contain
+        // speech" needs a threshold, and every way of deriving one failed the
+        // same way: when a large part of a recording is quiet — the case this
+        // exists to fix — the quiet speech falls under the threshold, is read
+        // as silence, and is never brought back up.
         //
-        // So the threshold is a fixed low level that speech is essentially
-        // never below, and the measured floor may only lower it further, never
-        // raise it.
-        let sortedLevels = blockLevels.sorted()
-        let noiseIndex = max(0, min(sortedLevels.count - 1, sortedLevels.count / 10))
-        let noiseFloor = sortedLevels[noiseIndex]
-        let speechThreshold = max(0.002, min(noiseFloor * 3.0, 0.003))
-
+        // Instead the level follows speech upward instantly and decays away
+        // only gradually. A pause holds the gain steady because the held level
+        // has not decayed far, while a sustained drop is tracked within a
+        // couple of seconds. It is causal, so unlike look-ahead it cannot
+        // raise the gain ahead of a quiet section.
+        let decay: Float = 0.6
+        var held: Float = 0
         var desired = [Float](repeating: 0, count: blockLevels.count)
-        var lastKnown = sessionMixTargetRMS / max(analysis.activeRMS, 0.0002)
-
         for index in 0..<blockLevels.count {
-            let level = blockLevels[index]
-            if level > speechThreshold {
-                lastKnown = sessionMixTargetRMS / level
-            }
-            desired[index] = lastKnown
+            held = max(blockLevels[index], held * decay)
+            desired[index] = sessionMixTargetRMS / max(held, 0.0005)
         }
 
         let lower = sessionMixMakeupRange.lowerBound
