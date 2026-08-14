@@ -357,13 +357,15 @@ class SessionRecorder: NSObject, ObservableObject {
     /// at 5-10% input needs 25-30x, and capping below that is what left
     /// quiet sessions quiet.
     private let sessionMixMakeupRange: ClosedRange<Float> = 0.25...32.0
-    /// Loud passages (99.9th percentile) must sum below this.
-    private let sessionMixPeakCeiling: Float = 0.94
+    /// Loud passages (99.9th percentile) are planned to land here. Full scale
+    /// is safe as a planning target because the soft limiter, not this number,
+    /// is what guarantees the output cannot clip.
+    private let sessionMixPeakCeiling: Float = 1.0
     /// Absolute peaks may overshoot into the soft limiter, but not without
     /// bound. Constraining true peaks to the ceiling instead would let one
     /// transient dictate the level for a whole session — the exact problem
     /// the percentile measurement exists to avoid.
-    private let sessionMixTransientCeiling: Float = 1.5
+    private let sessionMixTransientCeiling: Float = 2.0
 
     /// Output soft limiter. Samples below the threshold pass through
     /// untouched; above it they are smoothly compressed and approach the
@@ -1226,14 +1228,20 @@ class SessionRecorder: NSObject, ObservableObject {
         let micPeak = (micAnalysis?.peak ?? 0) * micGain
         let sysPeak = (systemAnalysis?.peak ?? 0) * systemGain
 
+        // Combine the two tracks in power, not linearly. Adding magnitudes
+        // assumes mic and desktop reach their loudest in the same instant, on
+        // every sample. They are uncorrelated and mostly alternate — people
+        // take turns talking — so linear summing charges for a collision that
+        // rarely happens and costs real loudness on every session. The soft
+        // limiter is what covers the occasional genuine collision.
         var scale: Float = 1.0
-        let loudSum = micLoud + sysLoud
-        if loudSum > sessionMixPeakCeiling {
-            scale = min(scale, sessionMixPeakCeiling / loudSum)
+        let loudCombined = (micLoud * micLoud + sysLoud * sysLoud).squareRoot()
+        if loudCombined > sessionMixPeakCeiling {
+            scale = min(scale, sessionMixPeakCeiling / loudCombined)
         }
-        let peakSum = micPeak + sysPeak
-        if peakSum > sessionMixTransientCeiling {
-            scale = min(scale, sessionMixTransientCeiling / peakSum)
+        let peakCombined = (micPeak * micPeak + sysPeak * sysPeak).squareRoot()
+        if peakCombined > sessionMixTransientCeiling {
+            scale = min(scale, sessionMixTransientCeiling / peakCombined)
         }
         if scale < 1.0 {
             micGain *= scale
