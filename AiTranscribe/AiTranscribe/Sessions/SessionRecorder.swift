@@ -1305,6 +1305,15 @@ class SessionRecorder: NSObject, ObservableObject {
         var diagnostics: [String] = ["path=mix"]
         diagnostics.append("targetRMS=\(sessionMixTargetRMS)")
         diagnostics.append("inputGainAtStart=\(inputGainDescription)")
+        diagnostics.append("inputGainCorrections=\(inputGainGuard.corrections)")
+        let currentDevice = AudioRecorder.getDefaultInputDeviceId()
+        let gainNowDescription: String
+        if let gainNow = InputGainGuard.inputVolume(deviceId: currentDevice) {
+            gainNowDescription = String(gainNow)
+        } else {
+            gainNowDescription = "unavailable"
+        }
+        diagnostics.append("inputGainAtEnd=\(gainNowDescription)")
         diagnostics.append(contentsOf: describe("mic", micAnalysis))
         diagnostics.append(contentsOf: describe("sys", systemAnalysis))
         diagnostics.append("micTrimMultiplier=\(sessionMicTrimMultiplier)")
