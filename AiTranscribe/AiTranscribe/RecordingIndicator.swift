@@ -1220,6 +1220,8 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
     /// When audio last actually arrived, used to notice a dead session.
     private var lastBufferAt: TimeInterval = 0
     private var recoveryAttempts = 0
+    private var lastRawRMS: Double = 0
+    private var lastAdjustedRMS: Double = 0
     private var smoothedLevel: Double = 0
     private var lastPublishedAt: TimeInterval = 0
     private var noiseFloor: Double = 0.002
@@ -1230,6 +1232,36 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
     override init() {
         super.init()
         applySavedNoiseFloor()
+    }
+
+    // MARK: - Diagnostics
+    //
+    // print output is lost for a normally launched app, and this only
+    // misbehaves after a specific sequence involving another app holding the
+    // microphone, so the numbers have to survive to disk to be readable.
+
+    private static let logURL: URL? = {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("AiTranscribe/indicator_level.log")
+    }()
+    private var lastLoggedAt: TimeInterval = 0
+
+    private func log(_ line: String) {
+        guard let url = Self.logURL else { return }
+        let stamped = ISO8601DateFormatter().string(from: Date()) + "  " + line + "\n"
+        guard let data = stamped.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            // Keep it small: this is a rolling diagnostic, not a record.
+            if (try? handle.seekToEnd()) ?? 0 > 200_000 {
+                try? handle.truncate(atOffset: 0)
+            }
+            try? handle.write(contentsOf: data)
+        } else {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? stamped.write(to: url, atomically: true, encoding: .utf8)
+        }
     }
 
     func start() {
@@ -1259,6 +1291,7 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
             session.startRunning()
         }
 
+        log("start: running=\(session.isRunning) device=\(AVCaptureDevice.default(for: .audio)?.localizedName ?? "none") floor=\(noiseFloor) calibrated=\(usesCalibratedNoiseFloor)")
         publish(level: smoothedLevel)
         scheduleStalenessCheck()
     }
@@ -1277,7 +1310,7 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
                 return
             }
             self.recoveryAttempts += 1
-            print("RecordingIndicatorLevelMonitor: no audio since start — rebuilding capture session")
+            self.log("no audio 1.5s after start — rebuilding capture session")
             self.teardownOnQueue()
             self.startOnQueue()
         }
@@ -1407,6 +1440,21 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         lastBufferAt = Date().timeIntervalSince1970
         let measuredLevel = normalizedLevel(from: sampleBuffer)
+
+        if lastBufferAt - lastLoggedAt > 0.5 {
+            lastLoggedAt = lastBufferAt
+            var formatText = "?"
+            if let fd = CMSampleBufferGetFormatDescription(sampleBuffer),
+               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fd)?.pointee {
+                let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+                let interleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
+                formatText = "\(Int(asbd.mSampleRate))Hz/\(asbd.mChannelsPerFrame)ch/"
+                    + "\(isFloat ? "f" : "i")\(asbd.mBitsPerChannel)"
+                    + "/\(interleaved ? "inter" : "planar")"
+            }
+            log(String(format: "fmt=%@ rawRMS=%.6f floor=%.6f adj=%.6f level=%.4f smoothed=%.4f",
+                       formatText, lastRawRMS, noiseFloor, lastAdjustedRMS, measuredLevel, smoothedLevel))
+        }
         let responseWeight = measuredLevel > smoothedLevel ? 0.36 : 0.20
         smoothedLevel = smoothedLevel * (1 - responseWeight) + measuredLevel * responseWeight
 
@@ -1442,11 +1490,13 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
         }
 
         let rms = rmsLevel(from: pcmBuffer)
+        lastRawRMS = rms
         if calibrationSamples != nil {
             calibrationSamples?.append(rms)
         }
 
         let adjustedRMS = noiseReducedRMS(from: rms)
+        lastAdjustedRMS = adjustedRMS
         guard adjustedRMS > 0.00012 else { return 0 }
 
         return min(1, pow(adjustedRMS * 23, 0.64))
