@@ -9,6 +9,13 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
     private var appState: AppState?
     private var backendManager: BackendManager?
 
+    /// The activation policy the app had before onboarding forced `.regular`.
+    /// AiTranscribe ships as LSUIElement (`.accessory`); the onboarding window
+    /// needs `.regular` to reliably take focus, but leaving it there for the
+    /// rest of the session gives a menu-bar app a stray Dock icon and changes
+    /// how key-window handoff behaves everywhere else.
+    private var policyBeforeOnboarding: NSApplication.ActivationPolicy?
+
     var isVisible: Bool = false
 
     func show(appState: AppState, backendManager: BackendManager, previewMode: Bool = false) {
@@ -67,7 +74,10 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
             hostingController.view.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor)
         ])
 
-        NSApp.setActivationPolicy(.regular)
+        if NSApp.activationPolicy() != .regular {
+            policyBeforeOnboarding = NSApp.activationPolicy()
+            NSApp.setActivationPolicy(.regular)
+        }
         window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
 
@@ -80,6 +90,7 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
         window = nil
         hostingController = nil
         isVisible = false
+        restoreActivationPolicy()
     }
 
     func close() {
@@ -91,6 +102,15 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
         hostingController = nil
 
         isVisible = false
+        restoreActivationPolicy()
+    }
+
+    /// Puts the app back to the policy it had before onboarding. Idempotent —
+    /// `close()` and `windowWillClose(_:)` can both run for a single dismissal.
+    private func restoreActivationPolicy() {
+        guard let policy = policyBeforeOnboarding else { return }
+        policyBeforeOnboarding = nil
+        NSApp.setActivationPolicy(policy)
     }
 
     func checkIfCompleted() -> Bool {

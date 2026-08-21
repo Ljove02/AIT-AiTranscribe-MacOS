@@ -42,6 +42,74 @@ struct TransparentWindow: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
+// MARK: - Settings Window Focus
+
+/// Brings the Settings window to the front and makes it *key*.
+///
+/// This exists because a fixed `asyncAfter` hop is not enough. When the
+/// MenuBarExtra panel dismisses, macOS hands activation back to whatever app
+/// was frontmost before the menu opened — and that handoff can land after our
+/// delay, stealing key status right back. A non-key window renders every
+/// accent-tinted control (NSSwitch, NSPopUpButton) in gray, which is what the
+/// Settings toggles looked like.
+///
+/// `activate(ignoringOtherApps:)` is also deprecated on macOS 14+ and the
+/// system frequently declines the "ignoring other apps" part, so a single shot
+/// is not reliable either. Instead we poll: wait for the window to exist, ask
+/// for activation, then verify `isKeyWindow` and retry until it sticks.
+enum SettingsWindowFocus {
+    private static let retryInterval: TimeInterval = 0.05
+    private static let maxAttempts = 24 // ~1.2s of retries
+
+    static func focus() {
+        attempt(remaining: maxAttempts)
+    }
+
+    private static func attempt(remaining: Int) {
+        guard remaining > 0 else { return }
+
+        guard let window = settingsWindow() else {
+            // Window scene hasn't been instantiated yet — wait for it.
+            retry(remaining: remaining)
+            return
+        }
+
+        // Start with the modern cooperative API. If it hasn't taken by the
+        // halfway mark, fall back to the deprecated form, which still wins in
+        // some accessory-app cases.
+        activateApp(force: remaining <= maxAttempts / 2)
+        window.makeKeyAndOrderFront(nil)
+
+        // Verify on the next pass: activation is asynchronous, and the
+        // MenuBarExtra dismissal may still be in flight.
+        if !window.isKeyWindow || !NSApp.isActive {
+            retry(remaining: remaining)
+        }
+    }
+
+    private static func retry(remaining: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + retryInterval) {
+            attempt(remaining: remaining - 1)
+        }
+    }
+
+    private static func activateApp(force: Bool) {
+        if #available(macOS 14.0, *), !force {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    private static func settingsWindow() -> NSWindow? {
+        NSApp.windows.first { window in
+            guard window.isVisible || window.isMiniaturized || window.canBecomeKey else { return false }
+            return window.identifier?.rawValue.contains("settings") == true
+                || window.title.contains("Settings")
+        }
+    }
+}
+
 // MARK: - Settings View
 
 struct SettingsView: View {

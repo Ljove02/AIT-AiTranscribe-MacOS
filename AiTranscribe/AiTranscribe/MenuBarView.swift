@@ -791,15 +791,7 @@ struct MenuBarView: View {
 
     private func openAndFocusSettings() {
         openWindow(id: "settings")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            NSApp.activate(ignoringOtherApps: true)
-            for window in NSApp.windows {
-                if window.title.contains("Settings") || window.identifier?.rawValue.contains("settings") == true {
-                    window.makeKeyAndOrderFront(nil)
-                    break
-                }
-            }
-        }
+        SettingsWindowFocus.focus()
     }
 
     private func showIntroductionScreen() {

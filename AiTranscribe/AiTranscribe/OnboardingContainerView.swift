@@ -178,6 +178,7 @@ struct OnboardingContainerView: View {
         // Open Settings window
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             openWindow(id: "settings")
+            SettingsWindowFocus.focus()
         }
     }
 
