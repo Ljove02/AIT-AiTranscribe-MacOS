@@ -1214,6 +1214,12 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
     private let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "com.aitranscribe.recording-indicator.microphone-level")
     private var isConfigured = false
+    /// The device the capture session was built against. If the default input
+    /// changes, the session has to be rebuilt rather than restarted.
+    private var configuredDeviceUID: String?
+    /// When audio last actually arrived, used to notice a dead session.
+    private var lastBufferAt: TimeInterval = 0
+    private var recoveryAttempts = 0
     private var smoothedLevel: Double = 0
     private var lastPublishedAt: TimeInterval = 0
     private var noiseFloor: Double = 0.002
@@ -1229,20 +1235,64 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
     func start() {
         queue.async { [weak self] in
             guard let self else { return }
+            self.recoveryAttempts = 0
+            self.startOnQueue()
+        }
+    }
 
-            do {
-                try self.configureIfNeeded()
-            } catch {
-                self.publish(level: 0)
+    private func startOnQueue() {
+        // The default input can change while the app is running, and the
+        // handle can go stale after another process has had the device.
+        let currentUID = AVCaptureDevice.default(for: .audio)?.uniqueID
+        if isConfigured, currentUID != configuredDeviceUID {
+            teardownOnQueue()
+        }
+
+        do {
+            try configureIfNeeded()
+        } catch {
+            publish(level: 0)
+            return
+        }
+
+        if !session.isRunning {
+            session.startRunning()
+        }
+
+        publish(level: smoothedLevel)
+        scheduleStalenessCheck()
+    }
+
+    /// A running session that delivers nothing is indistinguishable from
+    /// silence, and no amount of restarting it helps because the input itself
+    /// is stale. Rebuild it instead, which is the only thing that recovers a
+    /// device another process has disturbed.
+    private func scheduleStalenessCheck() {
+        let startedAt = Date().timeIntervalSince1970
+        queue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, self.session.isRunning else { return }
+            guard self.lastBufferAt < startedAt else { return }
+            guard self.recoveryAttempts < 2 else {
+                print("RecordingIndicatorLevelMonitor: no audio after rebuild; giving up")
                 return
             }
-
-            if !self.session.isRunning {
-                self.session.startRunning()
-            }
-
-            self.publish(level: self.smoothedLevel)
+            self.recoveryAttempts += 1
+            print("RecordingIndicatorLevelMonitor: no audio since start — rebuilding capture session")
+            self.teardownOnQueue()
+            self.startOnQueue()
         }
+    }
+
+    private func teardownOnQueue() {
+        if session.isRunning {
+            session.stopRunning()
+        }
+        session.beginConfiguration()
+        for input in session.inputs { session.removeInput(input) }
+        for output in session.outputs { session.removeOutput(output) }
+        session.commitConfiguration()
+        isConfigured = false
+        configuredDeviceUID = nil
     }
 
     func stop() {
@@ -1350,10 +1400,12 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
         }
         session.addOutput(output)
 
+        configuredDeviceUID = device.uniqueID
         isConfigured = true
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        lastBufferAt = Date().timeIntervalSince1970
         let measuredLevel = normalizedLevel(from: sampleBuffer)
         let responseWeight = measuredLevel > smoothedLevel ? 0.36 : 0.20
         smoothedLevel = smoothedLevel * (1 - responseWeight) + measuredLevel * responseWeight
