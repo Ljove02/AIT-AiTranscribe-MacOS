@@ -1427,6 +1427,28 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
         session.addInput(input)
 
         let output = AVCaptureAudioDataOutput()
+
+        // Ask for a known format rather than accepting whatever the device
+        // delivers. After another app has held the microphone it can come back
+        // in a layout this never expected — a 3-channel float stream was what
+        // killed the level after a call — and measuring that as silence is
+        // indistinguishable from the user not talking. Mono float32 is the one
+        // shape the level maths is written for.
+        let preferred: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+            AVNumberOfChannelsKey: 1,
+        ]
+        output.audioSettings = preferred
+        if output.audioSettings.isEmpty {
+            // Some devices refuse a channel count; fall back to the recorder's
+            // looser request, which at least pins it to linear PCM.
+            output.audioSettings = [AVFormatIDKey: kAudioFormatLinearPCM]
+        }
+
         output.setSampleBufferDelegate(self, queue: queue)
         guard session.canAddOutput(output) else {
             throw MonitorError.cannotAddOutput
@@ -1540,6 +1562,18 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
         guard frames > 0, channels > 0 else { return 0 }
 
         if let channelData = buffer.floatChannelData {
+            // Interleaved buffers expose a single pointer holding every
+            // channel, so indexing it per channel walks off the end. Read it
+            // with a stride instead.
+            if buffer.format.isInterleaved {
+                var sum: Double = 0
+                let samples = channelData[0]
+                for index in 0..<(frames * channels) {
+                    let sample = Double(samples[index])
+                    sum += sample * sample
+                }
+                return sqrt(sum / Double(max(frames * channels, 1)))
+            }
             return rmsLevel(channelData: channelData, frames: frames, channels: channels)
         }
 
