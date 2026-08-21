@@ -290,6 +290,14 @@ class SessionRecorder: NSObject, ObservableObject {
     @Published var isRecording = false
     @Published var duration: TimeInterval = 0
     @Published var micVolume: Float = 0
+
+    /// Live meter readings in dBFS, for the indicator and the mixer.
+    @Published var micLevel: AudioLevelReading = .silent
+    @Published var systemLevel: AudioLevelReading = .silent
+
+    let micMeter = AudioLevelMeter()
+    let systemMeter = AudioLevelMeter()
+    private var meterTimer: Timer?
     @Published var hasSystemAudio = false
     @Published var isConverting = false
 
@@ -463,6 +471,22 @@ class SessionRecorder: NSObject, ObservableObject {
         RunLoop.main.add(timer, forMode: .common)
         durationTimer = timer
 
+        // Meters redraw independently of capture. Ballistics are applied from
+        // elapsed time, so this rate only affects smoothness, not behaviour.
+        micMeter.reset()
+        systemMeter.reset()
+        let meters = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let mic = self.micMeter.reading()
+            let system = self.systemMeter.reading()
+            Task { @MainActor in
+                self.micLevel = mic
+                self.systemLevel = system
+            }
+        }
+        RunLoop.main.add(meters, forMode: .common)
+        meterTimer = meters
+
         isRecording = true
         print("SessionRecorder: Recording started")
         return true
@@ -473,6 +497,12 @@ class SessionRecorder: NSObject, ObservableObject {
 
         durationTimer?.invalidate()
         durationTimer = nil
+        meterTimer?.invalidate()
+        meterTimer = nil
+        micMeter.reset()
+        systemMeter.reset()
+        micLevel = .silent
+        systemLevel = .silent
 
         stopMicrophoneCapture()
         await systemCapture.stopCapture()
@@ -531,6 +561,12 @@ class SessionRecorder: NSObject, ObservableObject {
 
         durationTimer?.invalidate()
         durationTimer = nil
+        meterTimer?.invalidate()
+        meterTimer = nil
+        micMeter.reset()
+        systemMeter.reset()
+        micLevel = .silent
+        systemLevel = .silent
         stopMicrophoneCapture()
         await systemCapture.stopCapture()
 
@@ -608,7 +644,16 @@ class SessionRecorder: NSObject, ObservableObject {
         guard copyPCMData(from: sampleBuffer, frameCount: frameCount, into: pcmBuffer, sourceName: "system") else {
             return
         }
-        // Written at its true level; desktop audio gain is decided at mix time.
+        // Desktop audio had no metering at all before the mixer needed it.
+        var systemSumSquares = 0.0
+        var systemPeak: Float = 0
+        var systemCount = 0
+        enumerateMonoSamples(in: pcmBuffer) { sample in
+            systemSumSquares += Double(sample) * Double(sample)
+            systemPeak = max(systemPeak, abs(sample))
+            systemCount += 1
+        }
+        systemMeter.add(sumSquares: systemSumSquares, peak: systemPeak, sampleCount: systemCount)
 
         // Write directly — no lock needed, only this callback writes to sysFile
         guard let sysFile else { return }
@@ -716,6 +761,7 @@ class SessionRecorder: NSObject, ObservableObject {
                 peak = max(peak, abs(s))
             }
             let rms = sqrt(sum / Float(max(frames, 1)))
+            micMeter.add(sumSquares: Double(sum), peak: peak, sampleCount: frames)
             micMaxRMS = max(micMaxRMS, rms)
             micMaxPeak = max(micMaxPeak, peak)
             if rms > 0.0005 || peak > 0.001 {
