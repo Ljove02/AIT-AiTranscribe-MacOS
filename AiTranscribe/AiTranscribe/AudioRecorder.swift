@@ -1287,22 +1287,16 @@ struct InputDevice: Identifiable, Equatable, Hashable {
 /// louder without getting clearer. The only real fix is to stop losing the
 /// headroom in the first place.
 ///
-/// The guard restores full gain when recording starts and installs a property
-/// listener, so a call that lowers the gain part-way through a recording is
-/// corrected rather than quietly ruining the rest of the session.
+/// The guard restores full gain once, when recording starts. It deliberately
+/// does not keep watching: see `begin` for why re-asserting it fights the call
+/// app and stutters the call.
 final class InputGainGuard {
     /// Below this, the device is considered to have been turned down by
     /// something else and is restored.
     private let minimumAcceptable: Float = 0.95
 
     private var guardedDeviceId: AudioDeviceID?
-    private var listener: AudioObjectPropertyListenerBlock?
-    private var reassertTimer: DispatchSourceTimer?
-    private let queue = DispatchQueue(label: "com.aitranscribe.inputgain")
 
-    /// How many times the gain had to be put back during this recording.
-    /// A steadily climbing count means something is actively fighting for it.
-    private(set) var corrections = 0
 
     /// Gain the device was found at when guarding began, for diagnostics.
     private(set) var originalVolume: Float?
@@ -1362,50 +1356,20 @@ final class InputGainGuard {
             ))
         }
 
-        var address = Self.volumeAddress
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self, let device = self.guardedDeviceId else { return }
-            guard let now = Self.inputVolume(deviceId: device), now < self.minimumAcceptable else { return }
-            // Something lowered the gain mid-recording; put it back.
-            Self.setInputVolume(1.0, deviceId: device)
-            print(String(format: "InputGainGuard: gain dropped to %.3f mid-recording — restored", now))
-        }
-        if AudioObjectAddPropertyListenerBlock(device, &address, queue, block) == noErr {
-            listener = block
-        }
-
-        // A listener alone is not enough. WebRTC's gain control adjusts the
-        // device continuously, and change notifications can be coalesced or
-        // arrive after it has already pulled the level down again. Re-check on
-        // a short interval so the gain is held for the whole recording rather
-        // than only at the moments a notification happens to land.
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 1.0, repeating: 1.0)
-        timer.setEventHandler { [weak self] in
-            guard let self, let device = self.guardedDeviceId else { return }
-            guard let now = Self.inputVolume(deviceId: device), now < self.minimumAcceptable else { return }
-            Self.setInputVolume(1.0, deviceId: device)
-            self.corrections += 1
-            if self.corrections <= 3 || self.corrections % 10 == 0 {
-                print(String(format: "InputGainGuard: gain found at %.3f — restored (correction #%d)",
-                             now, self.corrections))
-            }
-        }
-        timer.resume()
-        reassertTimer = timer
+        // Deliberately a single write, with no listener and no repeating
+        // check. Holding the gain by re-writing it turns into a fight: a call
+        // app's gain control lowers the device, we raise it, our write fires
+        // another change notification, it lowers again. Nothing rate-limits
+        // that, every write goes through the HAL to the driver, and it stalls
+        // the other app's capture — a call visibly stutters for the few
+        // seconds it takes their gain control to settle.
+        //
+        // Starting the recording from full input is most of the benefit
+        // anyway, and if something lowers it mid-session the meters now show
+        // that happening and the fader is there to answer it.
     }
 
     func end() {
-        reassertTimer?.cancel()
-        reassertTimer = nil
-        if corrections > 0 {
-            print("InputGainGuard: held input gain against \(corrections) reduction(s) this recording")
-        }
-        if let listener, let device = guardedDeviceId {
-            var address = Self.volumeAddress
-            AudioObjectRemovePropertyListenerBlock(device, &address, queue, listener)
-        }
-        listener = nil
         guardedDeviceId = nil
     }
 }
