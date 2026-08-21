@@ -488,6 +488,16 @@ class SessionRecorder: NSObject, ObservableObject {
         // elapsed time, so this rate only affects smoothness, not behaviour.
         micMeter.reset()
         systemMeter.reset()
+
+        // Faders belong to one recording. The recorder instance outlives the
+        // session, so without this a level set for one call would silently
+        // apply to the next one, which is the same trap the old adaptive gain
+        // fell into by never resetting.
+        micGainDB = 0
+        systemGainDB = 0
+        micGain.reset()
+        systemGain.reset()
+
         let meters = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             let mic = self.micMeter.reading()

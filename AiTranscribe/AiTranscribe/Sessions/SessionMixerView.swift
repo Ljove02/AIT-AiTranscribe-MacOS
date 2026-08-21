@@ -44,17 +44,26 @@ struct SessionMixerView: View {
                 Text(levelText(level))
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                     .foregroundStyle(colour(for: level.zone))
+                if gain.wrappedValue > 0.25 {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(boostColour(gain.wrappedValue))
+                }
                 Text(gainText(gain.wrappedValue))
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(gain.wrappedValue > 0.25 ? boostColour(gain.wrappedValue) : Color.secondary)
                     .frame(width: 42, alignment: .trailing)
             }
 
             MeterBar(level: level)
                 .frame(height: 6)
 
-            Slider(value: gain, in: -40...12, step: 0.5)
+            // Range reaches +40 dB because a call app can drop the microphone
+            // by 25-30 dB, and boosting is the only lever left once it has.
+            // The limiter downstream means the top of the range cannot clip.
+            Slider(value: gain, in: -40...40, step: 0.5)
                 .controlSize(.mini)
+                .tint(gain.wrappedValue > 0.25 ? boostColour(gain.wrappedValue) : Color.accentColor)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -69,6 +78,13 @@ struct SessionMixerView: View {
 
     private func gainText(_ db: Double) -> String {
         abs(db) < 0.25 ? "0.0" : String(format: "%+.1f", db)
+    }
+
+    /// Boost is worth showing: above unity the fader is amplifying the noise
+    /// floor along with the voice, and past about +20 dB that starts to be
+    /// audible. Amber for boosting, red once it is heavy.
+    private func boostColour(_ db: Double) -> Color {
+        db >= 20 ? Color(MeterArcStyle.litError) : Color(MeterArcStyle.litWarning)
     }
 
     private func colour(for zone: AudioLevelZone) -> Color {
