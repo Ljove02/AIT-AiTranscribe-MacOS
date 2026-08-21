@@ -572,7 +572,9 @@ enum MeterArcStyle {
     static let dimWarning = NSColor(srgbRed: 0.431, green: 0.322, blue: 0.051, alpha: 1)   // #6E520D
     static let dimError   = NSColor(srgbRed: 0.490, green: 0.071, blue: 0.141, alpha: 1)   // #7D1224
 
-    static let lineWidth: CGFloat = 2.5
+    static let lineWidth: CGFloat = 1.6
+    /// Gap between the capsule border and the meter.
+    static let inset: CGFloat = 4.0
 
     /// Where each zone boundary falls along the bar, on the same -60..0 dB
     /// scale the meter reports.
@@ -583,22 +585,37 @@ enum MeterArcStyle {
         CGFloat(1 - (AudioLevelMeter.errorDB / AudioLevelMeter.minimumDB))
     }
 
-    /// The arc a meter is drawn along. Both start near the left, close to the
-    /// centre, and sweep out to the capsule edge so they frame the timer.
+    /// The arc a meter is drawn along: an inset copy of the capsule outline,
+    /// cut in half. The top meter is the upper half, the bottom meter the
+    /// lower half, and both run left to right so they fill in the same
+    /// direction.
+    ///
+    /// It has to be built from the capsule geometry rather than drawn as a
+    /// curve through roughly the right places. A hand-fitted bezier does not
+    /// stay parallel to the border, and the mismatch is obvious at the ends
+    /// where it should be hugging the rounded caps.
     static func path(in bounds: CGRect, top: Bool) -> CGPath {
-        let inset: CGFloat = 5
-        let startX = bounds.minX + 12
-        let endX = bounds.maxX - 9
-        let edgeY = top ? bounds.maxY - inset : bounds.minY + inset
-        let startY = bounds.midY + (top ? 6 : -6)
+        let rect = bounds.insetBy(dx: inset, dy: inset)
+        let radius = rect.height / 2
+        let leftCenter = CGPoint(x: rect.minX + radius, y: rect.midY)
+        let rightCenter = CGPoint(x: rect.maxX - radius, y: rect.midY)
 
         let path = CGMutablePath()
-        path.move(to: CGPoint(x: startX, y: startY))
-        path.addCurve(
-            to: CGPoint(x: endX, y: edgeY),
-            control1: CGPoint(x: startX + 15, y: edgeY),
-            control2: CGPoint(x: endX - 38, y: edgeY)
-        )
+        if top {
+            // Left cap from the middle up to the top, across, then down the
+            // right cap to the middle again.
+            path.addArc(center: leftCenter, radius: radius,
+                        startAngle: .pi, endAngle: .pi / 2, clockwise: true)
+            path.addLine(to: CGPoint(x: rect.maxX - radius, y: rect.maxY))
+            path.addArc(center: rightCenter, radius: radius,
+                        startAngle: .pi / 2, endAngle: 0, clockwise: true)
+        } else {
+            path.addArc(center: leftCenter, radius: radius,
+                        startAngle: .pi, endAngle: 3 * .pi / 2, clockwise: false)
+            path.addLine(to: CGPoint(x: rect.maxX - radius, y: rect.minY))
+            path.addArc(center: rightCenter, radius: radius,
+                        startAngle: 3 * .pi / 2, endAngle: 2 * .pi, clockwise: false)
+        }
         return path
     }
 
@@ -622,7 +639,7 @@ enum MeterArcStyle {
         // before any sound arrives.
         let track = CAShapeLayer()
         track.path = arc
-        track.strokeColor = dimNominal.withAlphaComponent(0.55).cgColor
+        track.strokeColor = dimNominal.withAlphaComponent(0.38).cgColor
         track.fillColor = nil
         track.lineWidth = lineWidth
         track.lineCap = .round
@@ -630,10 +647,10 @@ enum MeterArcStyle {
         track.strokeEnd = 1
         parent.addSublayer(track)
 
-        let dimWarn = stroke(dimWarning.withAlphaComponent(0.55))
+        let dimWarn = stroke(dimWarning.withAlphaComponent(0.38))
         dimWarn.strokeStart = warningStart
         dimWarn.strokeEnd = errorStart
-        let dimErr = stroke(dimError.withAlphaComponent(0.55))
+        let dimErr = stroke(dimError.withAlphaComponent(0.38))
         dimErr.strokeStart = errorStart
         dimErr.strokeEnd = 1
 
