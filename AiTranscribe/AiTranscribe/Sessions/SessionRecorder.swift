@@ -297,6 +297,19 @@ class SessionRecorder: NSObject, ObservableObject {
 
     let micMeter = AudioLevelMeter()
     let systemMeter = AudioLevelMeter()
+
+    /// Faders. Applied during capture, so the meters above show what is
+    /// actually going into the file rather than what arrived before the fader.
+    let micGain = GainStage()
+    let systemGain = GainStage()
+
+    /// Fader positions in dB, for the mixer to bind to.
+    @Published var micGainDB: Double = 0 {
+        didSet { micGain.setDecibels(Float(micGainDB)) }
+    }
+    @Published var systemGainDB: Double = 0 {
+        didSet { systemGain.setDecibels(Float(systemGainDB)) }
+    }
     private var meterTimer: Timer?
     @Published var hasSystemAudio = false
     @Published var isConverting = false
@@ -644,6 +657,8 @@ class SessionRecorder: NSObject, ObservableObject {
         guard copyPCMData(from: sampleBuffer, frameCount: frameCount, into: pcmBuffer, sourceName: "system") else {
             return
         }
+        systemGain.apply(to: pcmBuffer)
+
         // Desktop audio had no metering at all before the mixer needed it.
         var systemSumSquares = 0.0
         var systemPeak: Float = 0
@@ -746,7 +761,9 @@ class SessionRecorder: NSObject, ObservableObject {
             }
         }
 
-        // Measure only — the mic track is written at its true level. All gain
+        micGain.apply(to: pcmBuffer)
+
+        // Measured after the fader, so the meter is what lands on disk. All gain
         // is set by the user on the mixer while recording, and the buffers
         // analysed, so a hot mic can no longer be clipped into the temp file
         // (and can no longer poison the mix by pinning its measured peak).

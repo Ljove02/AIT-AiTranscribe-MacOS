@@ -332,6 +332,10 @@ struct MenuBarView: View {
                     .strokeBorder(.orange.opacity(0.15), lineWidth: 0.5)
             )
 
+            // Levels live here rather than in Settings: this is the only
+            // surface reachable without leaving the call.
+            SessionMixerView(recorder: sessionManager.recorder)
+
             MenuBarButton(
                 label: "Stop Session",
                 icon: "stop.circle.fill",
