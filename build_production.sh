@@ -214,7 +214,9 @@ print_header "Step 2: Building Xcode Project (Release)"
 cd AiTranscribe
 
 # Use a local build directory to avoid DerivedData cross-contamination
-BUILD_DIR="$PROJECT_ROOT/build/xcode"
+# Xcode's build database fails with disk I/O errors on the external volume
+# (APFS mounted noowners). Allow relocating derived data to local disk.
+BUILD_DIR="${AIT_BUILD_DIR:-$PROJECT_ROOT/build/xcode}"
 
 # Clean and build
 echo "Cleaning previous build..."

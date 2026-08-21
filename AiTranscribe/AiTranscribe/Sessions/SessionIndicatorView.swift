@@ -39,6 +39,18 @@ class SessionIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
     private var dotLayer: CALayer?
     private var timerLayer: CATextLayer?
 
+    /// Meter arcs. Mic runs along the top of the capsule, desktop along the
+    /// bottom. Each is drawn as an unlit track plus three lit segments, one
+    /// per zone, so the bar changes colour along its length the way OBS does
+    /// rather than recolouring all at once.
+    private var micMeterLayers: MeterArcLayers?
+    private var systemMeterLayers: MeterArcLayers?
+    private var meterTimer: Timer?
+
+    /// Pulled from, not pushed to: the meter applies its ballistics from the
+    /// time since the last read, so the indicator can redraw at its own rate.
+    weak var levelSource: SessionRecorder?
+
     /// Snap placeholder controller for drag-and-snap (reuses existing snap system)
     private let snapPlaceholders = SessionSnapPlaceholderController()
 
@@ -112,12 +124,14 @@ class SessionIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
             RunLoop.main.add(timer, forMode: .common)
         }
 
+        startMeterUpdates()
         window?.delegate = self
     }
 
     func showProcessing() {
         durationTimer?.invalidate()
         durationTimer = nil
+        stopMeterUpdates()
         isProcessing = true
 
         CATransaction.begin()
@@ -133,6 +147,7 @@ class SessionIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
     func hide() {
         durationTimer?.invalidate()
         durationTimer = nil
+        stopMeterUpdates()
         snapPlaceholders.hide()
 
         isProcessing = false
@@ -153,6 +168,8 @@ class SessionIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             self?.dotLayer = nil
             self?.timerLayer = nil
+            self?.micMeterLayers = nil
+            self?.systemMeterLayers = nil
             self?.containerLayer = nil
             self?.window?.orderOut(nil)
             self?.window = nil
@@ -165,6 +182,42 @@ class SessionIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
     /// Sync duration from SessionManager (call from outside when duration updates)
     func updateDuration(_ newDuration: TimeInterval) {
         duration = newDuration
+    }
+
+    // MARK: - Meters
+
+    private func startMeterUpdates() {
+        meterTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            self?.updateMeters()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        meterTimer = timer
+    }
+
+    private func stopMeterUpdates() {
+        meterTimer?.invalidate()
+        meterTimer = nil
+        guard let mic = micMeterLayers, let system = systemMeterLayers else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        MeterArcStyle.apply(.silent, to: mic)
+        MeterArcStyle.apply(.silent, to: system)
+        CATransaction.commit()
+    }
+
+    private func updateMeters() {
+        guard let source = levelSource,
+              let mic = micMeterLayers,
+              let system = systemMeterLayers else { return }
+
+        // Core Animation would otherwise animate every strokeEnd change over
+        // its default quarter second, which lags the audio badly at 30 fps.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        MeterArcStyle.apply(source.micMeter.reading(), to: mic)
+        MeterArcStyle.apply(source.systemMeter.reading(), to: system)
+        CATransaction.commit()
     }
 
     // MARK: - Timer Text
@@ -273,6 +326,12 @@ class SessionIndicatorController: NSObject, ObservableObject, NSWindowDelegate {
         borderLayer.fillColor = nil
         borderLayer.lineWidth = 0.5
         container.layer?.addSublayer(borderLayer)
+
+        // --- Meter arcs (behind the dot and timer) ---
+        micMeterLayers = MeterArcStyle.makeLayers(in: container.bounds, top: true,
+                                                  parent: container.layer!)
+        systemMeterLayers = MeterArcStyle.makeLayers(in: container.bounds, top: false,
+                                                     parent: container.layer!)
 
         // --- Red dot (pulsing) ---
         let dot = CALayer()
@@ -484,5 +543,132 @@ class SessionSnapPlaceholderController {
         view.layer?.addSublayer(bg)
 
         return view
+    }
+}
+
+// =============================================================================
+// METER ARCS
+// =============================================================================
+
+/// The layers making up one meter arc.
+///
+/// A lit segment per zone rather than one recoloured bar: the green part stays
+/// green when the tip goes yellow, which is what tells you at a glance how much
+/// of the signal is hot rather than just that some of it is.
+struct MeterArcLayers {
+    let track: CAShapeLayer
+    let nominal: CAShapeLayer
+    let warning: CAShapeLayer
+    let error: CAShapeLayer
+    let peakHold: CAShapeLayer
+}
+
+enum MeterArcStyle {
+    /// OBS's Yami theme colours, lit and unlit.
+    static let litNominal = NSColor(srgbRed: 0.216, green: 0.824, blue: 0.278, alpha: 1)   // #37D247
+    static let litWarning = NSColor(srgbRed: 0.898, green: 0.686, blue: 0.141, alpha: 1)   // #E5AF24
+    static let litError   = NSColor(srgbRed: 0.890, green: 0.231, blue: 0.341, alpha: 1)   // #E33B57
+    static let dimNominal = NSColor(srgbRed: 0.090, green: 0.392, blue: 0.118, alpha: 1)   // #17641E
+    static let dimWarning = NSColor(srgbRed: 0.431, green: 0.322, blue: 0.051, alpha: 1)   // #6E520D
+    static let dimError   = NSColor(srgbRed: 0.490, green: 0.071, blue: 0.141, alpha: 1)   // #7D1224
+
+    static let lineWidth: CGFloat = 2.5
+
+    /// Where each zone boundary falls along the bar, on the same -60..0 dB
+    /// scale the meter reports.
+    static var warningStart: CGFloat {
+        CGFloat(1 - (AudioLevelMeter.warningDB / AudioLevelMeter.minimumDB))
+    }
+    static var errorStart: CGFloat {
+        CGFloat(1 - (AudioLevelMeter.errorDB / AudioLevelMeter.minimumDB))
+    }
+
+    /// The arc a meter is drawn along. Both start near the left, close to the
+    /// centre, and sweep out to the capsule edge so they frame the timer.
+    static func path(in bounds: CGRect, top: Bool) -> CGPath {
+        let inset: CGFloat = 5
+        let startX = bounds.minX + 12
+        let endX = bounds.maxX - 9
+        let edgeY = top ? bounds.maxY - inset : bounds.minY + inset
+        let startY = bounds.midY + (top ? 6 : -6)
+
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: startX, y: startY))
+        path.addCurve(
+            to: CGPoint(x: endX, y: edgeY),
+            control1: CGPoint(x: startX + 15, y: edgeY),
+            control2: CGPoint(x: endX - 38, y: edgeY)
+        )
+        return path
+    }
+
+    static func makeLayers(in bounds: CGRect, top: Bool, parent: CALayer) -> MeterArcLayers {
+        let arc = path(in: bounds, top: top)
+
+        func stroke(_ color: NSColor, width: CGFloat = lineWidth) -> CAShapeLayer {
+            let layer = CAShapeLayer()
+            layer.path = arc
+            layer.strokeColor = color.cgColor
+            layer.fillColor = nil
+            layer.lineWidth = width
+            layer.lineCap = .round
+            layer.strokeStart = 0
+            layer.strokeEnd = 0
+            parent.addSublayer(layer)
+            return layer
+        }
+
+        // Unlit track, drawn once in three pieces so the zones are visible
+        // before any sound arrives.
+        let track = CAShapeLayer()
+        track.path = arc
+        track.strokeColor = dimNominal.withAlphaComponent(0.55).cgColor
+        track.fillColor = nil
+        track.lineWidth = lineWidth
+        track.lineCap = .round
+        track.strokeStart = 0
+        track.strokeEnd = 1
+        parent.addSublayer(track)
+
+        let dimWarn = stroke(dimWarning.withAlphaComponent(0.55))
+        dimWarn.strokeStart = warningStart
+        dimWarn.strokeEnd = errorStart
+        let dimErr = stroke(dimError.withAlphaComponent(0.55))
+        dimErr.strokeStart = errorStart
+        dimErr.strokeEnd = 1
+
+        let nominal = stroke(litNominal)
+        let warning = stroke(litWarning)
+        let error = stroke(litError)
+        let peakHold = stroke(.white, width: lineWidth)
+        peakHold.opacity = 0.9
+
+        return MeterArcLayers(track: track, nominal: nominal, warning: warning,
+                              error: error, peakHold: peakHold)
+    }
+
+    /// Maps a reading onto the arc. Each zone layer is clipped to its own slice
+    /// of the bar, so they light up in sequence instead of overlapping.
+    static func apply(_ reading: AudioLevelReading, to layers: MeterArcLayers) {
+        let level = CGFloat(reading.fraction)
+
+        layers.nominal.strokeStart = 0
+        layers.nominal.strokeEnd = min(level, warningStart)
+
+        layers.warning.strokeStart = warningStart
+        layers.warning.strokeEnd = max(warningStart, min(level, errorStart))
+
+        layers.error.strokeStart = errorStart
+        layers.error.strokeEnd = max(errorStart, min(level, 1))
+
+        // A short tick sitting at the highest recent peak.
+        let hold = CGFloat(reading.peakHoldFraction)
+        if hold > 0.02 {
+            layers.peakHold.strokeStart = max(0, hold - 0.015)
+            layers.peakHold.strokeEnd = min(1, hold)
+            layers.peakHold.isHidden = false
+        } else {
+            layers.peakHold.isHidden = true
+        }
     }
 }

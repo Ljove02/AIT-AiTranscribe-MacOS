@@ -26,6 +26,7 @@ struct SessionsSettingsView: View {
     @State private var showImportPage = false
     @State private var selectedDate: Date? = nil
     @State private var showDatePicker = false
+    @State private var visibleSessionCount = SessionsSettingsView.initialVisibleSessions
     @State private var apiTranscriptionModels: [APITranscriptionModel] = APITranscriptionModelStore.load()
     @State private var apiLanguageModels: [APILanguageModel] = APILanguageModelStore.load()
     @State private var automationSelectedPresetIds: Set<String> = Set(
@@ -65,14 +66,30 @@ struct SessionsSettingsView: View {
 
     // MARK: - Computed
 
+    /// How many session cards render before the user asks for more. Each card carries a
+    /// material background and a hover/appear animation, so drawing every session at once
+    /// is what makes a large library crawl.
+    private static let initialVisibleSessions = 8
+    private static let visibleSessionsIncrement = 10
+
     private var filteredSessions: [Session] {
         guard let date = selectedDate else { return sessionManager.sessions }
         return sessionManager.sessions.filter { Calendar.current.isDate($0.createdAt, inSameDayAs: date) }
     }
 
-    /// Group sessions by date (newest first)
+    /// The slice actually rendered. `sessionManager.sessions` is already newest-first,
+    /// so the prefix is the most recent ones.
+    private var visibleSessions: [Session] {
+        Array(filteredSessions.prefix(visibleSessionCount))
+    }
+
+    private var hiddenSessionCount: Int {
+        max(0, filteredSessions.count - visibleSessionCount)
+    }
+
+    /// Group the visible slice by date (newest first)
     private var groupedSessions: [(date: Date, sessions: [Session])] {
-        let grouped = Dictionary(grouping: filteredSessions) { session in
+        let grouped = Dictionary(grouping: visibleSessions) { session in
             Calendar.current.startOfDay(for: session.createdAt)
         }
         return grouped
@@ -82,11 +99,6 @@ struct SessionsSettingsView: View {
 
     private var totalStorageSize: Int64 {
         sessionManager.getTotalStorageSize()
-    }
-
-    private var uniqueDates: [Date] {
-        let dates = Set(sessionManager.sessions.map { Calendar.current.startOfDay(for: $0.createdAt) })
-        return dates.sorted(by: >)
     }
 
     private var localSessionModels: [ModelInfoResponse] {
@@ -165,7 +177,7 @@ struct SessionsSettingsView: View {
             }
         }
         .task {
-            sessionManager.loadSessions()
+            sessionManager.loadSessionsIfNeeded()
             screenRecordingPermission = await SystemAudioCapture.checkPermission()
         }
         .task(id: "stagger") {
@@ -174,10 +186,14 @@ struct SessionsSettingsView: View {
             appeared = true
             onAnimated()
         }
-        .onChange(of: sessionManager.sessions) { _, sessions in
-            let validIds = Set(sessions.map(\.id))
-            selectedSessionIds = selectedSessionIds.intersection(validIds)
-            if sessions.isEmpty { isSelectingSessions = false }
+        // Compare identities, not whole sessions — `Session` is Equatable over its full
+        // transcription and summary text, so diffing the array itself is expensive.
+        .onChange(of: sessionManager.sessions.map(\.id)) { _, ids in
+            selectedSessionIds = selectedSessionIds.intersection(Set(ids))
+            if ids.isEmpty { isSelectingSessions = false }
+        }
+        .onChange(of: selectedDate) { _, _ in
+            visibleSessionCount = Self.initialVisibleSessions
         }
     }
 
@@ -207,7 +223,7 @@ struct SessionsSettingsView: View {
                 }
 
                 // Date filter chips
-                if !uniqueDates.isEmpty {
+                if !sessionManager.sessions.isEmpty {
                     dateFilterRow
                         .padding(.top, 12)
                         .staggerIn(index: 4, appeared: appeared)
@@ -423,12 +439,12 @@ struct SessionsSettingsView: View {
                 .disabled(selectedSessionIds.isEmpty)
                 .alert("Delete Selected Sessions?", isPresented: $showDeleteSelectedSessionsAlert) {
                     Button("Cancel", role: .cancel) {}
-                    Button("Delete", role: .destructive) {
+                    Button("Delete \(selectedSessionIds.count)", role: .destructive) {
                         sessionManager.bulkDeleteSessions(ids: selectedSessionIds)
                         exitSelectionMode()
                     }
                 } message: {
-                    Text("Selected sessions and their data will be permanently deleted.")
+                    Text("\(selectedSessionIds.count) \(selectedSessionIds.count == 1 ? "session" : "sessions") — audio, transcriptions and summaries — will be permanently deleted. This cannot be undone.")
                 }
 
                 footerPill(label: "Clear Transcription", tint: .orange) {
@@ -437,12 +453,12 @@ struct SessionsSettingsView: View {
                 .disabled(selectedSessionIds.isEmpty)
                 .alert("Clear Transcription?", isPresented: $showClearTranscriptionAlert) {
                     Button("Cancel", role: .cancel) {}
-                    Button("Clear", role: .destructive) {
+                    Button("Clear \(selectedSessionIds.count)", role: .destructive) {
                         sessionManager.bulkResetTranscription(ids: selectedSessionIds)
                         exitSelectionMode()
                     }
                 } message: {
-                    Text("Transcriptions for selected sessions will be deleted. Audio files are kept.")
+                    Text("Transcriptions for \(selectedSessionIds.count) \(selectedSessionIds.count == 1 ? "session" : "sessions") will be deleted. Audio files are kept.")
                 }
             }
 
@@ -1071,21 +1087,23 @@ struct SessionsSettingsView: View {
     }()
 
     private var dateFilterRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        // Counted once per render instead of re-filtering every session for every chip.
+        let dayCounts = sessionDateCounts
+        let dates = dayCounts.keys.sorted(by: >)
+
+        return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
                 // "All" chip
                 dateChip(label: "All", isSelected: selectedDate == nil) {
                     selectedDate = nil
                 }
 
-                ForEach(Array(uniqueDates.prefix(10)), id: \.self) { date in
+                ForEach(Array(dates.prefix(10)), id: \.self) { date in
                     let label = Calendar.current.isDateInToday(date) ? "Today"
                         : Calendar.current.isDateInYesterday(date) ? "Yesterday"
                         : Self.dateChipFormatter.string(from: date)
 
-                    let count = sessionManager.sessions.filter {
-                        Calendar.current.isDate($0.createdAt, inSameDayAs: date)
-                    }.count
+                    let count = dayCounts[date] ?? 0
 
                     dateChip(
                         label: "\(label) (\(count))",
@@ -1159,7 +1177,7 @@ struct SessionsSettingsView: View {
     }()
 
     private var sessionGroups: some View {
-        VStack(spacing: 16) {
+        LazyVStack(spacing: 16) {
             ForEach(groupedSessions, id: \.date) { group in
                 VStack(alignment: .leading, spacing: 8) {
                     // Date group header
@@ -1224,8 +1242,43 @@ struct SessionsSettingsView: View {
                     }
                 }
             }
+
+            if hiddenSessionCount > 0 {
+                showMoreButton
+                    .padding(.top, 4)
+            }
         }
         .padding(.top, 12)
+    }
+
+    // MARK: - Show More
+
+    private var showMoreButton: some View {
+        VStack(spacing: 6) {
+            Button {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    visibleSessionCount += Self.visibleSessionsIncrement
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                    Text("Show More")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(.thinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+            }
+            .buttonStyle(.plain)
+
+            Text("\(visibleSessions.count) of \(filteredSessions.count) shown · \(hiddenSessionCount) more")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Empty / No Match
@@ -1284,7 +1337,9 @@ struct SessionsSettingsView: View {
 
     private var footerActions: some View {
         HStack(spacing: 8) {
-            Text(isSelectingSessions ? "\(selectedSessionIds.count) of \(sessionManager.sessions.count) selected" : "")
+            Text(isSelectingSessions
+                 ? "\(selectedSessionIds.count) of \(filteredSessions.count) selected"
+                 : "\(visibleSessions.count) of \(filteredSessions.count) shown")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
 
@@ -1324,8 +1379,11 @@ struct SessionsSettingsView: View {
 
     // MARK: - Selection Helpers
 
+    /// Selection follows the date filter, not the whole library — otherwise "Select All"
+    /// while filtered to one day would quietly arm a delete for every session.
     private var allSessionsSelected: Bool {
-        !sessionManager.sessions.isEmpty && selectedSessionIds.count == sessionManager.sessions.count
+        let filteredIds = Set(filteredSessions.map(\.id))
+        return !filteredIds.isEmpty && filteredIds.isSubset(of: selectedSessionIds)
     }
 
     private func toggleSessionSelection(_ sessionId: UUID) {
@@ -1340,7 +1398,7 @@ struct SessionsSettingsView: View {
         if allSessionsSelected {
             selectedSessionIds.removeAll()
         } else {
-            selectedSessionIds = Set(sessionManager.sessions.map(\.id))
+            selectedSessionIds = Set(filteredSessions.map(\.id))
         }
     }
 

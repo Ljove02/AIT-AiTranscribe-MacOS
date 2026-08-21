@@ -797,6 +797,10 @@ class SessionManager: ObservableObject {
     private var durationObserver: AnyCancellable?
     private var isAutomationPumpScheduled = false
 
+    /// Signature of the sessions directory as of the last full load — lets us skip
+    /// re-reading every session when nothing changed on disk.
+    private var lastLoadSignature: String?
+
     /// Base directory for all sessions
     var sessionsDirectory: URL {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -817,9 +821,44 @@ class SessionManager: ObservableObject {
 
     // MARK: - Session CRUD
 
+    /// Reload from disk only if the sessions directory changed since the last load.
+    /// The Sessions tab calls this on every appearance; a full load re-reads every
+    /// metadata/transcription/summary file and republishes the whole array, which
+    /// rebuilds the entire list for nothing when the user is just switching tabs.
+    func loadSessionsIfNeeded() {
+        let signature = sessionsDirectorySignature()
+        if !sessions.isEmpty, let lastLoadSignature, lastLoadSignature == signature {
+            return
+        }
+        loadSessions()
+    }
+
+    /// Cheap fingerprint of the sessions directory: one stat per session folder.
+    /// Metadata, transcriptions and summaries are all written atomically, so any
+    /// in-place edit replaces a directory entry and bumps its modification date.
+    private func sessionsDirectorySignature() -> String {
+        guard let contents = try? fileManager.contentsOfDirectory(
+            at: sessionsDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return ""
+        }
+
+        return contents
+            .map { url in
+                let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate?.timeIntervalSince1970 ?? 0
+                return "\(url.lastPathComponent)@\(modified)"
+            }
+            .sorted()
+            .joined(separator: "|")
+    }
+
     /// Load all sessions from disk
     func loadSessions() {
         var loaded: [Session] = []
+        let signature = sessionsDirectorySignature()
 
         guard let contents = try? fileManager.contentsOfDirectory(
             at: sessionsDirectory,
@@ -827,6 +866,7 @@ class SessionManager: ObservableObject {
             options: [.skipsHiddenFiles]
         ) else {
             sessions = []
+            lastLoadSignature = signature
             return
         }
 
@@ -888,6 +928,7 @@ class SessionManager: ObservableObject {
 
         // Sort newest first
         sessions = loaded.sorted { $0.createdAt > $1.createdAt }
+        lastLoadSignature = signature
         print("SessionManager: Loaded \(sessions.count) sessions")
     }
 
@@ -1096,6 +1137,7 @@ class SessionManager: ObservableObject {
                 }
 
             // Show floating indicator
+            indicatorController.levelSource = recorder
             indicatorController.show()
 
             print("SessionManager: Session recording started — '\(session.name)'")

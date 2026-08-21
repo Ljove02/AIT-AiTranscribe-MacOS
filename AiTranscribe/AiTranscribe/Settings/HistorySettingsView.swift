@@ -338,13 +338,13 @@ struct HistorySettingsView: View {
                 showClearAllAlert = true
             }
             .disabled(appState.transcriptionHistory.isEmpty)
-            .alert("Clear All History?", isPresented: $showClearAllAlert) {
+            .alert("Delete all \(appState.totalHistoryCount.formatted()) transcriptions?", isPresented: $showClearAllAlert) {
                 Button("Cancel", role: .cancel) {}
-                Button("Clear All", role: .destructive) {
+                Button("Delete \(appState.totalHistoryCount.formatted())", role: .destructive) {
                     appState.clearHistory()
                 }
             } message: {
-                Text("All transcription history will be permanently deleted.")
+                Text("Your entire transcription history — all \(appState.totalHistoryCount.formatted()) entries, not just the \(displayedHistory.count) loaded here — will be permanently deleted. This cannot be undone.")
             }
         }
     }
