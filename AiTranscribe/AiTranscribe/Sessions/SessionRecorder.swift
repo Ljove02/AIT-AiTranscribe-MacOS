@@ -61,15 +61,6 @@ class SessionRecorder: NSObject, ObservableObject {
         let totalSamples: Int64
     }
 
-    private struct MixVolumePlan {
-        let micGain: Float
-        let systemGain: Float
-        var micEnvelope: GainEnvelope?
-        var systemEnvelope: GainEnvelope?
-        let micAnalysis: AudioLevelAnalysis?
-        let systemAnalysis: AudioLevelAnalysis?
-    }
-
     private static func fourCCString(_ value: OSType) -> String {
         let bytes: [CChar] = [
             CChar((value >> 24) & 0xFF),
@@ -357,23 +348,6 @@ class SessionRecorder: NSObject, ObservableObject {
     private var sessionMicTrimDB: Double = SessionAudioMixPreferences.defaultMicTrimDB
     private var sessionSystemTrimDB: Double = SessionAudioMixPreferences.defaultSystemTrimDB
 
-    /// Auto make-up target for each track, as gated RMS (see
-    /// `analyzeAudioLevels`). Measured from sessions that recorded cleanly at
-    /// a level that sounded right; on this metric they cluster at 0.129–0.137.
-    private let sessionMixTargetRMS: Float = 0.13
-    /// Wide enough to rescue a mic the system has turned right down — a device
-    /// at 5-10% input needs 25-30x, and capping below that is what left
-    /// quiet sessions quiet.
-    private let sessionMixMakeupRange: ClosedRange<Float> = 0.25...32.0
-    /// Loud passages (99.9th percentile) are planned to land here. Full scale
-    /// is safe as a planning target because the soft limiter, not this number,
-    /// is what guarantees the output cannot clip.
-    private let sessionMixPeakCeiling: Float = 1.0
-    /// Absolute peaks may overshoot into the soft limiter, but not without
-    /// bound. Constraining true peaks to the ceiling instead would let one
-    /// transient dictate the level for a whole session — the exact problem
-    /// the percentile measurement exists to avoid.
-    private let sessionMixTransientCeiling: Float = 2.0
 
     /// Output soft limiter. Samples below the threshold pass through
     /// untouched; above it they are smoothly compressed and approach the
@@ -728,7 +702,7 @@ class SessionRecorder: NSObject, ObservableObject {
         }
 
         // Measure only — the mic track is written at its true level. All gain
-        // is decided in `determineMixVolumePlan` once both tracks have been
+        // is set by the user on the mixer while recording, and the buffers
         // analysed, so a hot mic can no longer be clipped into the temp file
         // (and can no longer poison the mix by pinning its measured peak).
         if let channelData = pcmBuffer.floatChannelData {
@@ -813,11 +787,7 @@ class SessionRecorder: NSObject, ObservableObject {
 
         if hasMicAudio {
             removeExistingFile(at: outputURL)
-            if await convertSingleTrackToM4A(
-                inputURL: micURL,
-                outputURL: outputURL,
-                trimMultiplier: sessionMicTrimMultiplier
-            ) {
+            if await convertSingleTrackToM4A(inputURL: micURL, outputURL: outputURL) {
                 return true
             }
             print("SessionRecorder: Mic-only export failed")
@@ -825,11 +795,7 @@ class SessionRecorder: NSObject, ObservableObject {
 
         if hasSystemAudio, let sysURL {
             removeExistingFile(at: outputURL)
-            if await convertSingleTrackToM4A(
-                inputURL: sysURL,
-                outputURL: outputURL,
-                trimMultiplier: sessionSystemTrimMultiplier
-            ) {
+            if await convertSingleTrackToM4A(inputURL: sysURL, outputURL: outputURL) {
                 return true
             }
             print("SessionRecorder: System-only export failed")
@@ -1196,19 +1162,21 @@ class SessionRecorder: NSObject, ObservableObject {
         }
     }
 
-    /// Gain needed to bring a track to `sessionMixTargetRMS`, bounded so a
-    /// near-silent or absent track cannot produce an absurd multiplier.
-    private func makeupGain(for analysis: AudioLevelAnalysis?) -> Float {
-        guard let analysis, analysis.activeSamples > 0, analysis.activeRMS > 0.0002 else {
-            return 1.0
-        }
-        let desired = sessionMixTargetRMS / analysis.activeRMS
-        return min(max(desired, sessionMixMakeupRange.lowerBound), sessionMixMakeupRange.upperBound)
-    }
-
     /// Writes the level analysis next to the recording. `print` output is lost
     /// for a normally launched app, and these numbers are the only way to tell
     /// a mis-measured level from a mis-applied gain after the fact.
+    /// Records what each track actually captured, next to the recording.
+    /// Nothing acts on these numbers any more; they exist so a session that
+    /// came out wrong can be diagnosed after the fact instead of guessed at.
+    private func logCapturedLevels(micURL: URL, sysURL: URL) {
+        let mic = analyzeAudioLevels(at: micURL)
+        let sys = analyzeAudioLevels(at: sysURL)
+        var lines = ["path=mix"]
+        lines.append(contentsOf: describe("mic", mic))
+        lines.append(contentsOf: describe("sys", sys))
+        writeLevelDiagnostics(lines, nextTo: micURL)
+    }
+
     private func writeLevelDiagnostics(_ lines: [String], nextTo url: URL) {
         let destination = url
             .deletingLastPathComponent()
@@ -1239,308 +1207,6 @@ class SessionRecorder: NSObject, ObservableObject {
 
     // MARK: - Gain Envelope
 
-    /// A time-varying gain curve for one track.
-    ///
-    /// A single gain per session cannot correct a level that changes partway
-    /// through, and it does change: joining a video call drops the microphone
-    /// by 25-30 dB mid-recording. A session-wide average is dominated by
-    /// whichever side of that change was longer, so one part ends up correct
-    /// and the other unusable.
-    private struct GainEnvelope {
-        let blockSeconds: Double
-        let gains: [Float]
-
-        func gain(atSeconds time: Double) -> Float {
-            guard !gains.isEmpty else { return 1.0 }
-            let position = time / blockSeconds
-            let index = Int(position)
-            if index < 0 { return gains[0] }
-            if index >= gains.count - 1 { return gains[gains.count - 1] }
-            // Interpolate so the gain slides rather than steps.
-            let fraction = Float(position - Double(index))
-            return gains[index] + (gains[index + 1] - gains[index]) * fraction
-        }
-
-        var summary: String {
-            guard let low = gains.min(), let high = gains.max() else { return "empty" }
-            return String(format: "%d blocks, %.2fx..%.2fx", gains.count, low, high)
-        }
-    }
-
-    /// Measures the track in blocks and builds a smoothed gain curve that
-    /// brings each part of it toward the target level.
-    private func computeGainEnvelope(
-        at url: URL,
-        analysis: AudioLevelAnalysis,
-        trimMultiplier: Float
-    ) -> GainEnvelope? {
-        let blockSeconds = 0.5
-        guard let blockLevels = measureBlockLevels(at: url, blockSeconds: blockSeconds),
-              !blockLevels.isEmpty else { return nil }
-
-        // Separate speech from silence using the track's own noise floor —
-        // estimated from its quietest blocks — rather than a fraction of its
-        // average speech level. A threshold derived from the average breaks
-        // exactly when the level shifts mid-recording: speech after a 25 dB
-        // drop falls below it, gets misread as silence, and is never brought
-        // back up. That is the case this whole envelope exists to fix.
-        // No silence/speech classification. Deciding which blocks "contain
-        // speech" needs a threshold, and every way of deriving one failed the
-        // same way: when a large part of a recording is quiet — the case this
-        // exists to fix — the quiet speech falls under the threshold, is read
-        // as silence, and is never brought back up.
-        //
-        // Instead the level follows speech upward instantly and decays away
-        // only gradually. A pause holds the gain steady because the held level
-        // has not decayed far, while a sustained drop is tracked within a
-        // couple of seconds. It is causal, so unlike look-ahead it cannot
-        // raise the gain ahead of a quiet section.
-        let decay: Float = 0.6
-        var held: Float = 0
-        var desired = [Float](repeating: 0, count: blockLevels.count)
-        for index in 0..<blockLevels.count {
-            held = max(blockLevels[index], held * decay)
-            desired[index] = sessionMixTargetRMS / max(held, 0.0005)
-        }
-
-        let lower = sessionMixMakeupRange.lowerBound
-        let upper = sessionMixMakeupRange.upperBound
-        for index in 0..<desired.count {
-            desired[index] = min(max(desired[index] * trimMultiplier, lower), upper)
-        }
-
-        return GainEnvelope(blockSeconds: blockSeconds, gains: smooth(desired))
-    }
-
-    /// Smooths the gain curve asymmetrically: it rises slowly and falls
-    /// quickly.
-    ///
-    /// The asymmetry is the point. Smoothing symmetrically lets the curve
-    /// climb *ahead* of a quiet section, so the loud audio just before a
-    /// mid-session drop gets the gain intended for the audio after it — the
-    /// part before a call is joined comes out overboosted by several dB.
-    /// The backward pass is therefore allowed only to lower the curve, which
-    /// ducks ahead of loud content without ever boosting early.
-    private func smooth(_ values: [Float]) -> [Float] {
-        guard values.count > 2 else { return values }
-        let rise: Float = 0.30
-        let fall: Float = 0.40
-
-        var forward = values
-        for index in 1..<forward.count {
-            let previous = forward[index - 1]
-            let coefficient = forward[index] > previous ? rise : fall
-            forward[index] = previous + coefficient * (forward[index] - previous)
-        }
-
-        var backward = forward
-        for index in stride(from: backward.count - 2, through: 0, by: -1) {
-            let next = backward[index + 1]
-            let candidate = next + fall * (backward[index] - next)
-            backward[index] = min(backward[index], candidate)
-        }
-        return backward
-    }
-
-    /// Gated RMS per block, using the same relative gate as the whole-file
-    /// analysis so the two measurements are comparable.
-    private func measureBlockLevels(at url: URL, blockSeconds: Double) -> [Float]? {
-        guard let file = try? AVAudioFile(forReading: url) else { return nil }
-        let format = file.processingFormat
-        let framesPerBlock = AVAudioFrameCount(max(format.sampleRate * blockSeconds, 1))
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: framesPerBlock) else {
-            return nil
-        }
-
-        var levels: [Float] = []
-        while true {
-            do {
-                try file.read(into: buffer, frameCount: framesPerBlock)
-            } catch {
-                break
-            }
-            let frames = Int(buffer.frameLength)
-            if frames == 0 { break }
-
-            var sumSquares = 0.0
-            var count = 0
-            enumerateMonoSamples(in: buffer) { sample in
-                sumSquares += Double(sample) * Double(sample)
-                count += 1
-            }
-            let rms = count > 0 ? (sumSquares / Double(count)).squareRoot() : 0
-            levels.append(Float(rms))
-        }
-        return levels
-    }
-
-    /// Applies a gain curve to a track as a series of volume ramps. Adjacent
-    /// blocks whose gain barely differs are merged, so a long recording does
-    /// not produce thousands of near-identical ramps.
-    private func applyEnvelope(
-        _ envelope: GainEnvelope?,
-        fallback: Float,
-        to parameters: AVMutableAudioMixInputParameters,
-        duration: CMTime
-    ) {
-        guard let envelope, envelope.gains.count > 1 else {
-            parameters.setVolume(fallback, at: .zero)
-            return
-        }
-
-        let totalSeconds = CMTimeGetSeconds(duration)
-        var segmentStart = 0.0
-        var segmentStartGain = envelope.gains[0]
-        var index = 1
-
-        while index < envelope.gains.count {
-            let time = Double(index) * envelope.blockSeconds
-            let gain = envelope.gains[index]
-            let changed = abs(gain - segmentStartGain) > 0.02
-            let isLast = index == envelope.gains.count - 1
-            if changed || isLast {
-                let end = min(time, totalSeconds)
-                if end > segmentStart {
-                    parameters.setVolumeRamp(
-                        fromStartVolume: segmentStartGain,
-                        toEndVolume: gain,
-                        timeRange: CMTimeRange(
-                            start: CMTime(seconds: segmentStart, preferredTimescale: 600),
-                            duration: CMTime(seconds: end - segmentStart, preferredTimescale: 600)
-                        )
-                    )
-                }
-                segmentStart = end
-                segmentStartGain = gain
-            }
-            index += 1
-        }
-
-        if segmentStart < totalSeconds {
-            parameters.setVolumeRamp(
-                fromStartVolume: segmentStartGain,
-                toEndVolume: segmentStartGain,
-                timeRange: CMTimeRange(
-                    start: CMTime(seconds: segmentStart, preferredTimescale: 600),
-                    duration: CMTime(seconds: totalSeconds - segmentStart, preferredTimescale: 600)
-                )
-            )
-        }
-    }
-
-    private func determineMixVolumePlan(micURL: URL, sysURL: URL) -> MixVolumePlan {
-        let micAnalysis = analyzeAudioLevels(at: micURL)
-        let systemAnalysis = analyzeAudioLevels(at: sysURL)
-
-        analyzedMixMicRMS = micAnalysis?.activeRMS ?? 0
-        analyzedMixMicPeak = micAnalysis?.peak ?? 0
-        analyzedMixSystemRMS = systemAnalysis?.activeRMS ?? 0
-        analyzedMixSystemPeak = systemAnalysis?.peak ?? 0
-
-        // Auto make-up: bring each track to a target speech level on its own
-        // merits, then apply the user's trim. Neither track's gain is derived
-        // from the other, so a loud mic can no longer bury desktop audio.
-        var micGain = makeupGain(for: micAnalysis) * sessionMicTrimMultiplier
-        var systemGain = makeupGain(for: systemAnalysis) * sessionSystemTrimMultiplier
-
-        // Limiter: scale both tracks by the same factor so the summed mix stays
-        // under the ceiling. Scaling together preserves the mic/desktop balance
-        // instead of taking all the reduction out of one track.
-        let micLoud = (micAnalysis?.loudPeak ?? 0) * micGain
-        let sysLoud = (systemAnalysis?.loudPeak ?? 0) * systemGain
-        let micPeak = (micAnalysis?.peak ?? 0) * micGain
-        let sysPeak = (systemAnalysis?.peak ?? 0) * systemGain
-
-        // Combine the two tracks in power, not linearly. Adding magnitudes
-        // assumes mic and desktop reach their loudest in the same instant, on
-        // every sample. They are uncorrelated and mostly alternate — people
-        // take turns talking — so linear summing charges for a collision that
-        // rarely happens and costs real loudness on every session. The soft
-        // limiter is what covers the occasional genuine collision.
-        var scale: Float = 1.0
-        let loudCombined = (micLoud * micLoud + sysLoud * sysLoud).squareRoot()
-        if loudCombined > sessionMixPeakCeiling {
-            scale = min(scale, sessionMixPeakCeiling / loudCombined)
-        }
-        let peakCombined = (micPeak * micPeak + sysPeak * sysPeak).squareRoot()
-        if peakCombined > sessionMixTransientCeiling {
-            scale = min(scale, sessionMixTransientCeiling / peakCombined)
-        }
-        if scale < 1.0 {
-            micGain *= scale
-            systemGain *= scale
-        }
-
-        appliedMixMicGain = micGain
-        appliedMixSystemGain = systemGain
-
-        let micRMSDescription = String(format: "%.4f", analyzedMixMicRMS)
-        let micPeakDescription = String(format: "%.4f", analyzedMixMicPeak)
-        let systemRMSDescription = String(format: "%.4f", analyzedMixSystemRMS)
-        let systemPeakDescription = String(format: "%.4f", analyzedMixSystemPeak)
-        let micGainDescription = String(format: "%.2f", micGain)
-        let systemGainDescription = String(format: "%.2f", systemGain)
-        print(
-            "SessionRecorder: Mix loudness analysis micRMS=\(micRMSDescription) " +
-            "micPeak=\(micPeakDescription) sysRMS=\(systemRMSDescription) " +
-            "sysPeak=\(systemPeakDescription) -> micGain=\(micGainDescription) " +
-            "sysGain=\(systemGainDescription)"
-        )
-
-        // Built in steps: a single large array concatenation here exceeds the
-        // Swift type checker's budget.
-        let inputGainDescription: String
-        if let originalVolume = inputGainGuard.originalVolume {
-            inputGainDescription = String(originalVolume)
-        } else {
-            inputGainDescription = "unavailable"
-        }
-
-        var diagnostics: [String] = ["path=mix"]
-        diagnostics.append("targetRMS=\(sessionMixTargetRMS)")
-        diagnostics.append("inputGainAtStart=\(inputGainDescription)")
-        diagnostics.append("inputGainCorrections=\(inputGainGuard.corrections)")
-        let currentDevice = AudioRecorder.getDefaultInputDeviceId()
-        let gainNowDescription: String
-        if let gainNow = InputGainGuard.inputVolume(deviceId: currentDevice) {
-            gainNowDescription = String(gainNow)
-        } else {
-            gainNowDescription = "unavailable"
-        }
-        diagnostics.append("inputGainAtEnd=\(gainNowDescription)")
-        diagnostics.append(contentsOf: describe("mic", micAnalysis))
-        diagnostics.append(contentsOf: describe("sys", systemAnalysis))
-        diagnostics.append("micTrimMultiplier=\(sessionMicTrimMultiplier)")
-        diagnostics.append("systemTrimMultiplier=\(sessionSystemTrimMultiplier)")
-        diagnostics.append("limiterScale=\(scale)")
-        diagnostics.append("appliedMicGain=\(micGain)")
-        diagnostics.append("appliedSystemGain=\(systemGain)")
-        writeLevelDiagnostics(diagnostics, nextTo: micURL)
-
-        var micEnvelope: GainEnvelope?
-        if let micAnalysis {
-            micEnvelope = computeGainEnvelope(
-                at: micURL, analysis: micAnalysis, trimMultiplier: sessionMicTrimMultiplier * scale
-            )
-        }
-        var systemEnvelope: GainEnvelope?
-        if let systemAnalysis {
-            systemEnvelope = computeGainEnvelope(
-                at: sysURL, analysis: systemAnalysis, trimMultiplier: sessionSystemTrimMultiplier * scale
-            )
-        }
-        print("SessionRecorder: mic envelope \(micEnvelope?.summary ?? "none"), sys envelope \(systemEnvelope?.summary ?? "none")")
-
-        return MixVolumePlan(
-            micGain: micGain,
-            systemGain: systemGain,
-            micEnvelope: micEnvelope,
-            systemEnvelope: systemEnvelope,
-            micAnalysis: micAnalysis,
-            systemAnalysis: systemAnalysis
-        )
-    }
-
     /// Mix mic + system audio tracks and convert to M4A (AAC 16kHz mono).
     /// AVMutableComposition layers both tracks at the same start time.
     /// AVAssetReaderAudioMixOutput handles mixing, channel conversion,
@@ -1558,7 +1224,11 @@ class SessionRecorder: NSObject, ObservableObject {
                 return false
             }
 
-            let mixVolumePlan = determineMixVolumePlan(micURL: micURL, sysURL: sysURL)
+            // Both tracks pass through at unity. Level is set by the user on
+            // the mixer while recording and is already in the captured audio,
+            // so nothing here second-guesses it. The limiter on the output is
+            // the only thing between this and the encoder.
+            logCapturedLevels(micURL: micURL, sysURL: sysURL)
             let composition = AVMutableComposition()
             var mixParameters: [AVMutableAudioMixInputParameters] = []
 
@@ -1573,12 +1243,7 @@ class SessionRecorder: NSObject, ObservableObject {
                     at: .zero
                 )
                 let parameters = AVMutableAudioMixInputParameters(track: compTrack)
-                applyEnvelope(
-                    mixVolumePlan.micEnvelope,
-                    fallback: mixVolumePlan.micGain,
-                    to: parameters,
-                    duration: micDuration
-                )
+                parameters.setVolume(1.0, at: .zero)
                 mixParameters.append(parameters)
             }
 
@@ -1594,12 +1259,7 @@ class SessionRecorder: NSObject, ObservableObject {
                         at: .zero
                     )
                     let parameters = AVMutableAudioMixInputParameters(track: compTrack)
-                    applyEnvelope(
-                        mixVolumePlan.systemEnvelope,
-                        fallback: mixVolumePlan.systemGain,
-                        to: parameters,
-                        duration: sysDuration
-                    )
+                    parameters.setVolume(1.0, at: .zero)
                     mixParameters.append(parameters)
                 }
             }
@@ -1678,32 +1338,9 @@ class SessionRecorder: NSObject, ObservableObject {
     }
 
     /// Convert a single track (mic-only or system-only fallback) to M4A.
-    /// Carries the same auto make-up and limiting as the mixed path — tracks
-    /// are written to disk at their true level, so without this the fallback
-    /// would export whatever the hardware happened to deliver.
-    private func convertSingleTrackToM4A(
-        inputURL: URL,
-        outputURL: URL,
-        trimMultiplier: Float
-    ) async -> Bool {
-        let analysis = analyzeAudioLevels(at: inputURL)
-        var gain = makeupGain(for: analysis) * trimMultiplier
-        if let analysis, analysis.loudPeak > 0.001 {
-            gain = min(gain, sessionMixPeakCeiling / analysis.loudPeak)
-        }
-        print(String(
-            format: "SessionRecorder: Single-track export rms=%.4f loudPeak=%.3f peak=%.3f -> gain=%.2f",
-            analysis?.activeRMS ?? 0,
-            analysis?.loudPeak ?? 0,
-            analysis?.peak ?? 0,
-            gain
-        ))
-        writeLevelDiagnostics(
-            ["path=single-track", "input=\(inputURL.lastPathComponent)", "targetRMS=\(sessionMixTargetRMS)"]
-                + describe("track", analysis)
-                + ["trimMultiplier=\(trimMultiplier)", "appliedGain=\(gain)"],
-            nextTo: inputURL
-        )
+    /// Passes the audio through untouched, as the mixed path does.
+    private func convertSingleTrackToM4A(inputURL: URL, outputURL: URL) async -> Bool {
+        let gain: Float = 1.0
 
         let asset = AVURLAsset(url: inputURL)
 
