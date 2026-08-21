@@ -55,15 +55,8 @@ struct AiTranscribeApp: App {
                 .environmentObject(backendManager)
                 .environmentObject(sessionManager)
                 .task {
-                    if !hotkeysRegistered {
-                        HotkeyManager.shared.setup(appState: appState, sessionManager: sessionManager)
-                        hotkeysRegistered = true
-                    }
-                    MeetingReminderCoordinator.shared.start(
-                        appState: appState,
-                        sessionManager: sessionManager,
-                        monitor: meetingMonitor
-                    )
+                    // Hotkeys and the meeting monitor start in AppDelegate, at
+                    // launch. This runs only when the menu is first opened.
                     requestMicrophonePermissionAtLaunch()
                 }
                 .onChange(of: appState.isRecording) { _, _ in }
