@@ -115,6 +115,9 @@ enum SettingsWindowFocus {
 struct SettingsView: View {
     @State private var selectedSection: SettingsSection = .dashboard
     @State private var isSidebarExpanded: Bool = false
+    /// Tabs that have played their stagger-in this window session. Window-scoped
+    /// @State on purpose: each tab staggers once per settings window, revisits
+    /// render settled, and closing the window resets the set.
     @State private var animatedTabs: Set<SettingsSection> = []
     @State private var pendingHistoryEntryId: UUID? = nil
     @State private var pendingSessionId: UUID? = nil
@@ -183,16 +186,16 @@ struct SettingsView: View {
                 hasAnimated: animatedTabs.contains(.dashboard),
                 onAnimated: { animatedTabs.insert(.dashboard) },
                 onNavigateToHistory: { entryId in
+                    // The destination tab is out of the hierarchy right now, so
+                    // it re-inits with this pending ID regardless — no need to
+                    // clear `animatedTabs` (which would replay the ~1s stagger).
                     pendingHistoryEntryId = entryId
-                    // Clear animation cache so the view reinits with the new ID
-                    animatedTabs.remove(.history)
                     withAnimation(.easeInOut(duration: 0.2)) {
                         selectedSection = .history
                     }
                 },
                 onNavigateToSessions: { sessionId in
                     pendingSessionId = sessionId
-                    animatedTabs.remove(.sessions)
                     withAnimation(.easeInOut(duration: 0.2)) {
                         selectedSection = .sessions
                     }
@@ -219,7 +222,6 @@ struct SettingsView: View {
                 onAnimated: { animatedTabs.insert(.sessions) },
                 onNavigateToModels: { mode in
                     pendingModelMode = mode
-                    animatedTabs.remove(.models)
                     withAnimation(.easeInOut(duration: 0.2)) {
                         selectedSection = .models
                     }

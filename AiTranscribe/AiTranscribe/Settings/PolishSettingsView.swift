@@ -153,9 +153,16 @@ struct PolishSettingsView: View {
             }
         }
         .onAppear {
+            // Cheap (cached decode) and needed per appearance: LLMs added on the
+            // Models tab must show up here.
             apiLanguageModels = APILanguageModelStore.load()
-            appState.reloadPolishPresets()
-            Task { await appState.fetchSummaryModels() }
+            // Once per settings-window session — `hasAnimated` is false only on
+            // the first appearance after the window opens. All preset edits go
+            // through appState, which keeps `polishPresets` current in between.
+            if !hasAnimated {
+                appState.reloadPolishPresets()
+                Task { await appState.fetchSummaryModels() }
+            }
         }
         .task(id: "stagger") {
             guard !hasAnimated else { return }

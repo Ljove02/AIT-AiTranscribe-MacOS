@@ -221,14 +221,23 @@ struct ModelsSettingsView: View {
             apiModels = APITranscriptionModelStore.load()
             apiLanguageModels = APILanguageModelStore.load()
             reconcilePublicSelections()
-            Task { await appState.fetchAvailableModels() }
-            Task { await appState.fetchSummaryModels() }
-            Task { await appState.fetchSummaryRuntimeStatus() }
-            Task {
-                // checkNemoStatus calls refreshNemoVenvState internally
-                // and updates nemoAvailable + nemoVenvExists
-                await appState.checkNemoStatus()
-                // Only clear checking state AFTER the backend responded
+            // Fetch once per settings-window session: `hasAnimated` is false only
+            // on the tab's first appearance after the window opens. Revisits reuse
+            // the appState results; the header refresh button, the server-connect
+            // onChange below, and setup completions still refetch explicitly.
+            if !hasAnimated {
+                Task { await appState.fetchAvailableModels() }
+                Task { await appState.fetchSummaryModels() }
+                Task { await appState.fetchSummaryRuntimeStatus() }
+                Task {
+                    // checkNemoStatus calls refreshNemoVenvState internally
+                    // and updates nemoAvailable + nemoVenvExists
+                    await appState.checkNemoStatus()
+                    // Only clear checking state AFTER the backend responded
+                    isCheckingNemoStatus = false
+                }
+            } else {
+                // Status was already checked this session — appState still holds it.
                 isCheckingNemoStatus = false
             }
         }

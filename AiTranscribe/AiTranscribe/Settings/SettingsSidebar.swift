@@ -191,8 +191,10 @@ struct SidebarItem: View {
 
 // MARK: - Shared Icon Loading Helper
 
-/// Attempts to load the app icon from the bundle resources
-func loadAppIconFromBundle() -> NSImage? {
+/// Decoded once, lazily, on first use — the sidebar header calls
+/// `loadAppIconFromBundle()` on every render (including hover passes), and the
+/// bundle path lookup + PNG decode was wasted work after the first time.
+private let cachedAppIconFromBundle: NSImage? = {
     let iconNames = [
         "Icon-iOS-Default-256x256@1x",
         "Icon-iOS-Default-128x128@1x",
@@ -213,4 +215,9 @@ func loadAppIconFromBundle() -> NSImage? {
     }
 
     return nil
+}()
+
+/// Attempts to load the app icon from the bundle resources
+func loadAppIconFromBundle() -> NSImage? {
+    cachedAppIconFromBundle
 }

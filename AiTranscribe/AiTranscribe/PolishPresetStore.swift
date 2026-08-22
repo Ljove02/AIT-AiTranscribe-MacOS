@@ -586,6 +586,15 @@ enum PolishPresetStore {
     private static let storageKey = "polishPresetsV1"
     private static let deletedBuiltInStorageKey = "deletedPolishBuiltInsV1"
 
+    /// Decoded-presets cache (same pattern as APILanguageModelStore): load()
+    /// gets called from SwiftUI body evaluations, and JSON-decoding + merging
+    /// the list on each one is wasted work. save() is the only UserDefaults
+    /// writer for `storageKey` (upsert/delete both funnel through it), so it
+    /// keeps the cache coherent; delete() updates the deleted-built-ins set
+    /// *before* calling save(), so the cached merge already excludes them.
+    private static let cacheLock = NSLock()
+    private static var cachedPresets: [PolishPreset]?
+
     static var builtIns: [PolishPreset] {
         [
             makeBuiltIn(
@@ -791,17 +800,35 @@ enum PolishPresetStore {
     }
 
     static func load() -> [PolishPreset] {
-        guard let data = UserDefaults.standard.data(forKey: storageKey),
-              let presets = try? JSONDecoder().decode([PolishPreset].self, from: data),
-              !presets.isEmpty else {
-            return mergeWithBuiltIns([])
+        cacheLock.lock()
+        if let cachedPresets {
+            cacheLock.unlock()
+            return cachedPresets
         }
-        return mergeWithBuiltIns(presets)
+        cacheLock.unlock()
+
+        let merged: [PolishPreset]
+        if let data = UserDefaults.standard.data(forKey: storageKey),
+           let presets = try? JSONDecoder().decode([PolishPreset].self, from: data),
+           !presets.isEmpty {
+            merged = mergeWithBuiltIns(presets)
+        } else {
+            merged = mergeWithBuiltIns([])
+        }
+
+        cacheLock.lock()
+        cachedPresets = merged
+        cacheLock.unlock()
+        return merged
     }
 
     static func save(_ presets: [PolishPreset]) {
-        guard let data = try? JSONEncoder().encode(mergeWithBuiltIns(presets)) else { return }
+        let merged = mergeWithBuiltIns(presets)
+        guard let data = try? JSONEncoder().encode(merged) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
+        cacheLock.lock()
+        cachedPresets = merged
+        cacheLock.unlock()
     }
 
     static func upsert(_ preset: PolishPreset, in presets: [PolishPreset]) -> [PolishPreset] {

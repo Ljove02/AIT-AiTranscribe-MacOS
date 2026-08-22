@@ -227,7 +227,8 @@ class AppState: ObservableObject {
     @AppStorage("mutePlaybackDuringRecording") private var _mutePlaybackDuringRecording = false
     var mutePlaybackDuringRecording: Bool {
         get { _mutePlaybackDuringRecording }
-        set { 
+        set {
+            guard newValue != _mutePlaybackDuringRecording else { return }
             _mutePlaybackDuringRecording = newValue
             objectWillChange.send()
         }
@@ -239,6 +240,7 @@ class AppState: ObservableObject {
     var muteMode: String {
         get { _muteMode }
         set {
+            guard newValue != _muteMode else { return }
             _muteMode = newValue
             // Defer objectWillChange to next run loop to prevent publishing during view updates
             DispatchQueue.main.async { [weak self] in
@@ -253,6 +255,8 @@ class AppState: ObservableObject {
     var duckVolume: Double {
         get { _duckVolume }
         set {
+            // Slider drags re-set the same value repeatedly — don't publish then.
+            guard newValue != _duckVolume else { return }
             _duckVolume = newValue
             // Defer objectWillChange to next run loop to prevent publishing during view updates
             DispatchQueue.main.async { [weak self] in
@@ -1099,12 +1103,6 @@ class AppState: ObservableObject {
     func fetchAvailableModels() async {
         do {
             availableModels = try await apiClient.listModels()
-            // Force all windows to redisplay — on macOS 26 Tahoe, @Published
-            // changes can fail to trigger SwiftUI view updates due to the
-            // display cycle exception (caught by DisplayCycleFix).
-            for window in NSApp.windows {
-                window.display()
-            }
         } catch {
             print("Failed to fetch models: \(error)")
         }

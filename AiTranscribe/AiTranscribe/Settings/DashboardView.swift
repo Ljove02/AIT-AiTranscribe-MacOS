@@ -680,6 +680,37 @@ struct ActivityContributionPanel: View {
     let maxCount: Int
     let animated: Bool
 
+    /// Chunked weeks and month labels depend only on the activity data, never
+    /// the cursor. Hover moves re-run `body` on this same struct value 60-120x/s,
+    /// so they're computed once in `init` (i.e. only when the parent re-renders
+    /// with new data) instead of on every mouse-move pass.
+    private let weekGroups: [[DashboardActivityDay]]
+    private let monthLabelItems: [(weekIndex: Int, label: String)]
+
+    init(
+        days: [DashboardActivityDay],
+        currentStreak: Int,
+        longestStreak: Int,
+        activeDays: Int,
+        maxCount: Int,
+        animated: Bool
+    ) {
+        self.days = days
+        self.currentStreak = currentStreak
+        self.longestStreak = longestStreak
+        self.activeDays = activeDays
+        self.maxCount = maxCount
+        self.animated = animated
+
+        // Locals mirror `dayCount`/`weekCount` — self isn't usable yet here.
+        let dayCount = 7
+        let groups: [[DashboardActivityDay]] = days.isEmpty ? [] : stride(from: 0, to: days.count, by: dayCount).map { start in
+            Array(days[start..<min(start + dayCount, days.count)])
+        }
+        self.weekGroups = groups
+        self.monthLabelItems = Self.contributionMonthLabels(weeks: groups, weekCount: 52)
+    }
+
     private let weekCount = 52
     private let dayCount = 7
     private let labelWidth: CGFloat = 25
@@ -725,16 +756,7 @@ struct ActivityContributionPanel: View {
         let day: Int
     }
 
-    private var weeks: [[DashboardActivityDay]] {
-        guard !days.isEmpty else { return [] }
-        return stride(from: 0, to: days.count, by: dayCount).map { start in
-            Array(days[start..<min(start + dayCount, days.count)])
-        }
-    }
-
     var body: some View {
-        let weekGroups = weeks
-
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline, spacing: 16) {
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
@@ -765,7 +787,7 @@ struct ActivityContributionPanel: View {
                     Spacer(minLength: 0)
 
                     VStack(alignment: .leading, spacing: 6) {
-                        monthLabels(cellSize: cellSize, weeks: weekGroups)
+                        monthLabels(cellSize: cellSize)
                             .frame(width: labelWidth + gridWidth, height: 14, alignment: .leading)
 
                         HStack(alignment: .top, spacing: 7) {
@@ -999,7 +1021,7 @@ struct ActivityContributionPanel: View {
     }
 
     private func day(at cell: GridCell) -> DashboardActivityDay? {
-        let groups = weeks
+        let groups = weekGroups
         guard cell.week >= 0, cell.week < groups.count else { return nil }
         let week = groups[cell.week]
         guard cell.day >= 0, cell.day < week.count else { return nil }
@@ -1028,11 +1050,9 @@ struct ActivityContributionPanel: View {
         }
     }
 
-    private func monthLabels(cellSize: CGFloat, weeks: [[DashboardActivityDay]]) -> some View {
-        let labels = contributionMonthLabels(weeks: weeks)
-
-        return ZStack(alignment: .topLeading) {
-            ForEach(labels, id: \.weekIndex) { item in
+    private func monthLabels(cellSize: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(monthLabelItems, id: \.weekIndex) { item in
                 Text(item.label)
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -1041,16 +1061,20 @@ struct ActivityContributionPanel: View {
         }
     }
 
-    private func contributionMonthLabels(weeks: [[DashboardActivityDay]]) -> [(weekIndex: Int, label: String)] {
-        let calendar = Calendar.current
+    private static let monthLabelFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM"
+        return formatter
+    }()
+
+    private static func contributionMonthLabels(weeks: [[DashboardActivityDay]], weekCount: Int) -> [(weekIndex: Int, label: String)] {
+        let calendar = Calendar.current
 
         return weeks.prefix(weekCount).enumerated().compactMap { index, week in
             guard let firstDay = week.first else { return nil }
             let day = calendar.component(.day, from: firstDay.date)
             if index == 0 || day <= 7 {
-                return (index, formatter.string(from: firstDay.date))
+                return (index, monthLabelFormatter.string(from: firstDay.date))
             }
             return nil
         }

@@ -22,6 +22,11 @@ struct GeneralSettingsView: View {
     @State private var isCalibratingIndicatorNoise = false
     @State private var noiseCalibrationMessage: String?
 
+    /// Cached TCC status — reading AVCaptureDevice.authorizationStatus is an
+    /// IPC-backed call and the body consults it ~8 times per render. Refreshed
+    /// on appear and after the request-permission action.
+    @State private var microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+
     init(hasAnimated: Bool, onAnimated: @escaping () -> Void) {
         self.hasAnimated = hasAnimated
         self.onAnimated = onAnimated
@@ -196,6 +201,9 @@ struct GeneralSettingsView: View {
             .padding(.top, 8)
         }
         .scrollIndicators(.automatic)
+        .onAppear {
+            microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        }
         .task(id: "stagger") {
             guard !hasAnimated else { return }
             try? await Task.sleep(for: .milliseconds(80))
@@ -205,10 +213,6 @@ struct GeneralSettingsView: View {
     }
 
     // MARK: - Microphone Permission
-
-    private var microphoneStatus: AVAuthorizationStatus {
-        AVCaptureDevice.authorizationStatus(for: .audio)
-    }
 
     private var microphoneDescription: String {
         switch microphoneStatus {
@@ -242,6 +246,7 @@ struct GeneralSettingsView: View {
     private func requestMicrophonePermission() {
         AVCaptureDevice.requestAccess(for: .audio) { granted in
             DispatchQueue.main.async {
+                microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
                 if granted {
                     appState.statusMessage = "Microphone permission granted"
                 } else {
@@ -640,10 +645,17 @@ private struct RecordingIndicatorStylePreview: View {
     let style: RecordingIndicatorStyle
     let isActive: Bool
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.controlActiveState) private var controlActiveState
+
+    /// The 18fps timeline only runs while the settings window is frontmost —
+    /// a selected card would otherwise keep redrawing behind other windows.
+    private var isWindowActive: Bool {
+        controlActiveState == .key || controlActiveState == .active
+    }
 
     var body: some View {
         Group {
-            if isActive {
+            if isActive && isWindowActive {
                 TimelineView(.periodic(from: Self.animationStartTime, by: 1.0 / 18.0)) { timeline in
                     previewContent(date: timeline.date)
                 }

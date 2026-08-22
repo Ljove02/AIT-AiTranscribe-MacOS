@@ -19,6 +19,10 @@ struct SessionsSettingsView: View {
     @State private var showDeleteSelectedSessionsAlert = false
     @State private var showClearTranscriptionAlert = false
     @State private var screenRecordingPermission = false
+
+    /// Last TCC screen-recording preflight answer, kept across tab revisits so
+    /// the permission pill renders instantly without re-running the check.
+    @MainActor private static var cachedScreenRecordingPermission: Bool?
     @State private var isSelectingSessions = false
     @State private var selectedSessionIds: Set<UUID> = []
     @State private var showAutomationSheet = false
@@ -174,8 +178,21 @@ struct SessionsSettingsView: View {
             }
         }
         .task {
+            // Cheap and signature-guarded — runs every appearance.
             sessionManager.loadSessionsIfNeeded()
-            screenRecordingPermission = await SystemAudioCapture.checkPermission()
+
+            // TCC preflight once per settings-window session: seed the pill from
+            // the last known answer, and only re-run the check on the tab's first
+            // appearance after the window opens (`hasAnimated` is false exactly
+            // then). The pill's explicit request button still re-checks.
+            if let cached = Self.cachedScreenRecordingPermission {
+                screenRecordingPermission = cached
+            }
+            if !hasAnimated || Self.cachedScreenRecordingPermission == nil {
+                let granted = await SystemAudioCapture.checkPermission()
+                Self.cachedScreenRecordingPermission = granted
+                screenRecordingPermission = granted
+            }
         }
         .task(id: "stagger") {
             guard !hasAnimated else { return }
@@ -398,7 +415,9 @@ struct SessionsSettingsView: View {
                     SystemAudioCapture.requestPermission()
                     Task {
                         try? await Task.sleep(for: .seconds(2))
-                        screenRecordingPermission = await SystemAudioCapture.checkPermission()
+                        let granted = await SystemAudioCapture.checkPermission()
+                        Self.cachedScreenRecordingPermission = granted
+                        screenRecordingPermission = granted
                     }
                 } : nil
             )
