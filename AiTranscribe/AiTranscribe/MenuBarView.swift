@@ -41,6 +41,10 @@ struct MenuBarView: View {
             statusStrip
                 .padding(.top, 8)
 
+            // ── Active Model ──
+            modelRow
+                .padding(.top, 6)
+
             // ── Main Controls ──
             controlsSection
                 .padding(.top, 10)
@@ -146,8 +150,6 @@ struct MenuBarView: View {
 
     private var statusStrip: some View {
         HStack(spacing: 8) {
-            versionChip
-
             StatusChip(
                 icon: "server.rack",
                 label: appState.isServerConnected ? "Backend" : "Offline",
@@ -160,17 +162,36 @@ struct MenuBarView: View {
         }
     }
 
-    private var versionChip: some View {
-        Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.5")")
-            .font(.system(size: 9, weight: .medium, design: .monospaced))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(.white.opacity(0.06), in: Capsule())
-            .overlay(
-                Capsule()
-                    .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
-            )
+    /// The active transcription model on its own full-width row, so real model
+    /// names are readable inside the 280pt panel.
+    private var modelRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "cpu")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            Text("Model")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.tertiary)
+                .tracking(0.6)
+
+            Spacer(minLength: 8)
+
+            Text(appState.activeTranscriptionModelName)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
+        )
+        .help(appState.activeTranscriptionModelName)
     }
 
     private var menuModeSwitch: some View {
@@ -272,11 +293,7 @@ struct MenuBarView: View {
 
                 Spacer()
 
-                if appState.recordingDuration > 0 {
-                    Text(formatDuration(appState.recordingDuration))
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
+                RecordingDurationLabel(activity: appState.recordingActivity)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -783,12 +800,6 @@ struct MenuBarView: View {
         }
     }
 
-    private func formatDuration(_ seconds: Double) -> String {
-        let mins = Int(seconds) / 60
-        let secs = Int(seconds) % 60
-        return String(format: "%d:%02d", mins, secs)
-    }
-
     private func openAndFocusSettings() {
         openWindow(id: "settings")
         SettingsWindowFocus.focus()
@@ -868,6 +879,29 @@ struct MenuBarView: View {
         }
     }
 
+}
+
+// MARK: - Recording Duration Label
+
+/// The only view observing RecordingActivityModel's 10 Hz updates, so the
+/// rest of the menu (and every other AppState observer) stays untouched
+/// while recording.
+private struct RecordingDurationLabel: View {
+    @ObservedObject var activity: RecordingActivityModel
+
+    var body: some View {
+        if activity.duration > 0 {
+            Text(Self.format(activity.duration))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private static func format(_ seconds: Double) -> String {
+        let mins = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        return String(format: "%d:%02d", mins, secs)
+    }
 }
 
 // MARK: - Status Chip

@@ -74,17 +74,40 @@ struct APILanguageModel: Identifiable, Codable, Equatable {
 enum APILanguageModelStore {
     private static let storageKey = "apiLanguageModels"
 
+    /// Decoded-models cache: load() gets called from SwiftUI body evaluations,
+    /// and JSON-decoding the list on each one is wasted work. save() is the
+    /// only writer, so it keeps the cache coherent.
+    private static let cacheLock = NSLock()
+    private static var cachedModels: [APILanguageModel]?
+
     static func load() -> [APILanguageModel] {
-        guard let data = UserDefaults.standard.data(forKey: storageKey),
-              let models = try? JSONDecoder().decode([APILanguageModel].self, from: data) else {
-            return defaultModels
+        cacheLock.lock()
+        if let cachedModels {
+            cacheLock.unlock()
+            return cachedModels
         }
+        cacheLock.unlock()
+
+        let models: [APILanguageModel]
+        if let data = UserDefaults.standard.data(forKey: storageKey),
+           let decoded = try? JSONDecoder().decode([APILanguageModel].self, from: data) {
+            models = decoded
+        } else {
+            models = defaultModels
+        }
+
+        cacheLock.lock()
+        cachedModels = models
+        cacheLock.unlock()
         return models
     }
 
     static func save(_ models: [APILanguageModel]) {
         guard let data = try? JSONEncoder().encode(models) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
+        cacheLock.lock()
+        cachedModels = models
+        cacheLock.unlock()
     }
 
     static func upsert(_ model: APILanguageModel) -> [APILanguageModel] {

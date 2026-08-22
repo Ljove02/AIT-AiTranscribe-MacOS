@@ -76,3 +76,6 @@ output/
 
 # Dev notes
 TODO-*.md
+
+# CPU trace output
+perf_traces/

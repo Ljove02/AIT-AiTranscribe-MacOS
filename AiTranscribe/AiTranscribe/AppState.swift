@@ -59,6 +59,21 @@ private enum PolishApplicationError: LocalizedError {
  @MainActor guarantees safety.
  */
 @MainActor
+/// Live recording telemetry (duration/volume at 10 Hz). Kept OFF AppState:
+/// publishing these on AppState re-rendered every @EnvironmentObject observer
+/// (menu bar, settings dashboard) ten times a second for the whole recording
+/// — profiled at ~half the app's 100%+ CPU spike. Only the small views that
+/// actually display these values observe this object.
+final class RecordingActivityModel: ObservableObject {
+    @Published var duration: Double = 0.0
+    @Published var volume: Double = 0.0
+
+    func reset() {
+        duration = 0.0
+        volume = 0.0
+    }
+}
+
 class AppState: ObservableObject {
 
     /// Shared singleton so AppDelegate can access it at launch (for onboarding)
@@ -69,13 +84,24 @@ class AppState: ObservableObject {
     // =========================================================================
 
     /// Is the ASR model loaded in memory?
-    @Published var isModelLoaded: Bool = false
+    @Published var isModelLoaded: Bool = false {
+        didSet { refreshActiveTranscriptionModelName() }
+    }
 
     /// Which model is currently loaded (e.g., "parakeet-v2", "parakeet-v3")
-    @Published var loadedModelId: String? = nil
+    @Published var loadedModelId: String? = nil {
+        didSet { refreshActiveTranscriptionModelName() }
+    }
 
     /// Available models from backend
-    @Published var availableModels: [ModelInfoResponse] = []
+    @Published var availableModels: [ModelInfoResponse] = [] {
+        didSet { refreshActiveTranscriptionModelName() }
+    }
+
+    /// Display name of the transcription model that will handle the next
+    /// recording, shown in the menu bar chip. Resolved by
+    /// refreshActiveTranscriptionModelName() for both Local and Public modes.
+    @Published var activeTranscriptionModelName: String = ""
 
     /// Available summarization models from backend
     @Published var availableSummaryModels: [SummaryModelInfoResponse] = []
@@ -99,7 +125,9 @@ class AppState: ObservableObject {
     @Published var polishRoutingRules: [PolishRoutingRule] = PolishRoutingStore.loadRules(presets: PolishPresetStore.load())
 
     /// Is the model currently loading?
-    @Published var isModelLoading: Bool = false
+    @Published var isModelLoading: Bool = false {
+        didSet { refreshActiveTranscriptionModelName() }
+    }
 
     /// Which model is currently being loaded (for UI feedback)
     @Published var loadingModelId: String? = nil
@@ -128,11 +156,9 @@ class AppState: ObservableObject {
     /// Set by SessionManager to prevent concurrent recording conflicts
     var isSessionRecordingActive: Bool = false
 
-    /// Current recording duration in seconds
-    @Published var recordingDuration: Double = 0.0
-
-    /// Current audio volume (0.0 to 1.0)
-    @Published var currentVolume: Double = 0.0
+    /// Live duration/volume during recording. Deliberately NOT @Published on
+    /// AppState — see RecordingActivityModel.
+    let recordingActivity = RecordingActivityModel()
 
     /// Last transcribed text
     @Published var lastTranscription: String = ""
@@ -272,7 +298,14 @@ class AppState: ObservableObject {
     /// Idle timeout before model is auto-unloaded (2 minutes)
     private let idleTimeoutSeconds: TimeInterval = 120
     /// Tracks whether we triggered an auto-load for the current recording session
-    private var isAutoLoadingModel: Bool = false
+    private var isAutoLoadingModel: Bool = false {
+        didSet { refreshActiveTranscriptionModelName() }
+    }
+
+    /// Last-seen values of the defaults keys the model chip depends on.
+    /// currentTranscriptionModel(for:) self-heals by writing defaults, so the
+    /// defaults observer must ignore notifications that change none of these.
+    private var lastActiveModelDefaultsSnapshot: String = ""
 
     /// Floating recording indicator
     let recordingIndicator = RecordingIndicatorController()
@@ -311,6 +344,22 @@ class AppState: ObservableObject {
 
         // Check accessibility permissions if real-time output is enabled
         checkAccessibilityPermissionsIfNeeded()
+
+        // The mode switch and the public model selection both live in
+        // UserDefaults, so the model chip has to watch defaults changes too.
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                let snapshot = self.activeModelDefaultsSnapshot()
+                guard snapshot != self.lastActiveModelDefaultsSnapshot else { return }
+                self.lastActiveModelDefaultsSnapshot = snapshot
+                self.refreshActiveTranscriptionModelName()
+            }
+            .store(in: &cancellables)
+
+        lastActiveModelDefaultsSnapshot = activeModelDefaultsSnapshot()
+        refreshActiveTranscriptionModelName()
     }
 
     // =========================================================================
@@ -599,6 +648,36 @@ class AppState: ObservableObject {
         modelSource: PolishModelSource? = nil,
         onDelta: ((String) async -> Void)? = nil
     ) async throws -> PolishApplicationResult {
+        if preset.bypassLLM {
+            // No model resolution, no vision gate, no LLM call. Only the voice
+            // and desktop audio transcripts survive; clipboard, screenshot, and
+            // active app context are ignored.
+            let voice = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            let desktop = context?.desktopAudioTranscript?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let text: String
+            if voice.isEmpty {
+                text = desktop
+            } else if desktop.isEmpty {
+                text = voice
+            } else {
+                text = "[user]\n\(voice)\n\n[desktop]\n\(desktop)"
+            }
+            AppLogger.info(String(
+                format: "AppState: polish bypassLLM preset=%@ voiceWords=%d desktopWords=%d",
+                preset.displayName,
+                voice.split(separator: " ").count,
+                desktop.split(separator: " ").count
+            ))
+            if let onDelta {
+                await onDelta(text)
+            }
+            return PolishApplicationResult(
+                text: text,
+                estimatedCostUSD: nil,
+                screenshotData: nil
+            )
+        }
+
         let resolvedSource = modelSource ?? currentPolishModelSource
         let resolvedModel = try resolvedLanguageModelForPolish(preset, source: resolvedSource)
         var runtimeContext = context ?? PolishContextReader.collect(for: preset)
@@ -1977,8 +2056,8 @@ class AppState: ObservableObject {
         statusTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self, self.audioRecorder.isRecording else { return }
             DispatchQueue.main.async {
-                self.currentVolume = Double(self.audioRecorder.currentVolume)
-                self.recordingDuration = self.audioRecorder.duration
+                self.recordingActivity.volume = Double(self.audioRecorder.currentVolume)
+                self.recordingActivity.duration = self.audioRecorder.duration
             }
         }
     }
@@ -1988,8 +2067,8 @@ class AppState: ObservableObject {
         statusTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self, self.quickSystemAudioRecorder.isRecording else { return }
             DispatchQueue.main.async {
-                self.currentVolume = 0
-                self.recordingDuration = self.quickSystemAudioRecorder.duration
+                self.recordingActivity.volume = 0
+                self.recordingActivity.duration = self.quickSystemAudioRecorder.duration
             }
         }
     }
@@ -2067,7 +2146,8 @@ class AppState: ObservableObject {
 
     private func scheduleQuickPolishScreenshotCaptureIfNeeded() {
         guard let preset = activeQuickPolishPreset,
-              preset.usesScreenSnapshot else {
+              preset.usesScreenSnapshot,
+              !preset.bypassLLM else {
             return
         }
 
@@ -2779,6 +2859,42 @@ class AppState: ObservableObject {
         return currentLocalTranscriptionModel()
     }
 
+    /// The defaults keys that feed refreshActiveTranscriptionModelName().
+    /// "apiTranscriptionModels" mirrors APITranscriptionModelStore.storageKey,
+    /// which is private to the store.
+    private func activeModelDefaultsSnapshot() -> String {
+        let defaults = UserDefaults.standard
+        return [
+            defaults.string(forKey: "selectedTranscriptionProviderId") ?? "",
+            defaults.string(forKey: "selectedOpenAITranscriptionModel") ?? "",
+            defaults.data(forKey: "apiTranscriptionModels")?.base64EncodedString() ?? ""
+        ].joined(separator: "|")
+    }
+
+    /// Recomputes `activeTranscriptionModelName` for the menu bar chip.
+    /// Both branches resolve through `currentTranscriptionModel(for:)` so the
+    /// public-mode fallback chain (and its self-healing UserDefaults write)
+    /// stays in one place.
+    private func refreshActiveTranscriptionModelName() {
+        let providerId = selectedTranscriptionProviderId
+        let name: String
+        if providerId == TranscriptionProviderDescriptor.localBackend.id {
+            if isModelLoading || isAutoLoadingModel {
+                name = "Loading model..."
+            } else if !isModelLoaded {
+                name = "No model"
+            } else {
+                let model = currentTranscriptionModel(for: TranscriptionProviderDescriptor.localBackend)
+                name = model.displayName == "Unknown" ? (loadedModelId ?? "No model") : model.displayName
+            }
+        } else {
+            name = currentTranscriptionModel(for: transcriptionProvider(for: providerId).descriptor).displayName
+        }
+        if activeTranscriptionModelName != name {
+            activeTranscriptionModelName = name
+        }
+    }
+
     /// Stop streaming recording
     private func stopStreamingRecording() async {
         statusMessage = "Finishing..."
@@ -2865,8 +2981,7 @@ class AppState: ObservableObject {
     private func stopStatusPolling() {
         statusTimer?.invalidate()
         statusTimer = nil
-        recordingDuration = 0.0
-        currentVolume = 0.0
+        recordingActivity.reset()
     }
 
     private func pollRecordingStatus() async {
