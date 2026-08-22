@@ -188,14 +188,24 @@ struct TestTranscriptionOnboardingView: View {
                         text: "Download a local model first, or switch to Public for this test."
                     )
                 } else {
-                    Picker("", selection: $selectedLocalModelId) {
+                    Menu {
                         ForEach(downloadedLocalModels) { model in
-                            Text(model.displayName).tag(model.id)
+                            Button(model.displayName) {
+                                selectedLocalModelId = model.id
+                            }
                         }
+                    } label: {
+                        onboardingSelectPill(
+                            title: downloadedLocalModels.first(where: { $0.id == selectedLocalModelId })?.displayName ?? "Choose local model",
+                            icon: "externaldrive.fill",
+                            width: 300
+                        )
                     }
-                    .pickerStyle(.menu)
-                    .frame(width: 300)
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
                     .disabled(isLoadingModel || isRecording || isTranscribing)
+                    .opacity(isLoadingModel || isRecording || isTranscribing ? 0.55 : 1)
                     .onChange(of: selectedLocalModelId) { _, newValue in
                         loadLocalModel(newValue)
                     }
@@ -214,20 +224,53 @@ struct TestTranscriptionOnboardingView: View {
                         text: "Add an API key and model first, or switch to Local for this test."
                     )
                 } else {
-                    Picker("", selection: $selectedAPIModelId) {
+                    Menu {
                         ForEach(usableAPIModels) { model in
-                            Text("\(model.providerName) · \(model.displayName)").tag("\(model.providerId):\(model.modelId)")
+                            Button("\(model.providerName) · \(model.displayName)") {
+                                selectedAPIModelId = "\(model.providerId):\(model.modelId)"
+                            }
                         }
+                    } label: {
+                        onboardingSelectPill(
+                            title: usableAPIModels.first(where: { "\($0.providerId):\($0.modelId)" == selectedAPIModelId })
+                                .map { "\($0.providerName) · \($0.displayName)" } ?? "Choose public model",
+                            icon: "network",
+                            width: 300
+                        )
                     }
-                    .pickerStyle(.menu)
-                    .frame(width: 300)
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
                     .disabled(isRecording || isTranscribing)
+                    .opacity(isRecording || isTranscribing ? 0.55 : 1)
                     .onChange(of: selectedAPIModelId) { _, _ in
                         persistSelectedAPIModel()
                     }
                 }
             }
         }
+    }
+
+    private func onboardingSelectPill(title: String, icon: String, width: CGFloat) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 11)
+        .frame(width: width, height: 30)
+        .background(.white.opacity(0.06), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+        .contentShape(Capsule())
     }
 
     private var statusNote: some View {
