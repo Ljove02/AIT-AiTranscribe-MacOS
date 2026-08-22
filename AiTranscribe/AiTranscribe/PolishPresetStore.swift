@@ -357,6 +357,9 @@ struct PolishPreset: Identifiable, Codable, Equatable {
     var displayName: String
     var symbolName: String
     var prompt: String
+    /// When true, the LLM step is skipped entirely: the raw transcription
+    /// (voice and/or desktop audio) goes straight to the output modules.
+    var bypassLLM: Bool
     var modelProviderId: String
     var modelId: String
     var localModelId: String?
@@ -411,6 +414,7 @@ struct PolishPreset: Identifiable, Codable, Equatable {
         case displayName
         case symbolName
         case prompt
+        case bypassLLM
         case modelProviderId
         case modelId
         case localModelId
@@ -430,6 +434,7 @@ struct PolishPreset: Identifiable, Codable, Equatable {
         displayName: String,
         symbolName: String,
         prompt: String,
+        bypassLLM: Bool = false,
         modelProviderId: String,
         modelId: String,
         localModelId: String? = nil,
@@ -447,6 +452,7 @@ struct PolishPreset: Identifiable, Codable, Equatable {
         self.displayName = displayName
         self.symbolName = symbolName
         self.prompt = prompt
+        self.bypassLLM = bypassLLM
         self.modelProviderId = modelProviderId
         self.modelId = modelId
         self.localModelId = localModelId?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
@@ -468,6 +474,7 @@ struct PolishPreset: Identifiable, Codable, Equatable {
         displayName = try container.decode(String.self, forKey: .displayName)
         symbolName = try container.decode(String.self, forKey: .symbolName)
         prompt = try container.decode(String.self, forKey: .prompt)
+        bypassLLM = try container.decodeIfPresent(Bool.self, forKey: .bypassLLM) ?? false
         modelProviderId = try container.decode(String.self, forKey: .modelProviderId)
         modelId = try container.decode(String.self, forKey: .modelId)
         localModelId = try container.decodeIfPresent(String.self, forKey: .localModelId)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
@@ -825,6 +832,7 @@ enum PolishPresetStore {
         displayName: String,
         symbolName: String,
         prompt: String,
+        bypassLLM: Bool = false,
         modelProviderId: String = TranscriptionProviderDescriptor.openAI.id,
         modelId: String,
         outputBehavior: PolishOutputBehavior = .copyPolished,
@@ -840,6 +848,7 @@ enum PolishPresetStore {
             displayName: trimmedName.isEmpty ? "Custom Polish" : trimmedName,
             symbolName: trimmedSymbol.isEmpty ? "sparkles" : trimmedSymbol,
             prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines),
+            bypassLLM: bypassLLM,
             modelProviderId: modelProviderId,
             modelId: modelId,
             localModelId: nil,
@@ -861,6 +870,7 @@ enum PolishPresetStore {
         for builtIn in builtIns where !deletedBuiltInIds.contains(builtIn.id) {
             if let existing = byId[builtIn.id], existing.isBuiltIn {
                 var refreshed = builtIn
+                refreshed.bypassLLM = existing.bypassLLM
                 refreshed.modelProviderId = existing.modelProviderId
                 refreshed.modelId = existing.modelId
                 refreshed.localModelId = existing.localModelId

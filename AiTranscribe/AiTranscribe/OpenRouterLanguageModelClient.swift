@@ -137,6 +137,25 @@ struct OpenRouterLanguageModelClient {
         )
     }
 
+    /// Generic single completion used by the multi-step Polish generator.
+    func generateText(
+        system: String,
+        user: String,
+        modelId: String,
+        apiKey: String,
+        providerOnly: [String]? = nil,
+        maxOutputTokens: Int
+    ) async throws -> String {
+        try await generateResponse(
+            systemInstruction: system,
+            userInput: user,
+            modelId: modelId,
+            apiKey: apiKey,
+            providerOnly: providerOnly,
+            maxOutputTokens: maxOutputTokens
+        ).text
+    }
+
     func generatePolishPresetDraft(
         request: String,
         modelId: String,

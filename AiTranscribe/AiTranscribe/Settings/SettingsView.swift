@@ -373,6 +373,21 @@ struct TranscriptionModeSwitch: View {
             }
             .buttonStyle(.plain)
             .help("How Local/Public mode works")
+
+            if isLocalMode {
+                ZStack {
+                    Circle()
+                        .fill(.green.opacity(0.14))
+                        .frame(width: 24, height: 24)
+
+                    Image(systemName: "lock.shield.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.green)
+                }
+                .frame(width: 30, height: 30, alignment: .center)
+                .help("Local mode: audio and transcripts stay on this Mac.")
+                .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            }
         }
         .onAppear {
             guard !hasSeenTranscriptionModeInfo else { return }

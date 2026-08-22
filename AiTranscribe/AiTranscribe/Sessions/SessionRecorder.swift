@@ -354,21 +354,10 @@ class SessionRecorder: NSObject, ObservableObject {
     private var micFormatSummary: String?
     private var micCaptureSummary: String?
 
-    private var appliedMixMicGain: Float = 1.0
-    private var appliedMixSystemGain: Float = 1.0
     private var analyzedMixMicRMS: Float = 0
     private var analyzedMixMicPeak: Float = 0
     private var analyzedMixSystemRMS: Float = 0
     private var analyzedMixSystemPeak: Float = 0
-
-    /// User trim from the Audio Mix sheet, applied on top of auto make-up gain
-    /// at mix time. Captured at session start so mid-session changes to the
-    /// sliders cannot alter a recording already in progress.
-    private var sessionMicTrimMultiplier: Float = SessionAudioMixPreferences.baselineMicGain
-    private var sessionSystemTrimMultiplier: Float = SessionAudioMixPreferences.baselineSystemGain
-    private var sessionMicTrimDB: Double = SessionAudioMixPreferences.defaultMicTrimDB
-    private var sessionSystemTrimDB: Double = SessionAudioMixPreferences.defaultSystemTrimDB
-
 
     /// Output soft limiter. Samples below the threshold pass through
     /// untouched; above it they are smoothly compressed and approach the
@@ -427,16 +416,10 @@ class SessionRecorder: NSObject, ObservableObject {
         micMaxPeak = 0
         micFormatSummary = nil
         micCaptureSummary = nil
-        appliedMixMicGain = 1.0
-        appliedMixSystemGain = 1.0
         analyzedMixMicRMS = 0
         analyzedMixMicPeak = 0
         analyzedMixSystemRMS = 0
         analyzedMixSystemPeak = 0
-        sessionMicTrimDB = SessionAudioMixPreferences.micTrimDB()
-        sessionSystemTrimDB = SessionAudioMixPreferences.systemTrimDB()
-        sessionMicTrimMultiplier = SessionAudioMixPreferences.effectiveMicGain()
-        sessionSystemTrimMultiplier = SessionAudioMixPreferences.effectiveSystemGain()
 
         // System audio capture via ScreenCaptureKit.
         // Only attempt if Screen Recording permission is already granted.
@@ -901,16 +884,10 @@ class SessionRecorder: NSObject, ObservableObject {
             "micActiveBuffers=\(micActiveBuffers)",
             "micMaxRMS=\(micMaxRMS)",
             "micMaxPeak=\(micMaxPeak)",
-            "sessionMicTrimDB=\(sessionMicTrimDB)",
-            "sessionSystemTrimDB=\(sessionSystemTrimDB)",
-            "micTrimMultiplier=\(sessionMicTrimMultiplier)",
-            "systemTrimMultiplier=\(sessionSystemTrimMultiplier)",
             "mixMicRMS=\(analyzedMixMicRMS)",
             "mixMicPeak=\(analyzedMixMicPeak)",
             "mixSystemRMS=\(analyzedMixSystemRMS)",
             "mixSystemPeak=\(analyzedMixSystemPeak)",
-            "mixMicGain=\(appliedMixMicGain)",
-            "mixSystemGain=\(appliedMixSystemGain)",
             "micFramesWritten=\(micFramesWritten)",
             "sysFramesWritten=\(sysFramesWritten)",
             "micExists=\(FileManager.default.fileExists(atPath: micURL.path))",
@@ -939,16 +916,10 @@ class SessionRecorder: NSObject, ObservableObject {
             "micActiveBuffers=\(micActiveBuffers)",
             "micMaxRMS=\(micMaxRMS)",
             "micMaxPeak=\(micMaxPeak)",
-            "sessionMicTrimDB=\(sessionMicTrimDB)",
-            "sessionSystemTrimDB=\(sessionSystemTrimDB)",
-            "micTrimMultiplier=\(sessionMicTrimMultiplier)",
-            "systemTrimMultiplier=\(sessionSystemTrimMultiplier)",
             "mixMicRMS=\(analyzedMixMicRMS)",
             "mixMicPeak=\(analyzedMixMicPeak)",
             "mixSystemRMS=\(analyzedMixSystemRMS)",
             "mixSystemPeak=\(analyzedMixSystemPeak)",
-            "mixMicGain=\(appliedMixMicGain)",
-            "mixSystemGain=\(appliedMixSystemGain)",
             "micFramesWritten=\(micFramesWritten)",
             "sysFramesWritten=\(sysFramesWritten)",
             "outputExists=\(FileManager.default.fileExists(atPath: outputURL.path))",

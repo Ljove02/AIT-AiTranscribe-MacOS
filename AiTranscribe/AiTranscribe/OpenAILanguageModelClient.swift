@@ -328,6 +328,23 @@ extension OpenAILanguageModelClient {
         )
     }
 
+    /// Generic single completion used by the multi-step Polish generator.
+    func generateText(
+        system: String,
+        user: String,
+        modelId: String,
+        apiKey: String,
+        maxOutputTokens: Int
+    ) async throws -> String {
+        try await generateResponse(
+            developerInstruction: system,
+            userInput: user,
+            modelId: modelId,
+            apiKey: apiKey,
+            maxOutputTokens: maxOutputTokens
+        ).text
+    }
+
     func generatePolishPresetDraft(
         request: String,
         modelId: String,
@@ -553,7 +570,9 @@ extension OpenAILanguageModelClient {
     }
 }
 
-private let routableApplicationFilterInstruction = """
+// Internal (not private): the Routes screen's local-mode AI Clean reuses this
+// same instruction through the local backend.
+let routableApplicationFilterInstruction = """
 You are cleaning a macOS application picker for a user-facing routing feature.
 
 The user wants to route dictation output by real apps they intentionally use, such as Codex, Claude, ChatGPT, Terminal, Zed, Obsidian, Notes, Mail, Slack, Discord, Linear, GitHub Desktop, browsers, editors, and other obvious front-facing products.

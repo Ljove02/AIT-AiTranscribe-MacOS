@@ -21,7 +21,6 @@ struct SessionsSettingsView: View {
     @State private var screenRecordingPermission = false
     @State private var isSelectingSessions = false
     @State private var selectedSessionIds: Set<UUID> = []
-    @State private var showAudioMixSheet = false
     @State private var showAutomationSheet = false
     @State private var showImportPage = false
     @State private var selectedDate: Date? = nil
@@ -35,8 +34,6 @@ struct SessionsSettingsView: View {
     )
 
     @AppStorage("hideSessionInfoBanner") private var hideBanner = false
-    @AppStorage(SessionAudioMixPreferences.micTrimDBKey) private var sessionMicTrimDB = SessionAudioMixPreferences.defaultMicTrimDB
-    @AppStorage(SessionAudioMixPreferences.systemTrimDBKey) private var sessionSystemTrimDB = SessionAudioMixPreferences.defaultSystemTrimDB
     @AppStorage(SessionAutomationPreferences.autoTranscribeKey) private var automationAutoTranscribe = false
     @AppStorage(SessionAutomationPreferences.transcriptionSourceKey) private var automationTranscriptionSource = SessionAutomationSource.local.rawValue
     @AppStorage(SessionAutomationPreferences.localTranscriptionModelKey) private var automationLocalTranscriptionModelId = "parakeet-v2"
@@ -260,14 +257,6 @@ struct SessionsSettingsView: View {
             .padding(.top, 8)
         }
         .scrollIndicators(.automatic)
-        .sheet(isPresented: $showAudioMixSheet) {
-            AudioMixSheetView(
-                micTrimDB: $sessionMicTrimDB,
-                systemTrimDB: $sessionSystemTrimDB,
-                latestSessionName: latestSessionWithAudio?.name,
-                latestAudioURL: latestSessionAudioURL
-            )
-        }
         .sheet(isPresented: $showAutomationSheet) {
             sessionAutomationSettingsSheet
         }
@@ -313,24 +302,6 @@ struct SessionsSettingsView: View {
                         Image(systemName: "square.and.arrow.down")
                             .font(.system(size: 10, weight: .medium))
                         Text("Import")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                    .foregroundStyle(.primary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(.thinMaterial, in: Capsule())
-                    .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
-                }
-                .buttonStyle(.plain)
-
-                // Audio mix button
-                Button {
-                    showAudioMixSheet = true
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "slider.horizontal.3")
-                            .font(.system(size: 10, weight: .medium))
-                        Text("Audio Mix")
                             .font(.system(size: 11, weight: .medium))
                     }
                     .foregroundStyle(.primary)
@@ -1365,18 +1336,6 @@ struct SessionsSettingsView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Audio Mix Helpers
-
-    private var latestSessionWithAudio: Session? {
-        sessionManager.sessions.first { $0.hasAudio }
-    }
-
-    private var latestSessionAudioURL: URL? {
-        guard let session = latestSessionWithAudio else { return nil }
-        let url = sessionManager.getAudioURL(for: session)
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
-    }
-
     // MARK: - Selection Helpers
 
     /// Selection follows the date filter, not the whole library — otherwise "Select All"
@@ -1544,7 +1503,7 @@ private struct FlowLayout: Layout {
     }
 }
 
-// MARK: - Audio Mix Sheet
+// MARK: - Session Sheet Styling
 
 private struct SessionSheetActionPillStyle: ViewModifier {
     let tint: Color
@@ -1559,192 +1518,6 @@ private struct SessionSheetActionPillStyle: ViewModifier {
             .background(prominent ? AnyShapeStyle(tint) : AnyShapeStyle(Color.primary.opacity(0.075)), in: Capsule())
             .overlay(Capsule().strokeBorder(prominent ? tint.opacity(0.28) : .white.opacity(0.06), lineWidth: 0.6))
             .contentShape(Capsule())
-    }
-}
-
-struct AudioMixSheetView: View {
-    @Binding var micTrimDB: Double
-    @Binding var systemTrimDB: Double
-    let latestSessionName: String?
-    let latestAudioURL: URL?
-    @Environment(\.dismiss) var dismiss
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack(spacing: 16) {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 36))
-                    .foregroundStyle(.orange.gradient)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Session Audio Mix")
-                        .font(.title2)
-                        .fontWeight(.semibold)
-                    Text("Adjust mic and desktop levels for session recordings")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-            }
-            .padding(20)
-
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    // Mic slider
-                    mixSlider(
-                        title: "Microphone Boost",
-                        icon: "mic.fill",
-                        value: $micTrimDB,
-                        range: SessionAudioMixPreferences.micTrimRange,
-                        valueStr: SessionAudioMixPreferences.displayString(for: micTrimDB),
-                        gainStr: SessionAudioMixPreferences.multiplierString(
-                            for: SessionAudioMixPreferences.effectiveMicGain(forTrimDB: micTrimDB)
-                        ),
-                        minLabel: "Less",
-                        maxLabel: "More",
-                        tint: .blue
-                    )
-
-                    // System slider
-                    mixSlider(
-                        title: "Desktop Audio",
-                        icon: "desktopcomputer",
-                        value: $systemTrimDB,
-                        range: SessionAudioMixPreferences.systemTrimRange,
-                        valueStr: SessionAudioMixPreferences.displayString(for: systemTrimDB),
-                        gainStr: SessionAudioMixPreferences.multiplierString(
-                            for: SessionAudioMixPreferences.effectiveSystemGain(forTrimDB: systemTrimDB)
-                        ),
-                        minLabel: "Quieter",
-                        maxLabel: "Louder",
-                        tint: .purple
-                    )
-
-                    Divider()
-
-                    // Quick check
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("QUICK CHECK")
-                            .font(.system(size: 10, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.tertiary)
-                            .tracking(0.6)
-
-                        if let audioURL = latestAudioURL, let name = latestSessionName {
-                            HStack(spacing: 8) {
-                                Button {
-                                    NSWorkspace.shared.open(audioURL)
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "play.fill")
-                                            .font(.system(size: 9))
-                                        Text("Play Latest")
-                                            .font(.system(size: 11, weight: .medium))
-                                    }
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 7)
-                                    .background(.orange, in: Capsule())
-                                }
-                                .buttonStyle(.plain)
-
-                                Button {
-                                    NSWorkspace.shared.activateFileViewerSelecting([audioURL])
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "folder")
-                                            .font(.system(size: 9))
-                                        Text("Show in Finder")
-                                            .font(.system(size: 11, weight: .medium))
-                                    }
-                                    .foregroundStyle(.primary)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 7)
-                                    .background(.quaternary, in: Capsule())
-                                }
-                                .buttonStyle(.plain)
-
-                                Spacer()
-                            }
-
-                            Text(name)
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
-                        } else {
-                            Text("Record a session to audition your mix here.")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-
-                    Text("These settings only affect session recordings. Basic recording is not affected.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.quaternary)
-                }
-                .padding(24)
-            }
-
-            Divider()
-
-            // Footer
-            HStack {
-                Button("Reset") {
-                    micTrimDB = SessionAudioMixPreferences.defaultMicTrimDB
-                    systemTrimDB = SessionAudioMixPreferences.defaultSystemTrimDB
-                }
-                .buttonStyle(.plain)
-                .modifier(SessionSheetActionPillStyle(tint: .secondary, prominent: false))
-                .disabled(abs(micTrimDB) < 0.05 && abs(systemTrimDB) < 0.05)
-
-                Spacer()
-
-                Button("Done") { dismiss() }
-                    .buttonStyle(.plain)
-                    .modifier(SessionSheetActionPillStyle(tint: .accentColor, prominent: true))
-                    .keyboardShortcut(.defaultAction)
-            }
-            .padding(20)
-        }
-        .frame(width: 500, height: 480)
-    }
-
-    private func mixSlider(
-        title: String,
-        icon: String,
-        value: Binding<Double>,
-        range: ClosedRange<Double>,
-        valueStr: String,
-        gainStr: String,
-        minLabel: String,
-        maxLabel: String,
-        tint: Color
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: icon)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(tint)
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer()
-                Text(valueStr)
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                Text("· \(gainStr)")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-
-            Slider(
-                value: value,
-                in: range,
-                step: 0.5,
-                minimumValueLabel: Text(minLabel).font(.system(size: 9)).foregroundStyle(.tertiary),
-                maximumValueLabel: Text(maxLabel).font(.system(size: 9)).foregroundStyle(.tertiary)
-            ) { Text(title) }
-            .tint(tint)
-        }
     }
 }
 

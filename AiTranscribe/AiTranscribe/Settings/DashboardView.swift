@@ -685,10 +685,19 @@ struct ActivityContributionPanel: View {
     private let labelWidth: CGFloat = 25
     private let cellSpacing: CGFloat = 4
 
-    /// Dock-style magnification radius, measured in grid cells. Anything
-    /// further than this from the cursor stays at rest, which keeps a mouse
-    /// move to roughly 25 redrawn cells instead of all 364.
-    private let magnifyRadius: Double = 1.9
+    /// Dock-style magnification field, measured in grid cells.
+    ///
+    /// `magnifyPlateau` pins the cell actually under the pointer at full lift
+    /// rather than letting it ease off as the cursor crosses it, then
+    /// `magnifyDecay` steps the rings down around it:
+    ///
+    ///   hovered  100%  ·  ring 1  40%  ·  ring 2  10%  ·  ring 3  2%
+    ///
+    /// `magnifyRadius` cuts the tail off where it rounds to nothing, which caps
+    /// a mouse move at ~45 redrawn cells out of 364.
+    private let magnifyPlateau: Double = 0.35
+    private let magnifyDecay: Double = 1.41
+    private let magnifyRadius: Double = 3.5
 
     /// How long the cursor has to sit still before the detail card appears.
     /// Sweeping across the grid should not fire fifty tooltips.
@@ -895,7 +904,16 @@ struct ActivityContributionPanel: View {
         guard let cursor else { return 0 }
         let dx = Double(week) + 0.5 - cursor.x
         let dy = Double(day) + 0.5 - cursor.y
-        return falloff((dx * dx + dy * dy).squareRoot())
+        return falloff(ringDistance(dx, dy))
+    }
+
+    /// A p = 4 norm rather than a plain circle. On a square grid this pulls the
+    /// diagonal neighbours in towards their orthogonal siblings, so each ring
+    /// of cells lifts as a ring instead of as a cross.
+    private func ringDistance(_ dx: Double, _ dy: Double) -> Double {
+        let x2 = dx * dx
+        let y2 = dy * dy
+        return (x2 * x2 + y2 * y2).squareRoot().squareRoot()
     }
 
     /// Columns need their own z-order so a magnified cell is never overlapped
@@ -905,15 +923,15 @@ struct ActivityContributionPanel: View {
         return falloff(abs(Double(week) + 0.5 - cursor.x))
     }
 
-    /// Smoothstep, so the magnification tapers off instead of ending on a hard
-    /// ring. Quantised to two decimals so cells whose lift did not visibly
-    /// change compare equal and skip their body entirely.
+    /// Exponential decay past the plateau, so the field tapers smoothly out to
+    /// nothing instead of ending on a hard edge. Quantised to two decimals so
+    /// cells whose lift did not visibly change compare equal and skip their
+    /// body entirely.
     private func falloff(_ distance: Double) -> Double {
         // Magnification is motion. With Reduce Motion on, the focus ring and
         // the tooltip still do the job of saying which day is under the cursor.
         guard !reduceMotion, distance < magnifyRadius else { return 0 }
-        let t = 1 - distance / magnifyRadius
-        return ((t * t * (3 - 2 * t)) * 100).rounded() / 100
+        return (exp(-magnifyDecay * max(0, distance - magnifyPlateau)) * 100).rounded() / 100
     }
 
     // MARK: Tooltip

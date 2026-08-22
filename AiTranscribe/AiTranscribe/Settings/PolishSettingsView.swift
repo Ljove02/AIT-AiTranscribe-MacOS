@@ -20,6 +20,11 @@ struct PolishSettingsView: View {
     @State private var clarificationReason: String?
     @State private var clarificationQuestions: [GeneratedPolishClarificationQuestion] = []
     @State private var clarificationAnswers: [String: String] = [:]
+    @State private var generatorPhaseText: String?
+    @State private var reviewingDraft: PolishGeneratorDraftPackage?
+    @State private var aiEditTargetPresetId: String?
+    @AppStorage("polishGeneratorModelId") private var polishGeneratorModelId = ""
+    @AppStorage("polishGeneratorLocalModelId") private var polishGeneratorLocalModelId = ""
     @State private var testingPresetId: String?
     @State private var polishTestMessage: String?
     @State private var polishTestIsError = false
@@ -49,6 +54,58 @@ struct PolishSettingsView: View {
                         isCreatingPreset = false
                     }
                 )
+            } else if let reviewingDraft {
+                PolishDraftReviewView(
+                    package: reviewingDraft,
+                    targetModelName: generatorUsesLocalMode
+                        ? generatorLocalModel.map { "\($0.displayName) · Local" }
+                        : generatorLanguageModel?.displayName,
+                    onDiscard: {
+                        self.reviewingDraft = nil
+                        aiEditTargetPresetId = nil
+                        generationMessage = "Draft discarded"
+                        generationIsError = false
+                    },
+                    onSave: { finalPackage in
+                        if let targetId = aiEditTargetPresetId,
+                           var updated = appState.polishPresets.first(where: { $0.id == targetId }) {
+                            // AI edit of an existing Polish: apply the drafted
+                            // fields, keep everything else (shortcut, model,
+                            // enabled state) as it was.
+                            updated.displayName = finalPackage.displayName
+                            updated.symbolName = finalPackage.symbolName
+                            updated.prompt = finalPackage.prompt
+                            updated.inputModules = finalPackage.inputModules
+                            updated.outputModules = finalPackage.outputModules
+                            updated.pasteBehavior = finalPackage.pasteBehavior
+                            appState.upsertPolishPreset(updated)
+                            generationMessage = "Updated \(updated.displayName)"
+                        } else {
+                            var preset = PolishPresetStore.makeCustom(
+                                displayName: finalPackage.displayName,
+                                symbolName: finalPackage.symbolName,
+                                prompt: finalPackage.prompt,
+                                modelProviderId: generatorLanguageModel?.providerId ?? TranscriptionProviderDescriptor.openAI.id,
+                                modelId: generatorLanguageModel?.modelId ?? selectedOpenAILanguageModel,
+                                outputBehavior: .copyPolished,
+                                pasteBehavior: finalPackage.pasteBehavior,
+                                inputModules: finalPackage.inputModules,
+                                outputModules: finalPackage.outputModules
+                            )
+                            if generatorUsesLocalMode, let localModel = generatorLocalModel {
+                                preset.localModelId = localModel.id
+                            }
+                            appState.upsertPolishPreset(preset)
+                            appState.setSelectedPolishPreset(preset.id)
+                            generatorRequest = ""
+                            clearClarification()
+                            generationMessage = "Created \(preset.displayName)"
+                        }
+                        self.reviewingDraft = nil
+                        aiEditTargetPresetId = nil
+                        generationIsError = false
+                    }
+                )
             } else if isImportingPreset {
                 PolishImportView(
                     apiLanguageModels: apiLanguageModels,
@@ -76,6 +133,11 @@ struct PolishSettingsView: View {
                     },
                     onSave: { updated in
                         appState.upsertPolishPreset(updated)
+                        self.editingPreset = nil
+                    },
+                    onAIDraft: { package in
+                        aiEditTargetPresetId = editingPreset.id
+                        reviewingDraft = package
                         self.editingPreset = nil
                     }
                 )
@@ -115,9 +177,6 @@ struct PolishSettingsView: View {
 
                 generatorCard
                     .staggerIn(index: 1, appeared: appeared)
-
-                SettingsDivider()
-                    .staggerIn(index: 2, appeared: appeared)
 
                 Group {
                     SettingsSectionHeader(title: "Polishes")
@@ -168,7 +227,7 @@ struct PolishSettingsView: View {
                         .padding(.top, 10)
                     }
                 }
-                .staggerIn(index: 3, appeared: appeared)
+                .staggerIn(index: 2, appeared: appeared)
 
                 Spacer(minLength: 24)
             }
@@ -284,10 +343,54 @@ struct PolishSettingsView: View {
             }
 
             HStack(spacing: 10) {
-                if let selectedModel = selectedLanguageModel {
-                    Label(selectedModel.displayName, systemImage: "brain.head.profile")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+                if generatorUsesLocalMode {
+                    if let localModel = generatorLocalModel {
+                        Menu {
+                            ForEach(generatorLocalModelChoices) { model in
+                                Button {
+                                    polishGeneratorLocalModelId = model.id
+                                } label: {
+                                    if model.id == localModel.id {
+                                        Label("\(model.displayName) · Local", systemImage: "checkmark")
+                                    } else {
+                                        Text("\(model.displayName) · Local")
+                                    }
+                                }
+                            }
+                        } label: {
+                            generatorModelPill(icon: "memorychip", title: localModel.displayName, tint: .green)
+                        }
+                        .menuStyle(.button)
+                        .buttonStyle(.plain)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .help("The local LLM used only for generating Polishes. Does not change your app-wide model.")
+                    } else {
+                        Label("Download a local LLM first", systemImage: "exclamationmark.triangle")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.orange)
+                    }
+                } else if let generatorModel = generatorLanguageModel {
+                    Menu {
+                        ForEach(generatorModelChoices) { model in
+                            Button {
+                                polishGeneratorModelId = model.modelId
+                            } label: {
+                                if model.modelId == generatorModel.modelId {
+                                    Label("\(model.displayName) · \(model.providerName)", systemImage: "checkmark")
+                                } else {
+                                    Text("\(model.displayName) · \(model.providerName)")
+                                }
+                            }
+                        }
+                    } label: {
+                        generatorModelPill(icon: "brain.head.profile", title: generatorModel.displayName, tint: .blue)
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("The LLM used only for generating Polishes. Does not change your app-wide LLM.")
                 } else {
                     Label("Add a public LLM first", systemImage: "exclamationmark.triangle")
                         .font(.system(size: 11, weight: .medium))
@@ -296,11 +399,27 @@ struct PolishSettingsView: View {
 
                 Spacer()
 
-                if let generationMessage {
+                if isGeneratingPreset, let generatorPhaseText {
+                    HStack(spacing: 6) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.blue)
+                            .symbolEffect(.variableColor.iterative, options: .repeating)
+
+                        Text(generatorPhaseText)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .id(generatorPhaseText)
+                            .transition(.push(from: .bottom).combined(with: .opacity))
+                    }
+                    .animation(.easeInOut(duration: 0.3), value: generatorPhaseText)
+                } else if let generationMessage {
                     Text(generationMessage)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(generationIsError ? .red : .secondary)
-                        .lineLimit(1)
+                        .lineLimit(3)
+                        .multilineTextAlignment(.trailing)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Button {
@@ -333,6 +452,7 @@ struct PolishSettingsView: View {
                 .strokeBorder(.white.opacity(0.08), lineWidth: 0.8)
         )
         .padding(.top, 18)
+        .padding(.bottom, 8)
     }
 
     private var clarificationCard: some View {
@@ -425,17 +545,53 @@ struct PolishSettingsView: View {
 
     private var canGeneratePreset: Bool {
         guard !generatorRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let selectedLanguageModel,
               !isGeneratingPreset else {
             return false
         }
-        return APIKeychainStore.hasAPIKey(providerId: selectedLanguageModel.providerId)
+        if generatorUsesLocalMode {
+            return generatorLocalModel != nil && appState.isServerConnected
+        }
+        guard let generatorLanguageModel else { return false }
+        return APIKeychainStore.hasAPIKey(providerId: generatorLanguageModel.providerId)
     }
 
     private var selectedLanguageModel: APILanguageModel? {
         let models = apiLanguageModels.isEmpty ? APILanguageModelStore.load() : apiLanguageModels
         let selected = models.first(where: { $0.modelId == selectedOpenAILanguageModel }) ?? models.first
         return selected.map(routedLanguageModel)
+    }
+
+    /// Models the generator picker offers.
+    private var generatorModelChoices: [APILanguageModel] {
+        apiLanguageModels.isEmpty ? APILanguageModelStore.load() : apiLanguageModels
+    }
+
+    /// The LLM the Polish generator uses. Its own choice, scoped to this card;
+    /// falls back to the app-wide selected LLM until one is picked here.
+    private var generatorLanguageModel: APILanguageModel? {
+        let models = generatorModelChoices
+        let chosen = models.first(where: { $0.modelId == polishGeneratorModelId })
+            ?? models.first(where: { $0.modelId == selectedOpenAILanguageModel })
+            ?? models.first
+        return chosen.map(routedLanguageModel)
+    }
+
+    /// Downloaded local models the generator can use in Local mode.
+    private var generatorLocalModelChoices: [SummaryModelInfoResponse] {
+        appState.availableSummaryModels.filter(\.downloaded)
+    }
+
+    /// The local LLM the generator uses in Local mode, with the same scoping:
+    /// its own pick first, then the preferred summary model, then any download.
+    private var generatorLocalModel: SummaryModelInfoResponse? {
+        let models = generatorLocalModelChoices
+        return models.first(where: { $0.id == polishGeneratorLocalModelId })
+            ?? models.first(where: { $0.id == appState.preferredSummaryModelId })
+            ?? models.first
+    }
+
+    private var generatorUsesLocalMode: Bool {
+        activePolishModelSource == .local
     }
 
     private func routedLanguageModel(_ model: APILanguageModel) -> APILanguageModel {
@@ -469,37 +625,19 @@ struct PolishSettingsView: View {
         guard !request.isEmpty else { return }
         isGeneratingPreset = true
         generationMessage = nil
-        defer { isGeneratingPreset = false }
+        generatorPhaseText = PolishGeneratorPhase.understanding.displayText
+        defer {
+            isGeneratingPreset = false
+            generatorPhaseText = nil
+        }
 
         do {
-            guard let selectedLanguageModel else {
-                throw OpenAILanguageModelError.missingAPIKey
-            }
-            guard let apiKey = try APIKeychainStore.apiKey(providerId: selectedLanguageModel.providerId),
-                  !apiKey.isEmpty else {
-                if selectedLanguageModel.providerId == TranscriptionProviderDescriptor.openRouter.id {
-                    throw OpenRouterLanguageModelError.missingAPIKey
-                }
-                throw OpenAILanguageModelError.missingAPIKey
-            }
-            let generation: GeneratedPolishGenerationResult
-            if selectedLanguageModel.providerId == TranscriptionProviderDescriptor.openRouter.id {
-                generation = try await OpenRouterLanguageModelClient().generatePolishPresetDraft(
-                    request: request,
-                    modelId: selectedLanguageModel.modelId,
-                    apiKey: apiKey,
-                    providerOnly: selectedLanguageModel.openRouterProviderOnly
-                )
-            } else {
-                generation = try await OpenAILanguageModelClient().generatePolishPresetDraft(
-                    request: request,
-                    modelId: selectedLanguageModel.modelId,
-                    apiKey: apiKey
-                )
+            let engine = try makeGeneratorEngine()
+            let outcome = try await engine.run(request: request) { phase in
+                generatorPhaseText = phase.displayText
             }
 
-            let draft: GeneratedPolishPresetDraft
-            switch generation {
+            switch outcome {
             case .clarification(let clarification):
                 clarificationBaseRequest = clarificationBaseRequest.isEmpty ? generatorRequest.trimmingCharacters(in: .whitespacesAndNewlines) : clarificationBaseRequest
                 clarificationReason = clarification.reason
@@ -511,32 +649,66 @@ struct PolishSettingsView: View {
                 clarificationAnswers = preservedAnswers
                 generationMessage = "Answer the questions"
                 generationIsError = false
-                return
-            case .preset(let generatedDraft):
-                draft = generatedDraft
+            case .draft(let package):
+                reviewingDraft = package
+                generationMessage = "Draft ready, \(package.passedCount)/\(package.checks.count) checks passed"
+                generationIsError = false
             }
-
-            let preset = PolishPresetStore.makeCustom(
-                displayName: draft.displayName,
-                symbolName: draft.symbolName,
-                prompt: draft.prompt,
-                modelProviderId: selectedLanguageModel.providerId,
-                modelId: selectedLanguageModel.modelId,
-                outputBehavior: .copyPolished,
-                pasteBehavior: draft.pasteBehavior ?? .copyOnly,
-                inputModules: draft.inputModules ?? PolishPreset.defaultInputModules,
-                outputModules: draft.outputModules ?? PolishPreset.defaultOutputModules
-            )
-            appState.upsertPolishPreset(preset)
-            appState.setSelectedPolishPreset(preset.id)
-            generatorRequest = ""
-            clearClarification()
-            generationMessage = "Created \(preset.displayName)"
-            generationIsError = false
         } catch {
             generationMessage = error.localizedDescription
             generationIsError = true
         }
+    }
+
+    private func generatorModelPill(icon: String, title: String, tint: Color) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .bold))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(tint.opacity(0.12), in: Capsule())
+        .overlay(
+            Capsule()
+                .strokeBorder(tint.opacity(0.28), lineWidth: 0.8)
+        )
+        .contentShape(Capsule())
+    }
+
+    /// Builds the engine for whichever mode the app is in: local models through
+    /// the bundled backend, API models through their clients.
+    private func makeGeneratorEngine() throws -> PolishGeneratorEngine {
+        if generatorUsesLocalMode {
+            guard let localModel = generatorLocalModel else {
+                throw APIError.serverError("Download a local LLM in Models before generating in Local mode.")
+            }
+            return PolishGeneratorEngine(
+                llm: .local(modelId: localModel.id),
+                targetModelName: localModel.displayName,
+                targetSupportsVision: localModel.supportsVision
+            )
+        }
+        guard let generatorLanguageModel else {
+            throw OpenAILanguageModelError.missingAPIKey
+        }
+        guard let apiKey = try APIKeychainStore.apiKey(providerId: generatorLanguageModel.providerId),
+              !apiKey.isEmpty else {
+            if generatorLanguageModel.providerId == TranscriptionProviderDescriptor.openRouter.id {
+                throw OpenRouterLanguageModelError.missingAPIKey
+            }
+            throw OpenAILanguageModelError.missingAPIKey
+        }
+        return PolishGeneratorEngine(
+            llm: .api(model: generatorLanguageModel, apiKey: apiKey),
+            targetModelName: generatorLanguageModel.displayName,
+            targetSupportsVision: generatorLanguageModel.supportsVision
+        )
     }
 
     private var generationRequestWithClarifications: String {
@@ -633,24 +805,25 @@ private struct PolishRoutesSettingsView: View {
             header
                 .padding(.horizontal, 28)
                 .padding(.top, 8)
-                .padding(.bottom, 16)
+                .padding(.bottom, 12)
 
             Divider()
                 .opacity(0.5)
 
             HStack(spacing: 0) {
                 sidebar
-                    .frame(width: 236)
-                    .padding(.vertical, 18)
-                    .padding(.leading, 24)
-                    .padding(.trailing, 14)
+                    .frame(width: 224)
+                    .padding(.vertical, 14)
+                    .padding(.leading, 22)
+                    .padding(.trailing, 12)
 
                 Divider()
                     .opacity(0.5)
 
                 routeDetail
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(24)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
             }
         }
         .task {
@@ -780,7 +953,7 @@ private struct PolishRoutesSettingsView: View {
         Group {
             if let selectedGroup {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 14) {
                         routeForm(selectedGroup)
                         selectedAppsSection(selectedGroup)
                         appScannerSection(selectedGroup)
@@ -852,7 +1025,7 @@ private struct PolishRoutesSettingsView: View {
     }
 
     private func routeForm(_ route: PolishRouteGroup) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Route")
@@ -901,7 +1074,9 @@ private struct PolishRoutesSettingsView: View {
                         tint: .blue
                     )
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
 
                 Button {
                     saveDraft(routeId: route.id)
@@ -1002,6 +1177,19 @@ private struct PolishRoutesSettingsView: View {
                 }
                 .buttonStyle(.plain)
 
+                if !hiddenAppIds.isEmpty {
+                    Button {
+                        let restoredCount = hiddenAppIds.count
+                        hiddenAppIds.removeAll()
+                        saveHiddenAppIds(hiddenAppIds)
+                        appScanMessage = "Restored \(restoredCount) hidden \(restoredCount == 1 ? "app" : "apps")."
+                    } label: {
+                        routeSmallButton("Unhide \(hiddenAppIds.count)", icon: "eye.fill", tint: .orange)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Make every hidden app visible again")
+                }
+
                 Button {
                     Task { await cleanAppsWithAI() }
                 } label: {
@@ -1034,7 +1222,7 @@ private struct PolishRoutesSettingsView: View {
             }
 
             let visibleApps = visibleApps(for: route)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 10)], spacing: 10) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 172), spacing: 8)], spacing: 8) {
                 ForEach(visibleApps) { app in
                     scannedAppButton(app, route: route)
                 }
@@ -1369,6 +1557,10 @@ private struct PolishRoutesSettingsView: View {
 
     private func cleanAppsWithAI() async {
         guard !isCleaningApps else { return }
+        if activeModelSource == .local {
+            await cleanAppsWithLocalAI()
+            return
+        }
         guard let model = selectedLanguageModel else {
             appScanMessage = "Add a public LLM before using AI Clean."
             return
@@ -1406,6 +1598,60 @@ private struct PolishRoutesSettingsView: View {
 
             let scannedIds = Set(scannedApps.map(\.id))
             let validHiddenIds = hiddenIds.intersection(scannedIds)
+            hiddenAppIds.formUnion(validHiddenIds)
+            saveHiddenAppIds(hiddenAppIds)
+            appScanMessage = "AI hid \(validHiddenIds.count) helper apps."
+        } catch {
+            appScanMessage = "AI Clean failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// AI Clean through the bundled backend when the app is in Local mode, so
+    /// the button works without any API key.
+    private func cleanAppsWithLocalAI() async {
+        let localModels = appState.availableSummaryModels.filter(\.downloaded)
+        guard let localModel = localModels.first(where: { $0.id == appState.preferredSummaryModelId }) ?? localModels.first else {
+            appScanMessage = "Download a local LLM in Models before using AI Clean."
+            return
+        }
+        guard appState.isServerConnected else {
+            appScanMessage = "The local backend is offline. Start it before using AI Clean."
+            return
+        }
+
+        isCleaningApps = true
+        appScanMessage = "\(localModel.displayName) is reviewing \(scannedApps.count) apps..."
+        defer { isCleaningApps = false }
+
+        do {
+            let payload = scannedApps.map { app in
+                [
+                    "id": app.id,
+                    "name": app.displayName,
+                    "bundleIdentifier": app.bundleIdentifier ?? "",
+                    "isRunning": app.isRunning ? "true" : "false"
+                ]
+            }
+            let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+            let payloadText = String(data: payloadData, encoding: .utf8) ?? "[]"
+
+            let responseText = try await PolishGeneratorLLM.local(modelId: localModel.id).complete(
+                system: routableApplicationFilterInstruction,
+                user: payloadText,
+                maxTokens: 2_000
+            )
+            let jsonText = responseText
+                .replacingOccurrences(of: "```json", with: "")
+                .replacingOccurrences(of: "```", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let data = jsonText.data(using: .utf8),
+                  let result = try? JSONDecoder().decode(PolishRouteApplicationFilterResult.self, from: data) else {
+                appScanMessage = "AI Clean failed: the local model returned unusable output."
+                return
+            }
+
+            let scannedIds = Set(scannedApps.map(\.id))
+            let validHiddenIds = Set(result.hiddenApplicationIds).intersection(scannedIds)
             hiddenAppIds.formUnion(validHiddenIds)
             saveHiddenAppIds(hiddenAppIds)
             appScanMessage = "AI hid \(validHiddenIds.count) helper apps."
@@ -1860,10 +2106,12 @@ private struct PolishPresetDetailView: View {
     let activeModelSource: PolishModelSource
     let onBack: () -> Void
     let onSave: (PolishPreset) -> Void
+    let onAIDraft: ((PolishGeneratorDraftPackage) -> Void)?
 
     @State private var displayName: String
     @State private var symbolName: String
     @State private var prompt: String
+    @State private var bypassLLM: Bool
     @State private var modelId: String
     @State private var localModelId: String
     @State private var showInMenu: Bool
@@ -1877,6 +2125,12 @@ private struct PolishPresetDetailView: View {
     @State private var inputModules: Set<PolishInputModule>
     @State private var outputModules: Set<PolishOutputModule>
     @State private var isEditingName = false
+    @State private var showingAIEditPopover = false
+    @State private var aiEditRequest = ""
+    @State private var isAIEditing = false
+    @State private var aiEditPhaseText: String?
+    @State private var aiEditError: String?
+    @AppStorage("polishGeneratorModelId") private var polishGeneratorModelId = ""
 
     init(
         preset: PolishPreset?,
@@ -1886,7 +2140,8 @@ private struct PolishPresetDetailView: View {
         selectedLocalModelId: String?,
         activeModelSource: PolishModelSource,
         onBack: @escaping () -> Void,
-        onSave: @escaping (PolishPreset) -> Void
+        onSave: @escaping (PolishPreset) -> Void,
+        onAIDraft: ((PolishGeneratorDraftPackage) -> Void)? = nil
     ) {
         self.preset = preset
         self.apiLanguageModels = apiLanguageModels
@@ -1896,9 +2151,11 @@ private struct PolishPresetDetailView: View {
         self.activeModelSource = activeModelSource
         self.onBack = onBack
         self.onSave = onSave
+        self.onAIDraft = onAIDraft
         _displayName = State(initialValue: preset?.displayName ?? "")
         _symbolName = State(initialValue: preset?.symbolName ?? "sparkles")
         _prompt = State(initialValue: preset?.prompt ?? "")
+        _bypassLLM = State(initialValue: preset?.bypassLLM ?? false)
         _modelId = State(initialValue: preset?.modelId ?? selectedModelId)
         let fallbackLocalModelId = preset?.localModelId ?? selectedLocalModelId ?? localLanguageModels.first(where: { $0.downloaded })?.id ?? ""
         _localModelId = State(initialValue: fallbackLocalModelId)
@@ -1920,30 +2177,59 @@ private struct PolishPresetDetailView: View {
                 configurationStrip
 
                 formRow(label: "LLM") {
-                    llmSelectionRow
+                    VStack(alignment: .leading, spacing: 8) {
+                        llmSelectionRow
+                            .opacity(bypassLLM ? 0.45 : 1)
+                            .disabled(bypassLLM)
+
+                        if bypassLLM {
+                            Text("Bypass LLM is on. Raw transcription goes straight to outputs.")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
                 if renderAdvancedModules {
-                    advancedModulePipeline
-                        .transition(
-                            .asymmetric(
-                                insertion: .opacity.combined(with: .move(edge: .top)),
-                                removal: .opacity
-                            )
+                    VStack(alignment: .leading, spacing: 10) {
+                        if preset != nil, onAIDraft != nil {
+                            HStack {
+                                Spacer()
+                                aiEditButton
+                            }
+                        }
+
+                        advancedModulePipeline
+                    }
+                    .transition(
+                        .asymmetric(
+                            insertion: .opacity.combined(with: .move(edge: .top)),
+                            removal: .opacity
                         )
+                    )
                 }
 
                 formRow(label: "Prompt") {
-                    TextEditor(text: $prompt)
-                        .font(.system(size: 12))
-                        .frame(height: promptEditorHeight)
-                        .scrollContentBackground(.hidden)
-                        .padding(10)
-                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .strokeBorder(.white.opacity(0.08), lineWidth: 0.8)
-                        )
+                    VStack(alignment: .leading, spacing: 6) {
+                        TextEditor(text: $prompt)
+                            .font(.system(size: 12))
+                            .frame(height: promptEditorHeight)
+                            .scrollContentBackground(.hidden)
+                            .padding(10)
+                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .strokeBorder(.white.opacity(0.08), lineWidth: 0.8)
+                            )
+                            .opacity(bypassLLM ? 0.45 : 1)
+                            .disabled(bypassLLM)
+
+                        if bypassLLM {
+                            Text("Bypass LLM is on. The prompt is not used.")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
                 }
 
                 Spacer(minLength: 12)
@@ -2239,7 +2525,9 @@ private struct PolishPresetDetailView: View {
                 width: 154
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
     }
 
     private var localModelMenu: some View {
@@ -2256,7 +2544,9 @@ private struct PolishPresetDetailView: View {
                 width: 330
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
     }
 
     private var apiModelMenu: some View {
@@ -2273,7 +2563,9 @@ private struct PolishPresetDetailView: View {
                 width: 330
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
     }
 
     private func polishSelectPill(title: String, icon: String, width: CGFloat) -> some View {
@@ -2303,24 +2595,29 @@ private struct PolishPresetDetailView: View {
 
     private var canSave: Bool {
         !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !modelId.isEmpty &&
+        (bypassLLM || (
+            !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !modelId.isEmpty
+        )) &&
         !requiresVisionModelSelection &&
         !requiresLocalModelSelection &&
         !requiresLocalVisionSelection
     }
 
     private var requiresVisionModelSelection: Bool {
+        !bypassLLM &&
         activeModelSource == .public &&
         inputModules.contains(.screenSnapshot) &&
         !(selectedAPIModel?.supportsVision ?? false)
     }
 
     private var requiresLocalModelSelection: Bool {
+        !bypassLLM &&
         activeModelSource == .local && downloadedLocalModels.isEmpty
     }
 
     private var requiresLocalVisionSelection: Bool {
+        !bypassLLM &&
         activeModelSource == .local &&
         inputModules.contains(.screenSnapshot) &&
         !(selectedLocalModel?.supportsVision ?? false)
@@ -2374,6 +2671,230 @@ private struct PolishPresetDetailView: View {
         }
     }
 
+    // MARK: Edit with AI
+
+    /// The generator's own model choice, same key the generator card uses.
+    private var aiEditModel: APILanguageModel? {
+        let chosen = apiLanguageModels.first(where: { $0.modelId == polishGeneratorModelId })
+            ?? apiLanguageModels.first(where: { $0.modelId == selectedModelId })
+            ?? apiLanguageModels.first
+        guard let chosen else { return nil }
+        guard chosen.providerId == TranscriptionProviderDescriptor.openAI.id,
+              chosen.modelId.contains("/"),
+              APIKeychainStore.hasAPIKey(providerId: TranscriptionProviderDescriptor.openRouter.id) else {
+            return chosen
+        }
+        return APILanguageModel(
+            id: chosen.id,
+            providerId: TranscriptionProviderDescriptor.openRouter.id,
+            providerName: TranscriptionProviderDescriptor.openRouter.displayName,
+            modelId: chosen.modelId,
+            displayName: chosen.displayName,
+            inputCostPerMillionTokensUSD: chosen.inputCostPerMillionTokensUSD,
+            outputCostPerMillionTokensUSD: chosen.outputCostPerMillionTokensUSD,
+            openRouterProviderOnly: chosen.openRouterProviderOnly,
+            createdAt: chosen.createdAt
+        )
+    }
+
+    /// Sized like the configuration strip's pills (Enabled, Menu) so it reads
+    /// as a first-class action, not a footnote.
+    private var aiEditButton: some View {
+        Button {
+            showingAIEditPopover = true
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("Edit with AI")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(.blue)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background(Color.blue.opacity(0.11), in: Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(Color.blue.opacity(0.24), lineWidth: 0.7)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(isAIEditing)
+        .popover(isPresented: $showingAIEditPopover, arrowEdge: .bottom) {
+            aiEditPopover
+        }
+    }
+
+    private var aiEditPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.blue)
+                Text("Edit with AI")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+
+            Text("Describe the change. The current Polish is the starting point; everything you do not mention stays as it is.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField(
+                "Example: Also use clipboard text so I can copy crash logs as extra context",
+                text: $aiEditRequest,
+                axis: .vertical
+            )
+            .textFieldStyle(.plain)
+            .font(.system(size: 12))
+            .lineLimit(2...5)
+            .padding(9)
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+            if let aiEditError {
+                Text(aiEditError)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 8) {
+                if isAIEditing, let aiEditPhaseText {
+                    HStack(spacing: 5) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.blue)
+                            .symbolEffect(.variableColor.iterative, options: .repeating)
+                        Text(aiEditPhaseText)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .id(aiEditPhaseText)
+                            .transition(.push(from: .bottom).combined(with: .opacity))
+                    }
+                    .animation(.easeInOut(duration: 0.3), value: aiEditPhaseText)
+                } else if let aiEditModelDisplayName {
+                    Label(aiEditModelDisplayName, systemImage: aiEditUsesLocalMode ? "memorychip" : "brain.head.profile")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Button {
+                    Task { await runAIEdit() }
+                } label: {
+                    if isAIEditing {
+                        ProgressView()
+                            .scaleEffect(0.55)
+                            .frame(width: 60, height: 24)
+                    } else {
+                        Text("Apply")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(width: 60, height: 24)
+                    }
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .background(
+                    canRunAIEdit ? Color.blue : Color.gray.opacity(0.35),
+                    in: Capsule()
+                )
+                .disabled(!canRunAIEdit)
+            }
+        }
+        .padding(14)
+        .frame(width: 340)
+    }
+
+    /// The local model Edit with AI uses in Local mode: the preset's own local
+    /// model choice first, then any downloaded model.
+    private var aiEditLocalModel: SummaryModelInfoResponse? {
+        downloadedLocalModels.first(where: { $0.id == localModelId })
+            ?? downloadedLocalModels.first
+    }
+
+    private var aiEditUsesLocalMode: Bool {
+        activeModelSource == .local
+    }
+
+    private var aiEditModelDisplayName: String? {
+        aiEditUsesLocalMode
+            ? aiEditLocalModel.map { "\($0.displayName) · Local" }
+            : aiEditModel?.displayName
+    }
+
+    private var canRunAIEdit: Bool {
+        guard !isAIEditing,
+              !aiEditRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        if aiEditUsesLocalMode {
+            return aiEditLocalModel != nil
+        }
+        guard let aiEditModel else { return false }
+        return APIKeychainStore.hasAPIKey(providerId: aiEditModel.providerId)
+    }
+
+    private func makeAIEditEngine() throws -> PolishGeneratorEngine {
+        if aiEditUsesLocalMode {
+            guard let localModel = aiEditLocalModel else {
+                throw APIError.serverError("Download a local LLM in Models before editing with AI in Local mode.")
+            }
+            return PolishGeneratorEngine(
+                llm: .local(modelId: localModel.id),
+                targetModelName: localModel.displayName,
+                targetSupportsVision: localModel.supportsVision
+            )
+        }
+        guard let model = aiEditModel else {
+            throw OpenAILanguageModelError.missingAPIKey
+        }
+        let storedKey = (try? APIKeychainStore.apiKey(providerId: model.providerId)) ?? nil
+        guard let apiKey = storedKey, !apiKey.isEmpty else {
+            throw APIError.serverError("No API key found for \(model.providerName).")
+        }
+        return PolishGeneratorEngine(
+            llm: .api(model: model, apiKey: apiKey),
+            targetModelName: model.displayName,
+            targetSupportsVision: model.supportsVision
+        )
+    }
+
+    private func runAIEdit() async {
+        let instruction = aiEditRequest.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instruction.isEmpty else { return }
+
+        isAIEditing = true
+        aiEditError = nil
+        aiEditPhaseText = PolishGeneratorPhase.planning.displayText
+        defer {
+            isAIEditing = false
+            aiEditPhaseText = nil
+        }
+
+        let snapshot = PolishEditSnapshot(
+            displayName: displayName,
+            symbolName: symbolName,
+            prompt: prompt,
+            inputModules: PolishInputModule.allCases.filter { inputModules.contains($0) },
+            outputModules: PolishOutputModule.allCases.filter { outputModules.contains($0) },
+            pasteBehavior: pasteBehavior
+        )
+
+        do {
+            let engine = try makeAIEditEngine()
+            let package = try await engine.runEdit(current: snapshot, instruction: instruction) { phase in
+                aiEditPhaseText = phase.displayText
+            }
+            showingAIEditPopover = false
+            aiEditRequest = ""
+            onAIDraft?(package)
+        } catch {
+            aiEditError = error.localizedDescription
+        }
+    }
+
     private var advancedModulePipeline: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
@@ -2402,13 +2923,14 @@ private struct PolishPresetDetailView: View {
                     title: "Inputs",
                     tint: .blue,
                     modules: PolishInputModule.allCases.map { module in
-                        ModuleToggleItem(
+                        let ignoredUnderBypass = bypassLLM && bypassIgnoredInputModules.contains(module)
+                        return ModuleToggleItem(
                             id: module.id,
                             icon: module.symbolName,
                             title: module.label,
-                            description: module.description,
+                            description: ignoredUnderBypass ? "Ignored while Bypass LLM is on." : module.description,
                             isEnabled: inputModules.contains(module),
-                            isLocked: false,
+                            isLocked: ignoredUnderBypass,
                             action: { toggleInputModule(module) }
                         )
                     }
@@ -2416,21 +2938,28 @@ private struct PolishPresetDetailView: View {
 
                 pipelineArrow
 
-                moduleStage(
-                    title: "LLM",
-                    tint: .green,
-                    modules: [
-                        ModuleToggleItem(
-                            id: "selected-llm",
-                            icon: "brain.head.profile",
-                            title: selectedModelName,
-                            description: activeModelSource == .local ? "Uses the selected local LLM above." : "Uses the selected public LLM above.",
-                            isEnabled: true,
-                            isLocked: true,
-                            action: {}
-                        )
-                    ]
-                )
+                VStack(alignment: .leading, spacing: 8) {
+                    moduleStage(
+                        title: "LLM",
+                        tint: .green,
+                        modules: [
+                            ModuleToggleItem(
+                                id: "selected-llm",
+                                icon: bypassLLM ? "arrow.right.to.line" : "brain.head.profile",
+                                title: bypassLLM ? "Skipped" : selectedModelName,
+                                description: bypassLLM
+                                    ? "Bypass LLM is on. Raw transcription goes straight to outputs."
+                                    : (activeModelSource == .local ? "Uses the selected local LLM above." : "Uses the selected public LLM above."),
+                                isEnabled: !bypassLLM,
+                                isLocked: true,
+                                action: {}
+                            )
+                        ]
+                    )
+
+                    settingsPillToggle(label: "Bypass LLM", icon: "arrow.right.to.line", isOn: $bypassLLM, tint: .orange)
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
 
                 pipelineArrow
 
@@ -2559,6 +3088,10 @@ private struct PolishPresetDetailView: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
+    /// Input modules that carry no data into a bypass run: only voice and
+    /// desktop audio survive when the LLM step is skipped.
+    private let bypassIgnoredInputModules: Set<PolishInputModule> = [.clipboardText, .screenSnapshot, .activeApp]
+
     private var isMultiStepDraft: Bool {
         Set(orderedInputModules) != Set(PolishPreset.defaultInputModules) ||
         Set(orderedOutputModules) != Set(PolishPreset.defaultOutputModules)
@@ -2660,6 +3193,7 @@ private struct PolishPresetDetailView: View {
             preset.displayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
             preset.symbolName = symbolName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "sparkles" : symbolName.trimmingCharacters(in: .whitespacesAndNewlines)
             preset.prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            preset.bypassLLM = bypassLLM
             preset.modelId = modelId
             preset.modelProviderId = selectedModel?.providerId ?? preset.modelProviderId
             preset.localModelId = normalizedLocalModelId
@@ -2676,6 +3210,7 @@ private struct PolishPresetDetailView: View {
                 displayName: displayName,
                 symbolName: symbolName,
                 prompt: prompt,
+                bypassLLM: bypassLLM,
                 modelId: modelId,
                 outputBehavior: .copyPolished,
                 pasteBehavior: pasteBehavior,
@@ -2693,9 +3228,16 @@ private struct PolishPresetDetailView: View {
     }
 
     private var normalizedShortcut: String? {
-        let trimmed = shortcut.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        normalizedPolishShortcut(shortcut)
     }
+}
+
+/// Shared normalization for Polish shortcut strings: trims whitespace, and an
+/// empty result means "no shortcut" (nil). Used by the preset editor here and
+/// by the Shortcuts tab registry — keep a single normalizer.
+func normalizedPolishShortcut(_ raw: String) -> String? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
 }
 
 private struct ModuleToggleItem: Identifiable {
@@ -3366,5 +3908,309 @@ private struct PolishIconGridPicker: View {
         }
         .padding(26)
         .frame(width: 438)
+    }
+}
+
+// MARK: - Generated Draft Review
+
+private struct PolishDraftReviewView: View {
+    let package: PolishGeneratorDraftPackage
+    let targetModelName: String?
+    let onDiscard: () -> Void
+    let onSave: (PolishGeneratorDraftPackage) -> Void
+
+    @State private var displayName: String
+    @State private var prompt: String
+
+    init(
+        package: PolishGeneratorDraftPackage,
+        targetModelName: String?,
+        onDiscard: @escaping () -> Void,
+        onSave: @escaping (PolishGeneratorDraftPackage) -> Void
+    ) {
+        self.package = package
+        self.targetModelName = targetModelName
+        self.onDiscard = onDiscard
+        self.onSave = onSave
+        _displayName = State(initialValue: package.displayName)
+        _prompt = State(initialValue: package.prompt)
+    }
+
+    private var canSave: Bool {
+        !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                header
+                scoreCard
+                pipelineCard
+                promptCard
+            }
+            .padding(.horizontal, 28)
+            .padding(.top, 8)
+            .padding(.bottom, 12)
+        }
+        .safeAreaInset(edge: .bottom) {
+            actionBar
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { onDiscard() }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Polishes")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.quaternary, in: Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+            }
+
+            HStack(alignment: .center, spacing: 12) {
+                Image(systemName: package.symbolName)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(.blue)
+                    .frame(width: 42, height: 42)
+                    .background(Color.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    TextField("Polish name", text: $displayName)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                    Text("Review the generated draft. Nothing is saved until you keep it.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+            }
+
+            if let goalSummary = package.goalSummary, !goalSummary.isEmpty {
+                Text(goalSummary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(11)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+
+            SettingsDivider()
+        }
+    }
+
+    private var scoreCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Eval scorecard")
+                    .font(.system(size: 13, weight: .semibold))
+
+                Spacer()
+
+                if package.repairRounds > 0 {
+                    Text("\(package.repairRounds) repair \(package.repairRounds == 1 ? "round" : "rounds")")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(.quaternary, in: Capsule())
+                }
+
+                Text("\(package.passedCount)/\(package.checks.count) passed")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(package.checks.allSatisfy(\.pass) ? Color.green : Color.orange)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        (package.checks.allSatisfy(\.pass) ? Color.green : Color.orange).opacity(0.12),
+                        in: Capsule()
+                    )
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(package.checks) { check in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: check.pass ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(check.pass ? Color.green : Color.red)
+                            .padding(.top, 1)
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(check.criterion)
+                                .font(.system(size: 11, weight: .medium))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(check.reason)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+                }
+
+                ForEach(package.deterministicWarnings, id: \.self) { warning in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.orange)
+                            .padding(.top, 1)
+
+                        Text(warning)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 0.8)
+        )
+    }
+
+    private var pipelineCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Workflow")
+                .font(.system(size: 13, weight: .semibold))
+
+            pipelineRow(title: "Inputs", tint: .blue, labels: package.inputModules.map(\.label))
+            pipelineRow(title: "Outputs", tint: .purple, labels: package.outputModules.map(\.label))
+
+            HStack(spacing: 14) {
+                Label(package.pasteBehavior == .pasteIntoApp ? "Auto-pastes into the focused app" : "Copy only",
+                      systemImage: package.pasteBehavior == .pasteIntoApp ? "arrow.down.doc" : "doc.on.clipboard")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                if let targetModelName {
+                    Label(targetModelName, systemImage: "brain.head.profile")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let rationale = package.rationale, !rationale.isEmpty {
+                Text(rationale)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 0.8)
+        )
+    }
+
+    private func pipelineRow(title: String, tint: Color, labels: [String]) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 52, alignment: .leading)
+
+            HStack(spacing: 5) {
+                ForEach(labels, id: \.self) { label in
+                    Text(label)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(tint)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(tint.opacity(0.11), in: Capsule())
+                }
+            }
+        }
+    }
+
+    private var promptCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Runtime prompt")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Text("Editable")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(.quaternary, in: Capsule())
+            }
+
+            TextEditor(text: $prompt)
+                .font(.system(size: 12))
+                .frame(height: 220)
+                .scrollContentBackground(.hidden)
+                .padding(10)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(.white.opacity(0.08), lineWidth: 0.8)
+                )
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 0.8)
+        )
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 10) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { onDiscard() }
+            } label: {
+                Text("Discard")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 18)
+                    .frame(height: 30)
+                    .background(.quaternary, in: Capsule())
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            Button {
+                var finalPackage = package
+                finalPackage.displayName = displayName
+                finalPackage.prompt = prompt
+                withAnimation(.easeInOut(duration: 0.15)) { onSave(finalPackage) }
+            } label: {
+                Text("Save Polish")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 20)
+                    .frame(height: 30)
+                    .background(canSave ? Color.blue : Color.gray.opacity(0.35), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSave)
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial)
     }
 }
