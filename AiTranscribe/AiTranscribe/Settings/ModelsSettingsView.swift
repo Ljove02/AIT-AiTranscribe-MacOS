@@ -2496,7 +2496,12 @@ struct ModelSheetProviderPills: View {
             ForEach(options, id: \.id) { option in
                 let selected = selection == option.id
                 Button {
-                    withAnimation(.easeOut(duration: 0.12)) {
+                    // No withAnimation here: provider changes restructure the whole
+                    // sheet (fields, callouts, height), and animating that transaction
+                    // makes the entire layout visibly recalculate.
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
                         selection = option.id
                     }
                 } label: {
