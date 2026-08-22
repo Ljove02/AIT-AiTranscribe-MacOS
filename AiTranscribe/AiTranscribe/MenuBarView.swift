@@ -23,19 +23,12 @@ struct MenuBarView: View {
     @State private var isHoveredQuit = false
     @State private var isHistoryExpanded = false
     @State private var copiedHistoryEntryId: UUID?
-    @State private var copiedMeetingURLKey: String?
     @AppStorage("selectedTranscriptionProviderId") private var selectedTranscriptionProviderId = TranscriptionProviderDescriptor.localBackend.id
-    @ObservedObject private var meetingMonitor = MeetingPresenceMonitor.shared
 
     var body: some View {
         VStack(spacing: 0) {
             // ── Header: Identity + Status ──
             headerSection
-
-            if let prompt = meetingMonitor.currentPrompt, canStartSessionFromMeetingReminder {
-                meetingReminderCard(prompt)
-                    .padding(.top, 8)
-            }
 
             // ── Status Strip ──
             statusStrip
@@ -410,113 +403,6 @@ struct MenuBarView: View {
         }
     }
 
-    private var canStartSessionFromMeetingReminder: Bool {
-        appState.isServerConnected &&
-            !appState.isRecording &&
-            !appState.isQuickRecordingTransitioning &&
-            !appState.isQuickTranscriptionInFlight &&
-            !sessionManager.isSessionRecording
-    }
-
-    private func meetingReminderCard(_ prompt: MeetingReminder) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 8) {
-                Image(systemName: prompt.provider.symbolName)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(promptTint(prompt))
-                    .frame(width: 24, height: 24)
-                    .background(promptTint(prompt).opacity(0.14), in: .circle)
-                    .overlay(
-                        Circle()
-                            .strokeBorder(promptTint(prompt).opacity(0.24), lineWidth: 0.5)
-                    )
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(prompt.headline)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-
-                    HStack(spacing: 6) {
-                        Text(prompt.detail)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-
-                        Text(prompt.contextLabel)
-                            .font(.system(size: 8, weight: .semibold))
-                            .foregroundStyle(promptTint(prompt))
-                            .lineLimit(1)
-                            .padding(.horizontal, 5)
-                            .frame(height: 15)
-                            .background(promptTint(prompt).opacity(0.12), in: Capsule())
-                            .overlay(
-                                Capsule()
-                                    .strokeBorder(promptTint(prompt).opacity(0.16), lineWidth: 0.5)
-                            )
-                    }
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 4)
-
-                Button {
-                    meetingMonitor.dismissCurrentPrompt()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.red.opacity(0.85))
-                        .frame(width: 22, height: 22)
-                        .background(.red.opacity(0.10), in: .circle)
-                }
-                .buttonStyle(.plain)
-                .help("Dismiss meeting reminder")
-            }
-
-            HStack(spacing: 7) {
-                meetingReminderPillButton(
-                    title: "Record session",
-                    icon: "waveform.badge.plus",
-                    tint: promptTint(prompt),
-                    isProminent: true
-                ) {
-                    Task {
-                        let started = await sessionManager.startSessionRecording(
-                            micDeviceId: appState.selectedDeviceId
-                        )
-                        if started {
-                            meetingMonitor.markStartedFromPrompt()
-                        }
-                    }
-                }
-
-                if let meetingURL = prompt.meetingURL {
-                    meetingReminderPillButton(
-                        title: copiedMeetingURLKey == prompt.suppressionKey ? "Copied" : "Copy link",
-                        icon: copiedMeetingURLKey == prompt.suppressionKey ? "checkmark" : "link",
-                        tint: promptTint(prompt),
-                        isProminent: false
-                    ) {
-                        copyMeetingURL(meetingURL, key: prompt.suppressionKey)
-                    }
-                }
-
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 9)
-        .background(.thinMaterial, in: .rect(cornerRadius: 14, style: .continuous))
-        .background(promptTint(prompt).opacity(0.045), in: .rect(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.white.opacity(0.12), lineWidth: 0.5)
-        )
-        .task(id: prompt.id) {
-            MeetingReminderCoordinator.shared.presentFloatingPromptIfNeeded()
-        }
-    }
-
     // MARK: - Microphone Row
 
     private var microphoneRow: some View {
@@ -822,59 +708,6 @@ struct MenuBarView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             if copiedHistoryEntryId == entry.id {
                 copiedHistoryEntryId = nil
-            }
-        }
-    }
-
-    private func promptTint(_ prompt: MeetingReminder) -> Color {
-        prompt.provider == .googleMeet ? .green : .blue
-    }
-
-    private func meetingReminderPillButton(
-        title: String,
-        icon: String,
-        tint: Color,
-        isProminent: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.system(size: 9, weight: .semibold))
-
-                Text(title)
-                    .font(.system(size: 10, weight: .semibold))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(isProminent ? .white : .secondary)
-            .padding(.horizontal, isProminent ? 10 : 9)
-            .frame(height: 27)
-            .background(
-                isProminent
-                    ? AnyShapeStyle(tint.opacity(0.72))
-                    : AnyShapeStyle(.white.opacity(0.055)),
-                in: Capsule()
-            )
-            .overlay(
-                Capsule()
-                    .strokeBorder(
-                        isProminent ? tint.opacity(0.32) : .white.opacity(0.08),
-                        lineWidth: 0.5
-                    )
-            )
-        }
-        .buttonStyle(.plain)
-        .help(title)
-    }
-
-    private func copyMeetingURL(_ meetingURL: String, key: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(meetingURL, forType: .string)
-        copiedMeetingURLKey = key
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            if copiedMeetingURLKey == key {
-                copiedMeetingURLKey = nil
             }
         }
     }

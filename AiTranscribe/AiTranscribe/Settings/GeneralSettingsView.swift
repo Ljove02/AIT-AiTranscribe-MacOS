@@ -13,8 +13,6 @@ struct GeneralSettingsView: View {
     @AppStorage("indicatorPosition") private var indicatorPosition = "topCenter"
     @AppStorage("recordingIndicatorStyle") private var recordingIndicatorStyle = "classic"
     @AppStorage("recordingIndicatorNoiseFloorRMS") private var recordingIndicatorNoiseFloorRMS = 0.0
-    @AppStorage(MeetingPresenceMonitor.enabledKey) private var meetingRecordingReminderEnabled = true
-    @AppStorage(MeetingPresenceMonitor.preciseBrowserDetectionKey) private var preciseMeetingBrowserDetectionEnabled = true
     @AppStorage("basicTranscriptionBatchingEnabled") private var basicBatchingEnabled = true
     @AppStorage("basicTranscriptionBatchingThresholdSeconds") private var basicBatchingThresholdSeconds = 120.0
     @AppStorage("basicTranscriptionBatchingRamBudgetMB") private var basicBatchingRamBudgetMB = 4096
@@ -39,7 +37,7 @@ struct GeneralSettingsView: View {
                         Text("General")
                             .font(.system(size: 22, weight: .bold, design: .rounded))
 
-                        Text("12 options")
+                        Text("10 options")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -62,31 +60,6 @@ struct GeneralSettingsView: View {
                                 if newValue {
                                     appState.checkAccessibilityPermissionsIfNeeded()
                                 }
-                            }
-                    }
-
-                    SettingsRow(
-                        title: "Meeting recording reminders",
-                        description: "Show a compact prompt when Google Meet or Zoom appears active so you can start a session recording before the call gets going."
-                    ) {
-                        Toggle("", isOn: $meetingRecordingReminderEnabled)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                            .onChange(of: meetingRecordingReminderEnabled) { _, newValue in
-                                MeetingPresenceMonitor.shared.refresh()
-                            }
-                    }
-
-                    SettingsRow(
-                        title: "Precise browser detection",
-                        description: "Read the active browser tab URL for exact Google Meet detection and meeting-link copy in Safari, Chrome, Edge, Brave, Arc, Vivaldi, Chromium, and Helium. Firefox and Zen fall back to window detection."
-                    ) {
-                        Toggle("", isOn: $preciseMeetingBrowserDetectionEnabled)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                            .disabled(!meetingRecordingReminderEnabled)
-                            .onChange(of: preciseMeetingBrowserDetectionEnabled) { _, _ in
-                                MeetingPresenceMonitor.shared.refresh()
                             }
                     }
                 }

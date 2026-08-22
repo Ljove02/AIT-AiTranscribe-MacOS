@@ -632,6 +632,30 @@ struct SessionSummaryProgress: Equatable {
     var totalPresets: Int
 }
 
+/// High-frequency live summary text during generation. Kept OFF SessionManager's
+/// @Published state — the same pattern as RecordingActivityModel in AppState:
+/// SessionManager is observed at App level, so publishing per-tick partial text
+/// on it re-rendered the whole scene. Only the small view that renders the live
+/// stream observes this object; `sessions` is written once when a preset completes.
+@MainActor
+final class SummaryStreamModel: ObservableObject {
+    @Published var partialText: String? = nil
+
+    func reset() {
+        partialText = nil
+    }
+}
+
+/// Raw on-disk facts for one session directory, gathered off the main thread.
+/// Only metadata bytes and file attributes — transcript and summary text load
+/// on demand via `ensureSessionContentLoaded`.
+private struct SessionDiskSnapshot: Sendable {
+    let metadataData: Data
+    let audioFileSize: Int64?
+    let hasTranscription: Bool
+    let summaryFileNames: Set<String>
+}
+
 private struct PublicSessionAudioBatch: Sendable {
     let index: Int
     let total: Int
@@ -774,6 +798,10 @@ class SessionManager: ObservableObject {
     /// Current summary progress
     @Published var summaryProgress: SessionSummaryProgress? = nil
 
+    /// Live streaming summary text. Deliberately NOT @Published on
+    /// SessionManager — see SummaryStreamModel.
+    let summaryStream = SummaryStreamModel()
+
     /// Sessions waiting for automatic post-processing.
     @Published var automationQueue: [UUID] = []
 
@@ -801,6 +829,11 @@ class SessionManager: ObservableObject {
     /// re-reading every session when nothing changed on disk.
     private var lastLoadSignature: String?
 
+    /// Bumped on every local session mutation (metadata save, delete) so an
+    /// in-flight background disk load knows its snapshot is stale and must not
+    /// clobber newer in-memory state.
+    private var sessionsEpoch = 0
+
     /// Base directory for all sessions
     var sessionsDirectory: URL {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -823,22 +856,40 @@ class SessionManager: ObservableObject {
 
     /// Reload from disk only if the sessions directory changed since the last load.
     /// The Sessions tab calls this on every appearance; a full load re-reads every
-    /// metadata/transcription/summary file and republishes the whole array, which
-    /// rebuilds the entire list for nothing when the user is just switching tabs.
+    /// metadata file and republishes the whole array, which rebuilds the entire
+    /// list for nothing when the user is just switching tabs.
     func loadSessionsIfNeeded() {
-        let signature = sessionsDirectorySignature()
-        if !sessions.isEmpty, let lastLoadSignature, lastLoadSignature == signature {
-            return
+        reloadSessionsFromDisk(skipIfSignatureMatches: sessions.isEmpty ? nil : lastLoadSignature)
+    }
+
+    /// Load all sessions from disk
+    func loadSessions() {
+        reloadSessionsFromDisk(skipIfSignatureMatches: nil)
+    }
+
+    /// Kick off a disk load off the main thread. The detached task computes the
+    /// directory signature once, reads ONLY metadata.json bytes + file attributes
+    /// (no transcript or summary text — those load on demand), then hands the
+    /// raw payloads back to the main actor for one decode + one `sessions` publish.
+    private func reloadSessionsFromDisk(skipIfSignatureMatches: String?) {
+        let directory = sessionsDirectory
+        let epoch = sessionsEpoch
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let signature = Self.directorySignature(of: directory)
+            if let skipIfSignatureMatches, skipIfSignatureMatches == signature {
+                return
+            }
+            let snapshots = Self.collectSessionSnapshots(in: directory)
+            await self?.applyLoadedSessions(snapshots, signature: signature, epoch: epoch)
         }
-        loadSessions()
     }
 
     /// Cheap fingerprint of the sessions directory: one stat per session folder.
     /// Metadata, transcriptions and summaries are all written atomically, so any
     /// in-place edit replaces a directory entry and bumps its modification date.
-    private func sessionsDirectorySignature() -> String {
-        guard let contents = try? fileManager.contentsOfDirectory(
-            at: sessionsDirectory,
+    private nonisolated static func directorySignature(of directory: URL) -> String {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: directory,
             includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
         ) else {
@@ -855,66 +906,90 @@ class SessionManager: ObservableObject {
             .joined(separator: "|")
     }
 
-    /// Load all sessions from disk
-    func loadSessions() {
-        var loaded: [Session] = []
-        let signature = sessionsDirectorySignature()
-
+    /// Gather raw per-session facts off the main thread: metadata bytes, audio
+    /// size, transcript existence, and which summary .md files are on disk.
+    private nonisolated static func collectSessionSnapshots(in directory: URL) -> [SessionDiskSnapshot] {
+        let fileManager = FileManager.default
         guard let contents = try? fileManager.contentsOfDirectory(
-            at: sessionsDirectory,
+            at: directory,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         ) else {
-            sessions = []
-            lastLoadSignature = signature
-            return
+            return []
         }
 
+        var snapshots: [SessionDiskSnapshot] = []
         for dirURL in contents {
             var isDir: ObjCBool = false
             guard fileManager.fileExists(atPath: dirURL.path, isDirectory: &isDir), isDir.boolValue else {
                 continue
             }
 
-            let metadataURL = dirURL.appendingPathComponent("metadata.json")
-            guard let data = try? Data(contentsOf: metadataURL),
-                  let metadata = try? decoder.decode(SessionMetadata.self, from: data),
+            guard let data = try? Data(contentsOf: dirURL.appendingPathComponent("metadata.json")) else {
+                continue
+            }
+
+            let audioPath = dirURL.appendingPathComponent("audio.m4a").path
+            var audioFileSize: Int64? = nil
+            if fileManager.fileExists(atPath: audioPath) {
+                audioFileSize = ((try? fileManager.attributesOfItem(atPath: audioPath))?[.size] as? Int64) ?? 0
+            }
+
+            let hasTranscription = fileManager.fileExists(
+                atPath: dirURL.appendingPathComponent("transcription.txt").path
+            )
+
+            let summaryFileNames = Set(
+                ((try? fileManager.contentsOfDirectory(atPath: dirURL.path)) ?? [])
+                    .filter { $0.hasSuffix(".md") }
+            )
+
+            snapshots.append(SessionDiskSnapshot(
+                metadataData: data,
+                audioFileSize: audioFileSize,
+                hasTranscription: hasTranscription,
+                summaryFileNames: summaryFileNames
+            ))
+        }
+        return snapshots
+    }
+
+    /// Decode the gathered snapshots and publish `sessions` exactly once.
+    private func applyLoadedSessions(_ snapshots: [SessionDiskSnapshot], signature: String, epoch: Int) {
+        guard epoch == sessionsEpoch else {
+            // A session was created/saved/deleted while this load was in flight —
+            // the snapshot is stale. Reload from the directory's current state.
+            reloadSessionsFromDisk(skipIfSignatureMatches: nil)
+            return
+        }
+
+        var loaded: [Session] = []
+        for snapshot in snapshots {
+            guard let metadata = try? decoder.decode(SessionMetadata.self, from: snapshot.metadataData),
                   var session = metadata.toSession() else {
                 continue
             }
 
             // Check actual file state (audio might have been deleted externally)
-            let audioURL = dirURL.appendingPathComponent("audio.m4a")
-            session.hasAudio = fileManager.fileExists(atPath: audioURL.path)
-            if session.hasAudio, let attrs = try? fileManager.attributesOfItem(atPath: audioURL.path) {
-                session.fileSize = (attrs[.size] as? Int64) ?? 0
+            session.hasAudio = snapshot.audioFileSize != nil
+            if let audioFileSize = snapshot.audioFileSize {
+                session.fileSize = audioFileSize
             }
 
-            let transcriptionURL = dirURL.appendingPathComponent("transcription.txt")
-            session.hasTranscription = fileManager.fileExists(atPath: transcriptionURL.path)
-            if session.hasTranscription, let text = try? String(contentsOf: transcriptionURL, encoding: .utf8) {
-                session.transcriptionText = text
-                session.wordCount = text.split(separator: " ").count
-            }
+            session.hasTranscription = snapshot.hasTranscription
 
             session.summaries = SessionSummaryMetadata.defaultMap().merging(session.summaries) { _, persisted in
                 persisted
             }
 
-            for (presetId, metadata) in session.summaries {
-                let summaryURL = dirURL.appendingPathComponent(metadata.fileName)
-                guard fileManager.fileExists(atPath: summaryURL.path),
-                      let text = try? String(contentsOf: summaryURL, encoding: .utf8) else {
-                    continue
-                }
-
-                var loadedMetadata = metadata
+            for (presetId, summaryMetadata) in session.summaries
+            where snapshot.summaryFileNames.contains(summaryMetadata.fileName) {
+                var loadedMetadata = summaryMetadata
                 loadedMetadata.hasSummary = true
                 if loadedMetadata.presetDisplayName == nil {
                     loadedMetadata.presetDisplayName = SummaryPresetLibrary.defaultDefinition(for: presetId)?.displayName
                         ?? presetId.replacingOccurrences(of: "_", with: " ").capitalized
                 }
-                loadedMetadata.text = text
                 session.summaries[presetId] = loadedMetadata
             }
 
@@ -923,10 +998,29 @@ class SessionManager: ObservableObject {
                 session.status = session.hasTranscription ? .completed : .idle
             }
 
+            // Keep transcript/summary text already loaded on demand so an open
+            // detail view doesn't flash back to its loading placeholder.
+            if let cached = sessions.first(where: { $0.id == session.id }) {
+                if session.hasTranscription, session.transcriptionText == nil {
+                    session.transcriptionText = cached.transcriptionText
+                }
+                if session.wordCount == nil {
+                    session.wordCount = cached.wordCount
+                }
+                for (presetId, summaryMetadata) in session.summaries
+                where summaryMetadata.hasSummary && summaryMetadata.text == nil {
+                    if let cachedText = cached.summaries[presetId]?.text {
+                        var withText = summaryMetadata
+                        withText.text = cachedText
+                        session.summaries[presetId] = withText
+                    }
+                }
+            }
+
             loaded.append(session)
         }
 
-        // Sort newest first
+        // Sort newest first — one publish for the whole load
         sessions = loaded.sorted { $0.createdAt > $1.createdAt }
         lastLoadSignature = signature
         print("SessionManager: Loaded \(sessions.count) sessions")
@@ -949,6 +1043,7 @@ class SessionManager: ObservableObject {
     func deleteSession(id: UUID) {
         guard let session = sessions.first(where: { $0.id == id }) else { return }
 
+        sessionsEpoch += 1
         let sessionDir = getSessionDirectory(for: session)
         try? fileManager.removeItem(at: sessionDir)
 
@@ -1063,6 +1158,80 @@ class SessionManager: ObservableObject {
     /// Get the summary file URL for a session summary file
     func getSummaryURL(for session: Session, fileName: String) -> URL {
         return getSessionDirectory(for: session).appendingPathComponent(fileName)
+    }
+
+    // MARK: - On-Demand Session Content
+
+    /// Load a session's transcript and any existing summary markdown off the
+    /// main thread, then publish `sessions` once. No-op when everything is
+    /// already cached. Called when SessionDetailView opens a session.
+    func ensureSessionContentLoaded(sessionId: UUID) {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        let session = sessions[index]
+
+        let needsTranscript = session.hasTranscription && session.transcriptionText == nil
+        let summaryFilesToLoad: [(presetId: String, fileName: String)] = session.summaries.compactMap {
+            $0.value.hasSummary && $0.value.text == nil ? ($0.key, $0.value.fileName) : nil
+        }
+        guard needsTranscript || !summaryFilesToLoad.isEmpty else { return }
+
+        let directory = getSessionDirectory(for: session)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let transcript = needsTranscript
+                ? try? String(contentsOf: directory.appendingPathComponent("transcription.txt"), encoding: .utf8)
+                : nil
+
+            var summaryTexts: [String: String] = [:]
+            for file in summaryFilesToLoad {
+                if let text = try? String(
+                    contentsOf: directory.appendingPathComponent(file.fileName),
+                    encoding: .utf8
+                ) {
+                    summaryTexts[file.presetId] = text
+                }
+            }
+
+            await self?.applyLoadedContent(sessionId: sessionId, transcript: transcript, summaryTexts: summaryTexts)
+        }
+    }
+
+    /// Fill loaded text into the session — one publish for transcript + summaries.
+    private func applyLoadedContent(sessionId: UUID, transcript: String?, summaryTexts: [String: String]) {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        var session = sessions[index]
+
+        if let transcript, session.transcriptionText == nil {
+            session.transcriptionText = transcript
+            if session.wordCount == nil {
+                session.wordCount = transcript.split(separator: " ").count
+            }
+        }
+
+        for (presetId, text) in summaryTexts {
+            if var metadata = session.summaries[presetId], metadata.text == nil {
+                metadata.text = text
+                session.summaries[presetId] = metadata
+            }
+        }
+
+        sessions[index] = session
+    }
+
+    /// The transcript for a session, read from disk (and cached) if not loaded
+    /// yet. Synchronous — used by flows that need the text immediately (summary
+    /// generation, copy actions); session transcripts are small text files.
+    func transcriptionText(for sessionId: UUID) -> String? {
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return nil }
+        if let cached = sessions[index].transcriptionText { return cached }
+        guard sessions[index].hasTranscription else { return nil }
+
+        let url = getTranscriptionURL(for: sessions[index])
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        sessions[index].transcriptionText = text
+        if sessions[index].wordCount == nil {
+            sessions[index].wordCount = text.split(separator: " ").count
+        }
+        return text
     }
 
     /// Update the text of an existing summary (user edit).
@@ -1996,7 +2165,8 @@ class SessionManager: ObservableObject {
         apiClient: APIClient
     ) {
         guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
-        guard sessions[index].hasTranscription, sessions[index].transcriptionText?.isEmpty == false else {
+        guard sessions[index].hasTranscription,
+              transcriptionText(for: sessionId)?.isEmpty == false else {
             return
         }
         guard let firstPreset = presetRequests.first else { return }
@@ -2045,6 +2215,7 @@ class SessionManager: ObservableObject {
                 markSummaryRunFailed(sessionId: sessionId, message: error.localizedDescription)
                 currentSummarizingSessionId = nil
                 summaryProgress = nil
+                summaryStream.reset()
                 if sessions.first(where: { $0.id == sessionId })?.automation?.status == .summarizing {
                     markAutomationFailed(
                         sessionId: sessionId,
@@ -2064,7 +2235,7 @@ class SessionManager: ObservableObject {
         presetRequests: [SummaryGenerationPresetRequest]
     ) {
         guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
-        guard let transcript = sessions[index].transcriptionText,
+        guard let transcript = transcriptionText(for: sessionId),
               !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return
         }
@@ -2127,6 +2298,7 @@ class SessionManager: ObservableObject {
                         currentIndex: offset + 1,
                         totalPresets: presetRequests.count
                     )
+                    summaryStream.reset()
                     saveMetadata(for: sessions[idx])
 
                     let result: OpenAILanguageModelResponse
@@ -2179,6 +2351,7 @@ class SessionManager: ObservableObject {
                     sessions[doneIndex].summaries[request.presetId] = doneMetadata
                     saveSummaryText(for: sessions[doneIndex], fileName: request.fileName, text: result.text)
                     saveMetadata(for: sessions[doneIndex])
+                    summaryStream.reset()
                     completedPresetIds.append(request.presetId)
                 }
 
@@ -2192,6 +2365,7 @@ class SessionManager: ObservableObject {
                 markSummaryRunFailed(sessionId: sessionId, message: error.localizedDescription)
                 currentSummarizingSessionId = nil
                 summaryProgress = nil
+                summaryStream.reset()
                 if sessions.first(where: { $0.id == sessionId })?.automation?.status == .summarizing {
                     markAutomationFailed(
                         sessionId: sessionId,
@@ -2211,7 +2385,10 @@ class SessionManager: ObservableObject {
         let characters = Array(text)
         guard !characters.isEmpty else { return }
 
-        let chunkSize = max(1, characters.count / 140)
+        // ~28 ticks at 45 ms keeps the typewriter feel (~1.3 s total) while
+        // publishing only to the small stream model. The `sessions` array is
+        // written once by the caller when the preset completes.
+        let chunkSize = max(1, characters.count / 28)
         var index = 0
         while index < characters.count {
             guard currentSummarizingSessionId == sessionId,
@@ -2220,17 +2397,9 @@ class SessionManager: ObservableObject {
             }
 
             index = min(characters.count, index + chunkSize)
-            let partial = String(characters.prefix(index))
+            summaryStream.partialText = String(characters.prefix(index))
 
-            if let sessionIndex = sessions.firstIndex(where: { $0.id == sessionId }),
-               var metadata = sessions[sessionIndex].summaries[presetId] {
-                metadata.text = partial
-                metadata.status = "generating"
-                sessions[sessionIndex].summaries[presetId] = metadata
-            }
-            summaryProgress?.partialText = partial
-
-            try? await Task.sleep(nanoseconds: 9_000_000)
+            try? await Task.sleep(nanoseconds: 45_000_000)
         }
     }
 
@@ -2249,6 +2418,7 @@ class SessionManager: ObservableObject {
                 markSummaryRunCancelled(sessionId: sessionId, message: "Cancelled by user")
                 currentSummarizingSessionId = nil
                 summaryProgress = nil
+                summaryStream.reset()
             }
         }
     }
@@ -2375,6 +2545,7 @@ class SessionManager: ObservableObject {
             summaryProgress?.activePresetId = presetId
             summaryProgress?.stage = "Preparing \(displayName)"
             summaryProgress?.partialText = startedSummary.text
+            summaryStream.reset()
             summaryProgress?.currentIndex = event.batchIndex ?? summaryProgress?.currentIndex ?? 1
             summaryProgress?.totalPresets = event.totalPresets ?? summaryProgress?.totalPresets ?? 1
 
@@ -2401,18 +2572,13 @@ class SessionManager: ObservableObject {
 
         case "partial":
             guard let presetId = activePresetId else { return }
-            var partialSummary = summary
-                ?? .empty(
-                    displayName: event.displayName
-                        ?? SummaryPresetLibrary.defaultDefinition(for: presetId)?.displayName
-                        ?? presetId,
-                    fileName: event.fileName ?? "summary-\(presetId).md"
-                )
-            partialSummary.text = event.text
-            partialSummary.status = "generating"
-            sessions[index].summaries[presetId] = partialSummary
-            summaryProgress?.partialText = event.text
-            summaryProgress?.activePresetId = presetId
+            // High-frequency (~10 Hz): write only to the small stream model.
+            // The sessions array and summary metadata are written once by the
+            // "done" event; summaryProgress only when the active preset changes.
+            if summaryProgress?.activePresetId != presetId {
+                summaryProgress?.activePresetId = presetId
+            }
+            summaryStream.partialText = event.text
 
         case "done":
             guard let presetId = activePresetId else { return }
@@ -2446,6 +2612,7 @@ class SessionManager: ObservableObject {
             summaryProgress?.currentIndex = event.batchIndex ?? summaryProgress?.currentIndex ?? 1
             summaryProgress?.totalPresets = event.totalPresets ?? summaryProgress?.totalPresets ?? 1
             summaryProgress?.stage = "Saved \(doneSummary.presetDisplayName ?? "summary")"
+            summaryStream.reset()
 
         case "error":
             if let presetId = activePresetId {
@@ -2463,6 +2630,7 @@ class SessionManager: ObservableObject {
             }
             currentSummarizingSessionId = nil
             summaryProgress = nil
+            summaryStream.reset()
             if sessions[index].automation?.status == .summarizing {
                 markAutomationFailed(
                     sessionId: sessionId,
@@ -2475,6 +2643,7 @@ class SessionManager: ObservableObject {
             markSummaryRunCancelled(sessionId: sessionId, message: "Cancelled by user")
             currentSummarizingSessionId = nil
             summaryProgress = nil
+            summaryStream.reset()
             if sessions[index].automation?.status == .summarizing {
                 markAutomationFailed(
                     sessionId: sessionId,
@@ -2486,6 +2655,7 @@ class SessionManager: ObservableObject {
         case "batch_complete":
             currentSummarizingSessionId = nil
             summaryProgress = nil
+            summaryStream.reset()
             if sessions[index].automation?.status == .summarizing {
                 completeAutomation(sessionId: sessionId, message: "Automatic transcription and summary complete.")
                 pumpAutomationQueue()
@@ -2558,6 +2728,7 @@ class SessionManager: ObservableObject {
     }
 
     private func saveMetadata(for session: Session) {
+        sessionsEpoch += 1
         let metadata = SessionMetadata(from: session)
         let sessionDir = getSessionDirectory(for: session)
         let metadataURL = sessionDir.appendingPathComponent("metadata.json")

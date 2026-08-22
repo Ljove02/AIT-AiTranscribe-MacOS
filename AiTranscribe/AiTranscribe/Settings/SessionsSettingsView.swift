@@ -1188,10 +1188,14 @@ struct SessionsSettingsView: View {
                                 }
                             }
                             .contextMenu {
-                                if session.hasTranscription, let text = session.transcriptionText {
+                                if session.hasTranscription {
                                     Button("Copy Transcription") {
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.setString(text, forType: .string)
+                                        // Transcript text loads on demand — this
+                                        // reads from cache or disk when clicked.
+                                        if let text = sessionManager.transcriptionText(for: session.id) {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(text, forType: .string)
+                                        }
                                     }
                                     Divider()
                                 }

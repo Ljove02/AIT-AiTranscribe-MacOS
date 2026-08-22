@@ -27,11 +27,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // does not run until the menu is opened for the first time, which left
         // the shortcuts dead until the user clicked the icon.
         HotkeyManager.shared.setup(appState: appState, sessionManager: sessionManager)
-        MeetingReminderCoordinator.shared.start(
-            appState: appState,
-            sessionManager: sessionManager,
-            monitor: MeetingPresenceMonitor.shared
-        )
 
         // Load saved sessions
         sessionManager.loadSessions()

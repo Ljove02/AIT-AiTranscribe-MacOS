@@ -284,6 +284,11 @@ struct SessionDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .task(id: sessionId) {
+            // Transcript and summary markdown are no longer loaded with the
+            // session list — pull them in (off-main, cached) when a session opens.
+            sessionManager.ensureSessionContentLoaded(sessionId: sessionId)
+        }
     }
 
     // MARK: - Tab Switcher
@@ -423,8 +428,13 @@ struct SessionDetailView: View {
 
             if isTranscribing {
                 transcribingView()
-            } else if session.hasTranscription, let text = session.transcriptionText {
-                completedView(session, text: text)
+            } else if session.hasTranscription {
+                if let text = session.transcriptionText {
+                    completedView(session, text: text)
+                } else {
+                    // Transcript exists on disk but is still loading on demand.
+                    transcriptLoadingView()
+                }
             } else {
                 notTranscribedView(session)
             }
@@ -794,6 +804,19 @@ struct SessionDetailView: View {
 
     // MARK: State C — Completed
 
+    /// Placeholder while the transcript text loads on demand — brief, and never
+    /// shows the transcribe controls for a session that already has a transcript.
+    private func transcriptLoadingView() -> some View {
+        glassCard {
+            HStack(spacing: 8) {
+                ProgressView().scaleEffect(0.7)
+                Text("Loading transcript...")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private func completedView(_ session: Session, text: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             // Action buttons
@@ -884,7 +907,7 @@ struct SessionDetailView: View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsSectionHeader(title: "Summary Studio")
 
-            if !session.hasTranscription || (session.transcriptionText?.isEmpty ?? true) {
+            if !session.hasTranscription {
                 HStack(spacing: 8) {
                     Image(systemName: "sparkles")
                         .font(.system(size: 12))
@@ -1333,7 +1356,11 @@ struct SessionDetailView: View {
             }
 
             // Content — takes all remaining height
-            if let text, !text.isEmpty {
+            if isPresetGenerating && !isEditingSummary {
+                // Live stream: only this subview observes the high-frequency
+                // partial text, so ticks don't re-render the rest of the app.
+                SummaryStreamingText(stream: sessionManager.summaryStream, fallbackText: text)
+            } else if let text, !text.isEmpty {
                 if isEditingSummary {
                     TextEditor(text: $editableSummaryText)
                         .font(.system(.body, design: .monospaced))
@@ -1457,14 +1484,10 @@ struct SessionDetailView: View {
         }
     }
 
+    /// Saved (or cached) summary text. Live streaming text is rendered by
+    /// SummaryStreamingText, which observes SummaryStreamModel directly.
     private func previewText(for presetId: String) -> String? {
-        if sessionManager.currentSummarizingSessionId == sessionId,
-           sessionManager.summaryProgress?.activePresetId == presetId,
-           let liveText = sessionManager.summaryProgress?.partialText,
-           !liveText.isEmpty {
-            return liveText
-        }
-        return session?.summaries[presetId]?.text
+        session?.summaries[presetId]?.text
     }
 
     // MARK: - Delete Actions (inline)
@@ -1979,6 +2002,31 @@ struct SessionDetailView: View {
     private func formatMB(_ mb: Int) -> String {
         if mb >= 1024 { return String(format: "%.1f GB", Double(mb) / 1024.0) }
         return "\(mb) MB"
+    }
+}
+
+// MARK: - Live Summary Stream View
+
+/// The only view observing SummaryStreamModel's high-frequency partial text —
+/// the same isolation pattern as RecordingActivityModel — so summary streaming
+/// re-renders just this markdown pane instead of the whole settings scene.
+private struct SummaryStreamingText: View {
+    @ObservedObject var stream: SummaryStreamModel
+    let fallbackText: String?
+
+    var body: some View {
+        ScrollView {
+            MarkdownView(text: stream.partialText ?? fallbackText ?? "")
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+                .padding(16)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.thinMaterial, in: .rect(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
+        )
     }
 }
 
