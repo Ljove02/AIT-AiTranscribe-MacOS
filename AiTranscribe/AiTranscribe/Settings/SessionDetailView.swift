@@ -1601,7 +1601,9 @@ struct SessionDetailView: View {
                 width: 330
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
     }
 
     private var detailLocalTranscriptionModelMenu: some View {
@@ -1621,7 +1623,9 @@ struct SessionDetailView: View {
                 width: 300
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
     }
 
     private var detailPublicSummaryModelMenu: some View {
@@ -1638,7 +1642,9 @@ struct SessionDetailView: View {
                 width: 330
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
     }
 
     private var detailLocalSummaryModelMenu: some View {
@@ -1655,7 +1661,9 @@ struct SessionDetailView: View {
                 width: 300
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
     }
 
     private var detailSummaryLengthPills: some View {
@@ -2211,24 +2219,37 @@ private struct SummaryPresetManagerSheet: View {
     }
 
     private var sheetHeader: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Summary Presets")
-                    .font(.title3.weight(.semibold))
-                Text("Edit built-ins or add custom views.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+        HStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.14))
+                    .frame(width: 42, height: 42)
+                Image(systemName: "text.badge.star")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
             }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Summary Presets")
+                    .font(.system(size: 17, weight: .semibold, design: .rounded))
+                Text("Edit built-ins or add custom views.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
             Spacer()
+
             Button("Done") { dismiss() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .modifier(PresetSheetActionPillStyle(tint: .accentColor, prominent: true))
+                .keyboardShortcut(.defaultAction)
         }
         .padding(20)
     }
 
     private var presetSidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Button("New custom preset") {
+            Button {
                 let preset = SummaryPresetLibrary.makeCustomPreset(
                     name: "Custom Summary",
                     instructions: """
@@ -2240,8 +2261,21 @@ private struct SummaryPresetManagerSheet: View {
                 appState.upsertSummaryPreset(preset)
                 selectedPresetId = preset.id
                 loadDraft(from: preset)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .bold))
+                    Text("New custom preset")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .foregroundStyle(Color.accentColor)
+                .frame(maxWidth: .infinity)
+                .frame(height: 30)
+                .background(Color.accentColor.opacity(0.10), in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.18), lineWidth: 0.7))
+                .contentShape(Capsule())
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.plain)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
@@ -2266,8 +2300,9 @@ private struct SummaryPresetManagerSheet: View {
                     Text(preset.displayName)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.primary)
+                        .lineLimit(1)
                     Text(preset.isBuiltIn ? "Built-in" : "Custom")
-                        .font(.system(size: 10))
+                        .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(.tertiary)
                 }
                 Spacer()
@@ -2277,13 +2312,22 @@ private struct SummaryPresetManagerSheet: View {
                         .foregroundStyle(Color.accentColor)
                 }
             }
-            .padding(10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
             .background(
                 selectedPresetId == preset.id
-                    ? AnyShapeStyle(Color.accentColor.opacity(0.08))
-                    : AnyShapeStyle(.quaternary.opacity(0.3))
+                    ? AnyShapeStyle(Color.accentColor.opacity(0.10))
+                    : AnyShapeStyle(Color.primary.opacity(0.045)),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
             )
-            .clipShape(.rect(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        selectedPresetId == preset.id ? Color.accentColor.opacity(0.35) : Color.white.opacity(0.06),
+                        lineWidth: 0.7
+                    )
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -2292,26 +2336,37 @@ private struct SummaryPresetManagerSheet: View {
     private var presetEditor: some View {
         VStack(alignment: .leading, spacing: 16) {
             if let preset = selectedPreset {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Preset name")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("PRESET NAME")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
+                        .tracking(0.7)
                     TextField("Preset name", text: $draftName)
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 11)
+                        .frame(height: 34)
+                        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(.white.opacity(0.07), lineWidth: 0.5)
+                        )
                 }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Instructions")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("INSTRUCTIONS")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
+                        .tracking(0.7)
                     TextEditor(text: $draftInstructions)
                         .font(.system(size: 13))
+                        .scrollContentBackground(.hidden)
                         .frame(minHeight: 260)
                         .padding(10)
-                        .background(.thinMaterial, in: .rect(cornerRadius: 12, style: .continuous))
+                        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
+                                .strokeBorder(.white.opacity(0.07), lineWidth: 0.5)
                         )
                 }
 
@@ -2325,23 +2380,37 @@ private struct SummaryPresetManagerSheet: View {
     private func presetActionButtons(_ preset: SummaryPresetDefinition) -> some View {
         HStack(spacing: 10) {
             if preset.isBuiltIn {
-                Button("Reset to default") {
+                Button {
                     appState.resetBuiltInSummaryPreset(id: preset.id)
                     if let resetPreset = appState.summaryPresetDefinitions.first(where: { $0.id == preset.id }) {
                         loadDraft(from: resetPreset)
                     }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("Reset to default")
+                    }
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .modifier(PresetSheetActionPillStyle(tint: .primary, prominent: false))
             } else {
-                Button("Delete preset", role: .destructive) {
+                Button {
                     let deletedId = preset.id
                     appState.deleteSummaryPreset(id: deletedId)
                     selectedPresetId = appState.summaryPresetDefinitions.first?.id ?? SessionSummaryPreset.general.rawValue
                     if let nextPreset = appState.summaryPresetDefinitions.first(where: { $0.id == selectedPresetId }) {
                         loadDraft(from: nextPreset)
                     }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("Delete preset")
+                    }
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .modifier(PresetSheetActionPillStyle(tint: .red, prominent: false))
             }
 
             Spacer()
@@ -2355,13 +2424,33 @@ private struct SummaryPresetManagerSheet: View {
                 appState.upsertSummaryPreset(updated)
                 loadDraft(from: updated)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.plain)
+            .modifier(PresetSheetActionPillStyle(tint: .accentColor, prominent: true))
             .disabled(draftInstructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .opacity(draftInstructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
         }
     }
 
     private func loadDraft(from preset: SummaryPresetDefinition) {
         draftName = preset.displayName
         draftInstructions = preset.instructions
+    }
+}
+
+// MARK: - Preset Sheet Styling
+
+private struct PresetSheetActionPillStyle: ViewModifier {
+    let tint: Color
+    let prominent: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(prominent ? Color.white : tint)
+            .padding(.horizontal, 14)
+            .frame(height: 30)
+            .background(prominent ? AnyShapeStyle(tint) : AnyShapeStyle(Color.primary.opacity(0.075)), in: Capsule())
+            .overlay(Capsule().strokeBorder(prominent ? tint.opacity(0.28) : .white.opacity(0.07), lineWidth: 0.6))
+            .contentShape(Capsule())
     }
 }

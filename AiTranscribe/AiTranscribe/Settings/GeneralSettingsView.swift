@@ -278,7 +278,9 @@ struct GeneralSettingsView: View {
                 width: 224
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
         .disabled(!basicBatchingEnabled)
         .opacity(basicBatchingEnabled ? 1 : 0.55)
     }
@@ -297,7 +299,9 @@ struct GeneralSettingsView: View {
                 width: 132
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
         .disabled(!basicBatchingEnabled)
         .opacity(basicBatchingEnabled ? 1 : 0.55)
     }
@@ -317,7 +321,9 @@ struct GeneralSettingsView: View {
                 width: 160
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
     }
 
     private func settingsSelectPill(title: String, icon: String, width: CGFloat) -> some View {

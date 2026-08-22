@@ -692,7 +692,9 @@ struct SessionsSettingsView: View {
                 width: 330
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
     }
 
     private var localTranscriptionModelMenu: some View {
@@ -709,7 +711,9 @@ struct SessionsSettingsView: View {
                 width: 330
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
     }
 
     private var publicSummaryModelMenu: some View {
@@ -727,7 +731,9 @@ struct SessionsSettingsView: View {
                 width: 330
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
     }
 
     private var localSummaryModelMenu: some View {
@@ -744,7 +750,9 @@ struct SessionsSettingsView: View {
                 width: 330
             )
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
     }
 
     private func automationSelectPill(title: String, icon: String, width: CGFloat) -> some View {

@@ -1279,13 +1279,14 @@ struct AddAPIModelSheet: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 formRow(label: "Provider") {
-                    Picker("Provider", selection: $providerId) {
-                        Text("OpenAI API").tag(TranscriptionProviderDescriptor.openAI.id)
-                        Text("OpenRouter").tag(TranscriptionProviderDescriptor.openRouter.id)
-                        Text("ElevenLabs").tag(TranscriptionProviderDescriptor.elevenLabs.id)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
+                    ModelSheetProviderPills(
+                        options: [
+                            (TranscriptionProviderDescriptor.openAI.id, "OpenAI API"),
+                            (TranscriptionProviderDescriptor.openRouter.id, "OpenRouter"),
+                            (TranscriptionProviderDescriptor.elevenLabs.id, "ElevenLabs")
+                        ],
+                        selection: $providerId
+                    )
                     .onChange(of: providerId) { _, newProviderId in
                         statusMessage = nil
                         statusIsError = false
@@ -1298,13 +1299,12 @@ struct AddAPIModelSheet: View {
 
                 formRow(label: "Display name") {
                     TextField(defaultDisplayName(for: providerId), text: $displayName)
-                        .textFieldStyle(.roundedBorder)
+                        .modelSheetField()
                 }
 
                 formRow(label: "Model ID") {
                     TextField(modelPlaceholder, text: $modelId)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
+                        .modelSheetField(mono: true)
                 }
 
                 if !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1323,14 +1323,13 @@ struct AddAPIModelSheet: View {
 
                 formRow(label: "Audio cost / minute") {
                     TextField(audioCostPlaceholder, text: $audioCostPerMinute)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
+                        .modelSheetField(mono: true)
                 }
 
                 formRow(label: "API key") {
                     VStack(alignment: .leading, spacing: 6) {
                         SecureField(keyPlaceholder, text: $apiKeyInput)
-                            .textFieldStyle(.roundedBorder)
+                            .modelSheetField(mono: true)
                         savedKeyIndicator(providerId: providerId, isOverriding: !apiKeyInput.isEmpty)
                     }
                 }
@@ -1355,35 +1354,39 @@ struct AddAPIModelSheet: View {
                     .foregroundStyle(statusIsError ? .red : .secondary)
             }
 
-            HStack {
+            HStack(spacing: 10) {
                 Button("Cancel") {
                     dismiss()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .modelSheetActionPill(tint: .primary)
 
                 Spacer()
 
-                Button {
+                Button("Save") {
                     saveModel()
-                } label: {
-                    Text("Save")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .modelSheetActionPill(tint: .accentColor)
                 .disabled(!canSave || isTesting)
+                .opacity(!canSave || isTesting ? 0.45 : 1)
 
                 Button {
                     Task { await testAndSaveModel() }
                 } label: {
                     if isTesting {
                         ProgressView()
-                            .scaleEffect(0.7)
-                            .frame(width: 72)
+                            .controlSize(.small)
+                            .tint(.white)
+                            .frame(width: 68)
                     } else {
                         Text("Test & Save")
                     }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .modelSheetActionPill(tint: .accentColor, prominent: true)
                 .disabled(!canSave || isTesting)
+                .opacity(!canSave && !isTesting ? 0.45 : 1)
             }
         }
         .padding(24)
@@ -1637,12 +1640,13 @@ struct AddAPILanguageModelSheet: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 formRow(label: "Provider") {
-                    Picker("Provider", selection: $providerId) {
-                        Text("OpenAI API").tag(TranscriptionProviderDescriptor.openAI.id)
-                        Text("OpenRouter").tag(TranscriptionProviderDescriptor.openRouter.id)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
+                    ModelSheetProviderPills(
+                        options: [
+                            (TranscriptionProviderDescriptor.openAI.id, "OpenAI API"),
+                            (TranscriptionProviderDescriptor.openRouter.id, "OpenRouter")
+                        ],
+                        selection: $providerId
+                    )
                     .onChange(of: providerId) { _, newProviderId in
                         statusMessage = nil
                         statusIsError = false
@@ -1655,34 +1659,30 @@ struct AddAPILanguageModelSheet: View {
 
                 formRow(label: "Display name") {
                     TextField(defaultDisplayName(for: providerId), text: $displayName)
-                        .textFieldStyle(.roundedBorder)
+                        .modelSheetField()
                 }
 
                 formRow(label: "Model ID") {
                     TextField(defaultModelId(for: providerId), text: $modelId)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
+                        .modelSheetField(mono: true)
                 }
 
                 if providerId == TranscriptionProviderDescriptor.openRouter.id {
                     formRow(label: "Only provider") {
                         TextField("cerebras", text: $openRouterProviderOnly)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12, design: .monospaced))
+                            .modelSheetField(mono: true)
                     }
                 }
 
                 HStack(spacing: 10) {
                     formRow(label: "Input $ / 1M tokens") {
                         TextField("1.25", text: $inputCostPerMillionTokens)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12, design: .monospaced))
+                            .modelSheetField(mono: true)
                     }
 
                     formRow(label: "Output $ / 1M tokens") {
                         TextField("5.00", text: $outputCostPerMillionTokens)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12, design: .monospaced))
+                            .modelSheetField(mono: true)
                     }
                 }
 
@@ -1700,7 +1700,7 @@ struct AddAPILanguageModelSheet: View {
                 formRow(label: "API key") {
                     VStack(alignment: .leading, spacing: 6) {
                         SecureField(keyPlaceholder, text: $apiKeyInput)
-                            .textFieldStyle(.roundedBorder)
+                            .modelSheetField(mono: true)
                         savedKeyIndicator(providerId: providerId, isOverriding: !apiKeyInput.isEmpty)
                     }
                 }
@@ -1729,35 +1729,39 @@ struct AddAPILanguageModelSheet: View {
                     .foregroundStyle(statusIsError ? .red : .secondary)
             }
 
-            HStack {
+            HStack(spacing: 10) {
                 Button("Cancel") {
                     dismiss()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .modelSheetActionPill(tint: .primary)
 
                 Spacer()
 
-                Button {
+                Button("Save") {
                     saveModel()
-                } label: {
-                    Text("Save")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .modelSheetActionPill(tint: .accentColor)
                 .disabled(!canSave || isTesting)
+                .opacity(!canSave || isTesting ? 0.45 : 1)
 
                 Button {
                     Task { await testAndSaveModel() }
                 } label: {
                     if isTesting {
                         ProgressView()
-                            .scaleEffect(0.7)
-                            .frame(width: 72)
+                            .controlSize(.small)
+                            .tint(.white)
+                            .frame(width: 68)
                     } else {
                         Text("Test & Save")
                     }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .modelSheetActionPill(tint: .accentColor, prominent: true)
                 .disabled(!canSave || isTesting)
+                .opacity(!canSave && !isTesting ? 0.45 : 1)
             }
         }
         .padding(24)
@@ -2478,5 +2482,79 @@ struct LanguageGridView: View {
         }
         .padding(10)
         .background(.thinMaterial, in: .rect(cornerRadius: 8, style: .continuous))
+    }
+}
+
+// MARK: - Model Sheet Shared Styling
+
+struct ModelSheetProviderPills: View {
+    let options: [(id: String, title: String)]
+    @Binding var selection: String
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options, id: \.id) { option in
+                let selected = selection == option.id
+                Button {
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        selection = option.id
+                    }
+                } label: {
+                    Text(option.title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(selected ? .white : .secondary)
+                        .padding(.horizontal, 14)
+                        .frame(height: 26)
+                        .background(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+}
+
+struct ModelSheetFieldStyle: ViewModifier {
+    var mono = false
+
+    func body(content: Content) -> some View {
+        content
+            .textFieldStyle(.plain)
+            .font(mono ? .system(size: 12, design: .monospaced) : .system(size: 12, weight: .medium))
+            .padding(.horizontal, 11)
+            .frame(height: 34)
+            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(.white.opacity(0.07), lineWidth: 0.5)
+            )
+    }
+}
+
+struct ModelSheetActionPillStyle: ViewModifier {
+    let tint: Color
+    let prominent: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(prominent ? Color.white : tint)
+            .padding(.horizontal, 14)
+            .frame(height: 30)
+            .background(prominent ? AnyShapeStyle(tint) : AnyShapeStyle(Color.primary.opacity(0.075)), in: Capsule())
+            .overlay(Capsule().strokeBorder(prominent ? tint.opacity(0.28) : .white.opacity(0.07), lineWidth: 0.6))
+            .contentShape(Capsule())
+    }
+}
+
+extension View {
+    func modelSheetField(mono: Bool = false) -> some View {
+        modifier(ModelSheetFieldStyle(mono: mono))
+    }
+
+    func modelSheetActionPill(tint: Color, prominent: Bool = false) -> some View {
+        modifier(ModelSheetActionPillStyle(tint: tint, prominent: prominent))
     }
 }
