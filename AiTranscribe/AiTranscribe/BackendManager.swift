@@ -173,6 +173,15 @@ class BackendManager: ObservableObject {
     /// Whether we're intentionally stopping (don't restart)
     private var isIntentionallyStopping = false
 
+    /// Whether an async start (port cleanup + launch) is already in flight
+    private var isStarting = false
+
+    /// Log entries buffered until the next batched flush into `logs`
+    private var pendingLogEntries: [LogEntry] = []
+
+    /// Whether a batched log flush is already scheduled
+    private var isLogFlushScheduled = false
+
     // =========================================================================
     // INITIALIZATION
     // =========================================================================
@@ -344,41 +353,43 @@ class BackendManager: ObservableObject {
     }
 
     /// Kill any existing process using the AiTranscribe backend port.
-    /// This prevents "address already in use" errors when restarting
-    private func killExistingBackendProcess() {
+    /// This prevents "address already in use" errors when restarting.
+    /// Runs the kill commands off the main actor so the UI never freezes.
+    private func killExistingBackendProcess() async {
         // First try graceful SIGTERM
-        let termTask = Process()
-        termTask.executableURL = URL(fileURLWithPath: "/bin/sh")
-        termTask.arguments = ["-c", "lsof -ti:\(BackendPort.value) | xargs kill -15 2>/dev/null"]
-
-        do {
-            try termTask.run()
-            termTask.waitUntilExit()
-            if termTask.terminationStatus == 0 {
-                // Give the process time to clean up gracefully
-                Thread.sleep(forTimeInterval: 1.0)
-            }
-        } catch {
-            // Ignore errors
+        let termStatus = await Self.runShellCommand("lsof -ti:\(BackendPort.value) | xargs kill -15 2>/dev/null")
+        if termStatus == 0 {
+            // Give the process time to clean up gracefully
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
 
         // Now forcefully kill any remaining processes
-        let killTask = Process()
-        killTask.executableURL = URL(fileURLWithPath: "/bin/sh")
-        killTask.arguments = ["-c", "lsof -ti:\(BackendPort.value) | xargs kill -9 2>/dev/null"]
-
-        do {
-            try killTask.run()
-            killTask.waitUntilExit()
-            if killTask.terminationStatus == 0 {
-                addLog("Killed existing process on port \(BackendPort.value)", level: .debug)
-            }
-        } catch {
-            // Ignore errors - no process to kill is fine
+        let killStatus = await Self.runShellCommand("lsof -ti:\(BackendPort.value) | xargs kill -9 2>/dev/null")
+        if killStatus == 0 {
+            addLog("Killed existing process on port \(BackendPort.value)", level: .debug)
         }
 
         // Wait for port to be fully released (important for NeMo's heavy resources)
-        Thread.sleep(forTimeInterval: 1.0)
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+    }
+
+    /// Run a shell command without blocking the main actor, returning its exit status.
+    /// Returns -1 if the process could not be launched (no process to kill is fine).
+    private nonisolated static func runShellCommand(_ command: String) async -> Int32 {
+        await withCheckedContinuation { continuation in
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/bin/sh")
+            task.arguments = ["-c", command]
+            task.terminationHandler = { proc in
+                continuation.resume(returning: proc.terminationStatus)
+            }
+            do {
+                try task.run()
+            } catch {
+                task.terminationHandler = nil
+                continuation.resume(returning: -1)
+            }
+        }
     }
 
     /// Start the backend server
@@ -387,12 +398,29 @@ class BackendManager: ObservableObject {
             addLog("Backend already running", level: .warning)
             return
         }
+        guard !isStarting else {
+            addLog("Backend start already in progress", level: .debug)
+            return
+        }
 
+        isStarting = true
         isIntentionallyStopping = false
+        statusMessage = "Starting..."
 
-        // Kill any existing AiTranscribe backend process to prevent "address already in use" errors.
-        killExistingBackendProcess()
+        Task {
+            // Kill any existing AiTranscribe backend process to prevent "address already in use"
+            // errors. This must finish before the new process launches so the port is free.
+            await killExistingBackendProcess()
+            isStarting = false
 
+            // Bail if stop() was called while we were freeing the port
+            guard !isIntentionallyStopping else { return }
+            launchBackendProcess()
+        }
+    }
+
+    /// Launch the backend process. The port must already be free when this is called.
+    private func launchBackendProcess() {
         // Determine which mode to use if not explicitly set
         if currentBackendMode == .development && isProductionBuild {
             currentBackendMode = determineBestMode()
@@ -427,7 +455,7 @@ class BackendManager: ObservableObject {
             guard nemoVenvExists else {
                 addLog("NeMo venv not found, falling back to development mode", level: .warning)
                 currentBackendMode = .development
-                start()
+                launchBackendProcess()
                 return
             }
 
@@ -592,6 +620,10 @@ class BackendManager: ObservableObject {
         // Clean up pipes
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
+
+        // Flush buffered log lines now — at app termination the delayed
+        // flush task may never get a chance to run
+        flushPendingLogs()
     }
 
     /// Restart the backend
@@ -685,7 +717,7 @@ class BackendManager: ObservableObject {
         process = nil
 
         // Kill any remaining process on the port
-        killExistingBackendProcess()
+        await killExistingBackendProcess()
 
         addLog("Backend stopped, ready for restart", level: .info)
     }
@@ -718,10 +750,33 @@ class BackendManager: ObservableObject {
         }
     }
 
-    /// Add a log entry
+    /// Add a log entry. Entries are buffered and flushed into the published `logs`
+    /// array at most every 200ms, so a burst of backend output (uvicorn/MLX startup
+    /// can emit 40+ lines per chunk) triggers one SwiftUI invalidation, not dozens.
     private func addLog(_ message: String, level: LogEntry.LogLevel, source: LogEntry.LogSource = .backend) {
         let entry = LogEntry(timestamp: Date(), level: level, message: message, source: source)
-        logs.append(entry)
+        pendingLogEntries.append(entry)
+        scheduleLogFlush()
+    }
+
+    /// Schedule a batched flush of pending log entries (no-op if one is already scheduled)
+    private func scheduleLogFlush() {
+        guard !isLogFlushScheduled else { return }
+        isLogFlushScheduled = true
+
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
+            guard let self = self else { return }
+            self.isLogFlushScheduled = false
+            self.flushPendingLogs()
+        }
+    }
+
+    /// Move buffered log entries into the published `logs` array
+    private func flushPendingLogs() {
+        guard !pendingLogEntries.isEmpty else { return }
+        logs.append(contentsOf: pendingLogEntries)
+        pendingLogEntries.removeAll()
 
         // Trim old logs if needed
         if logs.count > maxLogEntries {
@@ -735,6 +790,7 @@ class BackendManager: ObservableObject {
 
     /// Clear all logs
     func clearLogs() {
+        pendingLogEntries.removeAll()
         logs.removeAll()
         addLog("Logs cleared", level: .info)
     }
@@ -749,6 +805,8 @@ class BackendManager: ObservableObject {
 
     /// Get all logs as a single string (for copying)
     func logsAsString() -> String {
+        flushPendingLogs()
+
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
 

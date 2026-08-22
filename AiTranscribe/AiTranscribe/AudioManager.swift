@@ -4,7 +4,8 @@
 
  Manages audio output ducking/muting during recording.
 
- Uses AppleScript commands for system volume control.
+ Uses CoreAudio for system volume control (no process spawns on the hot path),
+ with an AppleScript fallback for devices that don't expose a settable output volume.
  No additional permissions required.
 
  Thread-safe with MainActor isolation for UI updates.
@@ -12,6 +13,7 @@
 
 import Foundation
 import Combine
+import CoreAudio
 
 /// Manages audio ducking for clean recordings during recording sessions
 @MainActor
@@ -49,17 +51,7 @@ final class AudioManager: ObservableObject {
         // This is safe because deinit only runs when the object is being destroyed
         // and no other code can access it
         if isInRecordingSession {
-            let targetVolume = Int(originalVolume * 100)
-            let script = "set volume output volume \(targetVolume)"
-            
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            task.arguments = ["-e", script]
-            task.standardOutput = Pipe()
-            task.standardError = Pipe()
-            
-            try? task.run()
-            task.waitUntilExit()
+            _ = AudioManager.writeCoreAudioVolume(originalVolume)
         }
     }
     
@@ -207,6 +199,35 @@ final class AudioManager: ObservableObject {
     
     /// Get current system output volume (0.0 to 1.0)
     private func getSystemVolume() -> Float {
+        if let volume = Self.readCoreAudioVolume() {
+            return volume
+        }
+        return getSystemVolumeViaOSAScript()
+    }
+
+    /// Apply volume change
+    /// - Parameter percentage: Target volume percentage (0.0 to 100.0)
+    private func applyVolumeChange(to percentage: Double) {
+        let clampedPercentage = max(0.0, min(100.0, percentage))
+
+        if Self.writeCoreAudioVolume(Float(clampedPercentage / 100.0)) {
+            return
+        }
+        applyVolumeChangeViaOSAScript(to: clampedPercentage)
+    }
+
+    /// Restore to the original volume that was stored before ducking
+    private func restoreToOriginalVolume() {
+        if Self.writeCoreAudioVolume(originalVolume) {
+            return
+        }
+        restoreToOriginalVolumeViaOSAScript()
+    }
+
+    // MARK: - Private Methods - AppleScript Fallback
+
+    /// Get current system output volume via osascript (0.0 to 1.0)
+    private func getSystemVolumeViaOSAScript() -> Float {
         let task = Process()
         let outputPipe = Pipe()
         
@@ -240,7 +261,7 @@ final class AudioManager: ObservableObject {
     
     /// Apply volume change using AppleScript
     /// - Parameter percentage: Target volume percentage (0.0 to 100.0)
-    private func applyVolumeChange(to percentage: Double) {
+    private func applyVolumeChangeViaOSAScript(to percentage: Double) {
         let clampedPercentage = max(0.0, min(100.0, percentage))
         let volumeInt = Int(clampedPercentage)
         
@@ -265,8 +286,8 @@ final class AudioManager: ObservableObject {
         }
     }
     
-    /// Restore to the original volume that was stored before ducking
-    private func restoreToOriginalVolume() {
+    /// Restore to the original volume via osascript
+    private func restoreToOriginalVolumeViaOSAScript() {
         let targetVolume = Int(originalVolume * 100)
         
         let script = "set volume output volume \(targetVolume)"
@@ -287,5 +308,100 @@ final class AudioManager: ObservableObject {
         } catch {
             print("AudioManager: Error restoring volume: \(error)")
         }
+    }
+
+    // MARK: - Private Methods - CoreAudio Fast Path
+
+    /// Same FourCC as kAudioHardwareServiceDeviceProperty_VirtualMainVolume ('vmvc'),
+    /// defined locally so we only use the non-deprecated AudioObject APIs
+    private nonisolated static let virtualMainVolumeSelector = AudioObjectPropertySelector(0x766D_7663)
+
+    /// Resolve the current default output device
+    private nonisolated static func defaultOutputDeviceID() -> AudioDeviceID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var deviceID = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID
+        )
+        guard status == noErr, deviceID != kAudioObjectUnknown else { return nil }
+        return deviceID
+    }
+
+    /// Read output volume via CoreAudio (0.0 to 1.0), or nil if unavailable
+    private nonisolated static func readCoreAudioVolume() -> Float? {
+        guard let deviceID = defaultOutputDeviceID() else { return nil }
+
+        var volume = Float32(0)
+        var size = UInt32(MemoryLayout<Float32>.size)
+
+        // Prefer the virtual main (master) volume
+        var address = AudioObjectPropertyAddress(
+            mSelector: virtualMainVolumeSelector,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if AudioObjectHasProperty(deviceID, &address),
+           AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &volume) == noErr {
+            return max(0.0, min(1.0, volume))
+        }
+
+        // Fall back to channel 1's scalar volume
+        address.mSelector = kAudioDevicePropertyVolumeScalar
+        address.mElement = 1
+        size = UInt32(MemoryLayout<Float32>.size)
+        if AudioObjectHasProperty(deviceID, &address),
+           AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &volume) == noErr {
+            return max(0.0, min(1.0, volume))
+        }
+
+        return nil
+    }
+
+    /// Write output volume via CoreAudio (0.0 to 1.0), returns false if unavailable
+    private nonisolated static func writeCoreAudioVolume(_ volume: Float) -> Bool {
+        guard let deviceID = defaultOutputDeviceID() else { return false }
+
+        var clamped = Float32(max(0.0, min(1.0, volume)))
+        let size = UInt32(MemoryLayout<Float32>.size)
+
+        // Prefer the virtual main (master) volume
+        var address = AudioObjectPropertyAddress(
+            mSelector: virtualMainVolumeSelector,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if isPropertySettable(deviceID, &address),
+           AudioObjectSetPropertyData(deviceID, &address, 0, nil, size, &clamped) == noErr {
+            return true
+        }
+
+        // Fall back to per-channel scalar volume (channels 1 and 2)
+        var didSet = false
+        for channel: UInt32 in 1...2 {
+            address.mSelector = kAudioDevicePropertyVolumeScalar
+            address.mElement = channel
+            if isPropertySettable(deviceID, &address),
+               AudioObjectSetPropertyData(deviceID, &address, 0, nil, size, &clamped) == noErr {
+                didSet = true
+            }
+        }
+        return didSet
+    }
+
+    /// Check that a property exists and is settable on the device
+    private nonisolated static func isPropertySettable(
+        _ deviceID: AudioDeviceID,
+        _ address: inout AudioObjectPropertyAddress
+    ) -> Bool {
+        guard AudioObjectHasProperty(deviceID, &address) else { return false }
+        var settable = DarwinBoolean(false)
+        let status = AudioObjectIsPropertySettable(deviceID, &address, &settable)
+        return status == noErr && settable.boolValue
     }
 }

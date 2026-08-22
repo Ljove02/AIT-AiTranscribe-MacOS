@@ -608,9 +608,14 @@ class AppState: ObservableObject {
         }
     }
 
-    /// Load all history entries (for stats computation)
+    /// Load all history entries (for stats computation) — served from the in-memory store
     func loadAllHistoryEntries() async -> [TranscriptionEntry] {
-        await historyManager.loadAllEntriesDetached()
+        await historyManager.loadAllEntries()
+    }
+
+    /// Flush any pending history writes to disk (for app termination)
+    func flushHistoryWrites() async {
+        await historyManager.flushPendingWrites()
     }
 
     /// Clear all history

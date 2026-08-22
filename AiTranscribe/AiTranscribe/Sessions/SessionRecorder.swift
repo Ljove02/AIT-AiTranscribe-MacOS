@@ -47,7 +47,9 @@ import AVFAudio
 
 /// Records both system audio and microphone into a single M4A file
 class SessionRecorder: NSObject, ObservableObject {
-    private struct AudioLevelAnalysis {
+    /// nonisolated: built and consumed on the detached diagnostics task, so
+    /// the memberwise init must not be main-actor isolated.
+    private nonisolated struct AudioLevelAnalysis {
         let activeRMS: Float
         /// RMS over every sample, ungated. Kept for diagnostics: comparing it
         /// against activeRMS shows how much of the track is silence.
@@ -72,7 +74,7 @@ class SessionRecorder: NSObject, ObservableObject {
         return String(cString: bytes)
     }
 
-    private static func clampUnit(_ value: Float) -> Float {
+    private nonisolated static func clampUnit(_ value: Float) -> Float {
         min(max(value, -1.0), 1.0)
     }
 
@@ -289,7 +291,6 @@ class SessionRecorder: NSObject, ObservableObject {
 
     @Published var isRecording = false
     @Published var duration: TimeInterval = 0
-    @Published var micVolume: Float = 0
 
     /// Live meter readings in dBFS, for the indicator and the mixer.
     @Published var micLevel: AudioLevelReading = .silent
@@ -340,6 +341,9 @@ class SessionRecorder: NSObject, ObservableObject {
 
     private var tempMicURL: URL?      // Temporary mic_temp.caf
     private var tempSysURL: URL?      // Temporary sys_temp.caf
+    /// The detached level scan for the current export. Held so temp-track
+    /// deletion can wait for it instead of racing it.
+    private var levelDiagnosticsTask: Task<Void, Never>?
     private var durationTimer: Timer?
     private var startTime: Date?
 
@@ -420,6 +424,7 @@ class SessionRecorder: NSObject, ObservableObject {
         analyzedMixMicPeak = 0
         analyzedMixSystemRMS = 0
         analyzedMixSystemPeak = 0
+        levelDiagnosticsTask = nil
 
         // System audio capture via ScreenCaptureKit.
         // Only attempt if Screen Recording permission is already granted.
@@ -519,7 +524,6 @@ class SessionRecorder: NSObject, ObservableObject {
 
         isRecording = false
         hasSystemAudio = false
-        micVolume = 0
 
         if let start = startTime {
             duration = Date().timeIntervalSince(start)
@@ -547,9 +551,18 @@ class SessionRecorder: NSObject, ObservableObject {
                 // source actually contributed, so keep the separate tracks.
                 print("SessionRecorder: sessionKeepTempTracks set — preserving mic/system tracks")
             } else {
-                try? FileManager.default.removeItem(at: micURL)
-                if let sysURL = tempSysURL {
-                    try? FileManager.default.removeItem(at: sysURL)
+                // The detached level scan may still be reading these tracks,
+                // so deletion waits for it off the main actor. Captures are
+                // plain URLs; session directories are unique per session, so
+                // this can never touch a later recording's files.
+                let diagnostics = levelDiagnosticsTask
+                let sysURL = tempSysURL
+                Task.detached(priority: .utility) {
+                    await diagnostics?.value
+                    try? FileManager.default.removeItem(at: micURL)
+                    if let sysURL {
+                        try? FileManager.default.removeItem(at: sysURL)
+                    }
                 }
             }
             print("SessionRecorder: Recording stopped. Duration: \(Self.formatDuration(duration))")
@@ -587,7 +600,6 @@ class SessionRecorder: NSObject, ObservableObject {
 
         isRecording = false
         hasSystemAudio = false
-        micVolume = 0
         duration = 0
         startTime = nil
 
@@ -656,7 +668,7 @@ class SessionRecorder: NSObject, ObservableObject {
         var systemSumSquares = 0.0
         var systemPeak: Float = 0
         var systemCount = 0
-        enumerateMonoSamples(in: pcmBuffer) { sample in
+        Self.enumerateMonoSamples(in: pcmBuffer) { sample in
             systemSumSquares += Double(sample) * Double(sample)
             systemPeak = max(systemPeak, abs(sample))
             systemCount += 1
@@ -779,9 +791,6 @@ class SessionRecorder: NSObject, ObservableObject {
             }
         }
 
-        // Update volume meter
-        updateMicVolume(from: pcmBuffer)
-
         // Write directly — only this callback writes to micFile
         guard let micFile else { return }
         do {
@@ -800,29 +809,6 @@ class SessionRecorder: NSObject, ObservableObject {
         micCapture.stop()
         micFileCreated = false
         print("SessionRecorder: Mic stopped (total frames written: \(micFramesWritten))")
-    }
-
-    private func updateMicVolume(from buffer: AVAudioPCMBuffer) {
-        guard let channelData = buffer.floatChannelData?[0] else { return }
-        let frameCount = Int(buffer.frameLength)
-        guard frameCount > 0 else { return }
-
-        var sum: Float = 0
-        for i in 0..<frameCount {
-            let sample = channelData[i]
-            sum += sample * sample
-        }
-        let rms = sqrt(sum / Float(frameCount))
-
-        // The buffer is now at its true level (gain moved to mix time), so the
-        // meter compensates on its own to stay as responsive as before.
-        let noiseGateThreshold: Float = 0.004
-        let gatedRMS = rms > noiseGateThreshold ? rms : 0
-        let scaledVolume = min(gatedRMS * 6.0, 1.0)
-
-        Task { @MainActor in
-            self.micVolume = scaledVolume
-        }
     }
 
     private func exportRecordedAudio(micURL: URL, sysURL: URL?, outputURL: URL) async -> Bool {
@@ -931,7 +917,7 @@ class SessionRecorder: NSObject, ObservableObject {
 
     // MARK: - Post-Recording: Mix and Convert
 
-    private func enumerateMonoSamples(in buffer: AVAudioPCMBuffer, _ body: (Float) -> Void) {
+    private nonisolated static func enumerateMonoSamples(in buffer: AVAudioPCMBuffer, _ body: (Float) -> Void) {
         let format = buffer.format
         let frames = Int(buffer.frameLength)
         guard frames > 0 else { return }
@@ -1045,14 +1031,22 @@ class SessionRecorder: NSObject, ObservableObject {
         }
     }
 
-    /// Scans a file once, accumulating level statistics. When `gate` is nil it
-    /// measures the ungated RMS and peak; when supplied, it measures RMS over
-    /// samples at or above the gate plus a peak-normalised magnitude histogram.
-    private func scanAudioLevels(
-        at url: URL,
-        gate: Float?,
-        peakReference: Float
-    ) -> (rms: Double, peak: Float, samples: Int64, gated: Int64, loudPeak: Float)? {
+    /// Measures a track's speech level using a gate placed relative to the
+    /// track's own loudness (-10 dB below ungated RMS, mirroring EBU R128
+    /// relative gating) rather than at a fixed magnitude, so the measurement
+    /// stays scale-invariant: halving the input exactly halves the result.
+    ///
+    /// The gate depends on the ungated RMS, which is only known once the
+    /// whole file has been read — but instead of a second full pass, the
+    /// single scan keeps a log-spaced magnitude histogram (count and sum of
+    /// squares per bin) and derives the gated numbers from it afterwards.
+    /// Bins are the float's exponent plus top mantissa bits (~0.05 dB wide),
+    /// so a quiet file gets the same relative resolution as a loud one — the
+    /// same property the old peak-scaled linear histogram was built for.
+    ///
+    /// nonisolated static: runs on the detached diagnostics task, off the
+    /// main actor, and must not touch recorder state.
+    private nonisolated static func analyzeAudioLevels(at url: URL) -> AudioLevelAnalysis? {
         do {
             let audioFile = try AVAudioFile(forReading: url)
             let chunkSize: AVAudioFrameCount = 8192
@@ -1062,15 +1056,14 @@ class SessionRecorder: NSObject, ObservableObject {
             ) else { return nil }
 
             var totalSamples: Int64 = 0
-            var gatedSamples: Int64 = 0
             var sumSquares: Double = 0
-            var gatedSumSquares: Double = 0
             var peak: Float = 0
-            let histogramBins = 2048
-            var histogram = [Int64](repeating: 0, count: histogramBins)
-            // Bin against the measured peak rather than full scale, so a quiet
-            // file gets the same histogram resolution as a loud one.
-            let binScale = Float(histogramBins - 1) / max(peakReference, 1e-9)
+            // Top 15 bits of the float's bit pattern (8 exponent + 7 mantissa)
+            // give monotonic, log-spaced bins covering every magnitude.
+            let binShift: UInt32 = 17
+            let histogramBins = 16384
+            var counts = [Int64](repeating: 0, count: histogramBins)
+            var squares = [Double](repeating: 0, count: histogramBins)
 
             while true {
                 do {
@@ -1091,71 +1084,59 @@ class SessionRecorder: NSObject, ObservableObject {
                     totalSamples += 1
                     sumSquares += square
                     peak = max(peak, magnitude)
-
-                    if let gate, magnitude >= gate {
-                        gatedSamples += 1
-                        gatedSumSquares += square
-                        let bin = min(Int(magnitude * binScale), histogramBins - 1)
-                        histogram[bin] += 1
-                    }
+                    let bin = min(Int(magnitude.bitPattern >> binShift), histogramBins - 1)
+                    counts[bin] += 1
+                    squares[bin] += square
                 }
             }
 
-            guard totalSamples > 0 else { return nil }
+            guard totalSamples > 0, peak > 0 else { return nil }
 
-            // 99.9th percentile over gated samples, so one transient cannot set
-            // the gain for a whole session.
+            let ungatedRMS = sqrt(sumSquares / Double(totalSamples))
+            let gate = max(Float(ungatedRMS) * 0.316, 1e-7)
+            // The gate lands inside one ~0.05 dB bin; the whole bin counts as
+            // gated, which is well inside diagnostic tolerance.
+            let gateBin = min(Int(gate.bitPattern >> binShift), histogramBins - 1)
+
+            var gatedSamples: Int64 = 0
+            var gatedSumSquares: Double = 0
+            for bin in gateBin..<histogramBins {
+                gatedSamples += counts[bin]
+                gatedSumSquares += squares[bin]
+            }
+
+            // 99.9th percentile over gated samples, so one transient cannot
+            // dominate the reported loudness for a whole session.
             var loudPeak = peak
             if gatedSamples > 0 {
                 let target = Int64(Double(gatedSamples) * 0.999)
                 var cumulative: Int64 = 0
-                for (bin, count) in histogram.enumerated() where count > 0 {
-                    cumulative += count
+                for bin in gateBin..<histogramBins where counts[bin] > 0 {
+                    cumulative += counts[bin]
                     if cumulative >= target {
-                        loudPeak = min(Float(bin + 1) / binScale, peak)
+                        // Upper edge of the bin, reconstructed from its bits.
+                        loudPeak = min(Float(bitPattern: UInt32(bin + 1) << binShift), peak)
                         break
                     }
                 }
             }
 
-            let rms = gatedSamples > 0
+            let activeRMS = gatedSamples > 0
                 ? sqrt(gatedSumSquares / Double(gatedSamples))
-                : sqrt(sumSquares / Double(totalSamples))
+                : ungatedRMS
 
-            return (rms, peak, totalSamples, gatedSamples, loudPeak)
+            return AudioLevelAnalysis(
+                activeRMS: Float(activeRMS),
+                ungatedRMS: Float(ungatedRMS),
+                peak: peak,
+                loudPeak: loudPeak,
+                activeSamples: gatedSamples,
+                totalSamples: totalSamples
+            )
         } catch {
             print("SessionRecorder: Failed to analyze levels for \(url.lastPathComponent): \(error)")
             return nil
         }
-    }
-
-    /// Measures a track's speech level using a gate placed relative to the
-    /// track's own loudness (-10 dB below ungated RMS, mirroring EBU R128
-    /// relative gating) rather than at a fixed magnitude.
-    ///
-    /// This matters because the result feeds a make-up gain calculation. A
-    /// fixed gate is not scale-invariant: quieter recordings fall further
-    /// below it, so more of the speech is excluded, the level reads too high
-    /// and the gain comes out too small — the quieter the input, the worse the
-    /// error. A relative gate scales with the signal, so halving the input
-    /// exactly halves the measurement and doubles the resulting gain.
-    private func analyzeAudioLevels(at url: URL) -> AudioLevelAnalysis? {
-        guard let coarse = scanAudioLevels(at: url, gate: nil, peakReference: 1.0),
-              coarse.samples > 0, coarse.peak > 0 else { return nil }
-
-        let gate = max(Float(coarse.rms) * 0.316, 1e-7)
-        guard let gated = scanAudioLevels(at: url, gate: gate, peakReference: coarse.peak) else {
-            return nil
-        }
-
-        return AudioLevelAnalysis(
-            activeRMS: Float(gated.rms),
-            ungatedRMS: Float(coarse.rms),
-            peak: coarse.peak,
-            loudPeak: gated.loudPeak,
-            activeSamples: gated.gated,
-            totalSamples: coarse.samples
-        )
     }
 
     /// Applies make-up gain and a soft limiter to one buffer of the 32-bit
@@ -1212,16 +1193,23 @@ class SessionRecorder: NSObject, ObservableObject {
     /// Records what each track actually captured, next to the recording.
     /// Nothing acts on these numbers any more; they exist so a session that
     /// came out wrong can be diagnosed after the fact instead of guessed at.
+    ///
+    /// The scan reads both tracks end to end — seconds of work for a long
+    /// session — so it runs detached rather than stalling stop/export on the
+    /// main thread. `stopRecording` awaits `levelDiagnosticsTask` before
+    /// deleting the temp tracks, so the scan never races their removal.
     private func logCapturedLevels(micURL: URL, sysURL: URL) {
-        let mic = analyzeAudioLevels(at: micURL)
-        let sys = analyzeAudioLevels(at: sysURL)
-        var lines = ["path=mix"]
-        lines.append(contentsOf: describe("mic", mic))
-        lines.append(contentsOf: describe("sys", sys))
-        writeLevelDiagnostics(lines, nextTo: micURL)
+        levelDiagnosticsTask = Task.detached(priority: .utility) {
+            let mic = SessionRecorder.analyzeAudioLevels(at: micURL)
+            let sys = SessionRecorder.analyzeAudioLevels(at: sysURL)
+            var lines = ["path=mix"]
+            lines.append(contentsOf: SessionRecorder.describe("mic", mic))
+            lines.append(contentsOf: SessionRecorder.describe("sys", sys))
+            SessionRecorder.writeLevelDiagnostics(lines, nextTo: micURL)
+        }
     }
 
-    private func writeLevelDiagnostics(_ lines: [String], nextTo url: URL) {
+    private nonisolated static func writeLevelDiagnostics(_ lines: [String], nextTo url: URL) {
         let destination = url
             .deletingLastPathComponent()
             .appendingPathComponent("audio_levels.txt")
@@ -1229,7 +1217,7 @@ class SessionRecorder: NSObject, ObservableObject {
         try? text.write(to: destination, atomically: true, encoding: .utf8)
     }
 
-    private func describe(_ label: String, _ analysis: AudioLevelAnalysis?) -> [String] {
+    private nonisolated static func describe(_ label: String, _ analysis: AudioLevelAnalysis?) -> [String] {
         guard let analysis else { return ["\(label)=nil"] }
         let activeFraction = analysis.totalSamples > 0
             ? Double(analysis.activeSamples) / Double(analysis.totalSamples)

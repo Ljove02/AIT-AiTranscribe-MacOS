@@ -61,16 +61,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Gracefully stop session recording before app quits
+    /// Gracefully stop session recording and flush pending history writes
+    /// before app quits — history saves persist on a background chain, so an
+    /// immediate terminate could drop the most recent entry.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let sessionManager = SessionManager.shared
         guard sessionManager.isSessionRecording else {
-            return .terminateNow
+            Task { @MainActor in
+                await AppState.shared.flushHistoryWrites()
+                NSApplication.shared.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
         }
 
         // Stop session recording before quitting
         Task { @MainActor in
             await sessionManager.stopSessionRecording()
+            await AppState.shared.flushHistoryWrites()
             try? await Task.sleep(for: .milliseconds(500))
             NSApplication.shared.reply(toApplicationShouldTerminate: true)
         }

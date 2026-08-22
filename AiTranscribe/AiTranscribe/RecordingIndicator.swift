@@ -667,9 +667,14 @@ struct RecordingIndicatorView: View {
     @State private var waveSpawnTimes: [Date] = []
 
     /// Continuous liquid phase for Glow. Speed changes with voice, position does not jump.
-    @State private var fluidPhase: Double = 0
-    @State private var fluidSpeed: Double = 0.72
-    @State private var lastFluidPhaseDate: Date?
+    /// Reference type: the phase integrates once per timeline frame, and writing
+    /// @State from inside a frame would schedule a second render every frame.
+    private final class FluidPhaseState {
+        var phase: Double = 0
+        var speed: Double = 0.72
+        var lastDate: Date?
+    }
+    @State private var fluidState = FluidPhaseState()
 
     /// Detect light/dark mode
     @Environment(\.colorScheme) private var colorScheme
@@ -718,8 +723,12 @@ struct RecordingIndicatorView: View {
     private let volumeThreshold: CGFloat = 0.10
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: nil, paused: false)) { timeline in
+        // 30fps is enough for the wave/dot animations, and pausing whenever the
+        // controller has nothing animating keeps a window that outlives orderOut
+        // from rendering forever off-screen.
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !controller.animationsActive)) { timeline in
             let now = timeline.date
+            let fluidPhase = advanceFluidPhase(now: now)
 
             ZStack(alignment: isPolishMorphing ? .top : .center) {
                 if isPolishReader {
@@ -728,7 +737,7 @@ struct RecordingIndicatorView: View {
                 }
 
                 if !isPolishReader || isPolishWaitingForOutput {
-                    indicatorCore(now: now)
+                    indicatorCore(now: now, fluidPhase: fluidPhase)
                         .frame(width: 64, height: 36)
                         .padding(.top, isPolishMorphing ? 5 : 0)
                 }
@@ -744,14 +753,11 @@ struct RecordingIndicatorView: View {
             .clipShape(RoundedRectangle(cornerRadius: glassCornerRadius, style: .continuous))
             .scaleEffect(appearScale)
             .opacity(appearOpacity)
-            .onChange(of: now) { _, updatedNow in
-                updateFluidPhase(now: updatedNow)
-            }
         }
         .onAppear {
             let now = Date()
             animationStartTime = now
-            lastFluidPhaseDate = now
+            fluidState.lastDate = now
             if !hasAppeared {
                 appearScale = 0.3
                 appearOpacity = 0
@@ -767,7 +773,7 @@ struct RecordingIndicatorView: View {
         .onDisappear {
             hasAppeared = false
             waveSpawnTimes.removeAll()
-            lastFluidPhaseDate = nil
+            fluidState.lastDate = nil
         }
         .onChange(of: controller.currentVolume) { _, newVolume in
             if !controller.isTranscribing {
@@ -779,7 +785,7 @@ struct RecordingIndicatorView: View {
             if isTranscribing {
                 waveSpawnTimes.removeAll()
                 smoothedVolume = 0
-                lastFluidPhaseDate = nil
+                fluidState.lastDate = nil
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     animationStartTime = Date()
                     showTranscriptionDots = true
@@ -799,7 +805,7 @@ struct RecordingIndicatorView: View {
     }
 
     @ViewBuilder
-    private func indicatorCore(now: Date) -> some View {
+    private func indicatorCore(now: Date, fluidPhase: Double) -> some View {
         RecordingIndicatorMiniVisual(
             style: indicatorStyle,
             level: isPolishMorphing ? 0 : smoothedVolume,
@@ -937,33 +943,36 @@ struct RecordingIndicatorView: View {
         smoothedVolume = newSmoothed
     }
 
-    private func updateFluidPhase(now: Date) {
+    private func advanceFluidPhase(now: Date) -> Double {
+        let state = fluidState
+
         guard indicatorStyle.isLiquid, !showTranscriptionDots, !isPolishLoaderOnly else {
-            lastFluidPhaseDate = now
-            return
+            state.lastDate = now
+            return state.phase
         }
 
-        guard let lastFluidPhaseDate else {
-            self.lastFluidPhaseDate = now
-            return
+        guard let lastDate = state.lastDate else {
+            state.lastDate = now
+            return state.phase
         }
 
-        let delta = min(max(now.timeIntervalSince(lastFluidPhaseDate), 0), 0.066)
-        self.lastFluidPhaseDate = now
-        guard delta > 0 else { return }
+        let delta = min(max(now.timeIntervalSince(lastDate), 0), 0.066)
+        state.lastDate = now
+        guard delta > 0 else { return state.phase }
 
         let voice = Double(min(max(smoothedVolume, 0), 1))
         let voiceEase = pow(voice, 0.62)
         let targetSpeed = 0.72 + voiceEase * 2.35
-        let responseRate = targetSpeed > fluidSpeed ? 5.6 : 2.4
+        let responseRate = targetSpeed > state.speed ? 5.6 : 2.4
         let response = 1 - exp(-delta * responseRate)
 
-        fluidSpeed += (targetSpeed - fluidSpeed) * response
-        fluidPhase += fluidSpeed * delta
+        state.speed += (targetSpeed - state.speed) * response
+        state.phase += state.speed * delta
 
-        if fluidPhase > 10_000 {
-            fluidPhase.formTruncatingRemainder(dividingBy: 10_000)
+        if state.phase > 10_000 {
+            state.phase.formTruncatingRemainder(dividingBy: 10_000)
         }
+        return state.phase
     }
 
     private func spawnWaveIfNeeded() {
@@ -1057,7 +1066,7 @@ class SnapPlaceholderController {
     /// Hide all placeholder windows
     func hide() {
         for window in windows.values {
-            window.orderOut(nil)
+            window.close()  // close(), not orderOut — orderOut can leave the window alive and rendering
         }
         windows.removeAll()
         highlightedPosition = nil
@@ -1183,6 +1192,10 @@ class SnapPlaceholderController {
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.setFrameOrigin(origin)
+
+        // Placeholders are discarded with close() — without this, close() would
+        // over-release under ARC.
+        window.isReleasedWhenClosed = false
 
         return window
     }
@@ -1663,6 +1676,12 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
     /// Whether the indicator is in the process of disappearing (for fade-out animation)
     @Published var isDisappearing: Bool = false
 
+    /// Gates the indicator's TimelineView. When false the timeline pauses, so a
+    /// window that outlives orderOut cannot keep rendering off-screen. The polish
+    /// reader keeps this true while streaming — the view does not observe the
+    /// response model, so streamed text only renders on timeline frames.
+    @Published var animationsActive: Bool = false
+
     /// When non-nil, the existing indicator window morphs into this Polish response.
     @Published var polishResponseModel: PolishFloatingResponseModel?
     @Published var polishResponsePresentationPhase: PolishResponsePresentationPhase = .indicator
@@ -1713,7 +1732,7 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
     func show() {
         // Always recreate window for fresh animation state
         if window != nil {
-            window?.orderOut(nil)
+            window?.close()
             window = nil
         }
         createWindow()
@@ -1726,6 +1745,7 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
         currentVolume = 0.0
         isTranscribing = false
         isDisappearing = false
+        animationsActive = true
 
         // Start volume polling when indicator is shown
         startVolumePolling()
@@ -1749,12 +1769,13 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
 
         // Wait for animation to complete, then hide window
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            self?.window?.orderOut(nil)
+            self?.window?.close()  // close(), not orderOut — orderOut can leave the window alive and rendering
             self?.window = nil  // Destroy window so it's recreated fresh next time
             self?.isVisible = false
             self?.currentVolume = 0.0
             self?.isTranscribing = false
             self?.isDisappearing = false
+            self?.animationsActive = false
             self?.polishResponseModel = nil
             self?.polishResponsePresentationPhase = .indicator
         }
@@ -1774,6 +1795,7 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
 
         isDisappearing = false
         isTranscribing = false
+        animationsActive = true
 
         polishResponsePresentationPhase = .indicator
 
@@ -1793,10 +1815,18 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
 
     func completePolishResponse(text: String, screenshotData: Data?) {
         polishResponseModel?.complete(text: text, screenshotData: screenshotData)
+        // Nothing timeline-driven remains once the reader shows the full text.
+        if polishResponsePresentationPhase == .reader {
+            animationsActive = false
+        }
     }
 
     func appendPolishResponse(delta: String) {
         polishResponseModel?.append(delta: delta)
+        // A delta after complete() must resume frames or the new text never renders.
+        if !animationsActive {
+            animationsActive = true
+        }
     }
 
     func copyPolishResponseAndClose() {
@@ -1811,12 +1841,13 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
         stopVolumePolling()
         stopDragMonitoring()
         snapPlaceholders.hide()
-        window?.orderOut(nil)
+        window?.close()  // close(), not orderOut — orderOut can leave the window alive and rendering
         window = nil
         isVisible = false
         currentVolume = 0.0
         isTranscribing = false
         isDisappearing = false
+        animationsActive = false
         polishResponseModel = nil
         polishResponsePresentationPhase = .indicator
     }
@@ -1943,7 +1974,6 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
             .sink { [weak self] level in
                 guard let self, self.isVisible else { return }
                 self.currentVolume = level
-                self.window?.display()
             }
         levelMonitor.start()
     }
@@ -1994,6 +2024,10 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isMovableByWindowBackground = true
         window.ignoresMouseEvents = false
+
+        // The controller discards windows with close() so AppKit tears them down
+        // deterministically — without this, close() would over-release under ARC.
+        window.isReleasedWhenClosed = false
 
         // Force the window's content view to be fully transparent at the AppKit level
         if let contentView = window.contentView {
@@ -2115,6 +2149,11 @@ class RecordingIndicatorController: NSObject, ObservableObject, NSWindowDelegate
                 DispatchQueue.main.async { [weak self] in
                     model.showShell()
                     self?.polishResponsePresentationPhase = .reader
+                    // Output can finish before the shell animation does — pause here
+                    // since completePolishResponse() already ran.
+                    if model.isComplete {
+                        self?.animationsActive = false
+                    }
                 }
             }
         }

@@ -48,8 +48,21 @@ final class HistoryManager {
         decoder.dateDecodingStrategy = .iso8601
     }
     
+    // MARK: - In-Memory Store
+
+    /// Canonical in-memory copy of all entries (newest first).
+    /// Loaded from disk exactly once per session; all reads and writes go through it.
+    private var cachedEntries: [TranscriptionEntry]?
+    private var loadTask: Task<[TranscriptionEntry], Never>?
+
+    /// Serial chain of background writes — each write awaits the previous one so
+    /// writes can never interleave or reorder.
+    private var pendingWrite: Task<Void, Never>?
+    /// Whether the one-time session backup has been scheduled.
+    private var didEnsureBackup = false
+
     // MARK: - Public Methods
-    
+
     /// Load a specific page of transcriptions (newest first)
     func loadPage(page: Int) async -> [TranscriptionEntry] {
         let allEntries = await loadAllEntries()
@@ -64,67 +77,69 @@ final class HistoryManager {
         return Array(allEntries[startIndex..<endIndex])
     }
     
-    /// Load all entries (use sparingly - for migration only)
+    /// All entries, served from the in-memory store.
+    /// The first call decodes the file once on a detached task; later calls are free.
     func loadAllEntries() async -> [TranscriptionEntry] {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            return []
+        if let cachedEntries {
+            return cachedEntries
         }
-        
-        do {
-            let data = try Data(contentsOf: fileURL)
-            let entries = try decoder.decode([TranscriptionEntry].self, from: data)
-            return entries
-        } catch {
-            print("Error loading history: \(error)")
-            return []
+
+        if loadTask == nil {
+            let fileURL = fileURL
+            loadTask = Task.detached(priority: .userInitiated) {
+                guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                    return []
+                }
+
+                do {
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .iso8601
+                    let data = try Data(contentsOf: fileURL)
+                    return try decoder.decode([TranscriptionEntry].self, from: data)
+                } catch {
+                    print("Error loading history: \(error)")
+                    return []
+                }
+            }
         }
-    }
 
-    /// Load all entries from a detached task so large history files do not block UI navigation.
-    func loadAllEntriesDetached() async -> [TranscriptionEntry] {
-        let fileURL = fileURL
-
-        return await Task.detached(priority: .userInitiated) {
-            guard FileManager.default.fileExists(atPath: fileURL.path) else {
-                return []
-            }
-
-            do {
-                let decoder = JSONDecoder()
-                decoder.dateDecodingStrategy = .iso8601
-                let data = try Data(contentsOf: fileURL)
-                return try decoder.decode([TranscriptionEntry].self, from: data)
-            } catch {
-                print("Error loading history: \(error)")
-                return []
-            }
-        }.value
+        let loaded = await loadTask!.value
+        // A mutation may have raced ahead of us (e.g. clearAll) — never clobber it.
+        if cachedEntries == nil {
+            cachedEntries = loaded
+        }
+        return cachedEntries!
     }
     
     /// Save a new entry (adds to beginning)
     func save(_ entry: TranscriptionEntry) async {
         var entries = await loadAllEntries()
         entries.insert(entry, at: 0)
-        await saveEntries(entries)
+        saveEntries(entries)
     }
-    
+
     /// Delete an entry by ID
     func delete(id: UUID) async {
         var entries = await loadAllEntries()
         entries.removeAll { $0.id == id }
-        await saveEntries(entries)
+        saveEntries(entries)
     }
-    
+
     /// Delete multiple entries by IDs
     func delete(ids: Set<UUID>) async {
         var entries = await loadAllEntries()
         entries.removeAll { ids.contains($0.id) }
-        await saveEntries(entries)
+        saveEntries(entries)
     }
-    
+
     /// Clear all history
     func clearAll() async {
-        await saveEntries([])
+        saveEntries([])
+    }
+
+    /// Wait for any in-flight background writes to finish (call before app termination).
+    func flushPendingWrites() async {
+        await pendingWrite?.value
     }
     
     /// Get total count of entries
@@ -167,23 +182,35 @@ final class HistoryManager {
         for entry in allEntries { newCache[entry.id] = entry }
         indexedEntryCache = newCache
 
-        guard let embedding = sentenceEmbedding else {
+        guard sentenceEmbedding != nil else {
             // No embedding model — semantic search won't work but text search will
             isIndexed = true
             return
         }
 
-        var newIndex: [UUID: [Double]] = [:]
-        for entry in allEntries {
-            // Reuse existing vector if already computed
-            if let existing = embeddingIndex[entry.id] {
-                newIndex[entry.id] = existing
-            } else {
-                let sample = String(entry.text.prefix(500))
-                if let vector = embedding.vector(for: sample) {
-                    newIndex[entry.id] = vector
+        // Compute missing vectors off the main actor; existing vectors are reused.
+        let samples: [(id: UUID, text: String)] = allEntries
+            .filter { embeddingIndex[$0.id] == nil }
+            .map { ($0.id, String($0.text.prefix(500))) }
+
+        let computed = await Task.detached(priority: .userInitiated) {
+            var vectors: [UUID: [Double]] = [:]
+            guard let embedding = NLEmbedding.sentenceEmbedding(for: .english) else {
+                return vectors
+            }
+            for sample in samples {
+                if let vector = embedding.vector(for: sample.text) {
+                    vectors[sample.id] = vector
                 }
             }
+            return vectors
+        }.value
+
+        // Back on main: merge against the live cache so entries indexed or removed
+        // while we were computing are respected.
+        var newIndex = embeddingIndex.filter { indexedEntryCache[$0.key] != nil }
+        for (id, vector) in computed where indexedEntryCache[id] != nil {
+            newIndex[id] = vector
         }
 
         embeddingIndex = newIndex
@@ -277,12 +304,41 @@ final class HistoryManager {
 
     // MARK: - Private Methods
 
-    private func saveEntries(_ entries: [TranscriptionEntry]) async {
-        do {
-            let data = try encoder.encode(entries)
-            try data.write(to: fileURL, options: .atomic)
-        } catch {
-            print("Error saving history: \(error)")
+    /// Update the in-memory store and persist it to disk off the main thread.
+    /// Writes are chained (each awaits the previous) so they cannot interleave.
+    /// If a write fails we log and keep the in-memory state — the next successful
+    /// write persists the full, current array.
+    private func saveEntries(_ entries: [TranscriptionEntry]) {
+        cachedEntries = entries
+
+        let snapshot = entries
+        let fileURL = fileURL
+        let needsBackup = !didEnsureBackup
+        didEnsureBackup = true
+        let previous = pendingWrite
+
+        pendingWrite = Task.detached(priority: .utility) {
+            await previous?.value
+
+            // One-time safety net: before the first overwrite of the session,
+            // keep a copy of the current file if no backup exists yet.
+            if needsBackup {
+                let backupURL = fileURL.deletingLastPathComponent()
+                    .appendingPathComponent("transcriptions.backup.json")
+                if !FileManager.default.fileExists(atPath: backupURL.path),
+                   FileManager.default.fileExists(atPath: fileURL.path) {
+                    try? FileManager.default.copyItem(at: fileURL, to: backupURL)
+                }
+            }
+
+            do {
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                let data = try encoder.encode(snapshot)
+                try data.write(to: fileURL, options: .atomic)
+            } catch {
+                print("Error saving history: \(error)")
+            }
         }
     }
     
@@ -304,7 +360,7 @@ final class HistoryManager {
         }
         
         // Migrate entries
-        await saveEntries(oldEntries)
+        saveEntries(oldEntries)
         
         // Remove from UserDefaults
         UserDefaults.standard.removeObject(forKey: userDefaultsKey)
