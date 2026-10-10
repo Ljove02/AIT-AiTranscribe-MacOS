@@ -975,6 +975,19 @@ class AudioRecorder: NSObject, ObservableObject {
         return builtIn.id
     }
 
+    /// The capture device a recording would use right now: the mic picked in
+    /// the menu (persisted by name), else the system default, after the
+    /// Bluetooth preference. Lets side monitors like the recording indicator
+    /// measure the same mic instead of opening the system default — which, on
+    /// a Bluetooth speaker, forces HFP and silences playback.
+    static func currentRecordingCaptureDevice() -> AVCaptureDevice? {
+        let preferredName = UserDefaults.standard.string(forKey: "preferredMicDeviceName")
+        let selected = preferredName.flatMap { name in
+            listInputDevices().first(where: { $0.name == name })?.id
+        }
+        return captureDevice(for: resolveRecordingDevice(selected))
+    }
+
     /// Set the system default input device
     @discardableResult
     static func setDefaultInputDevice(_ deviceId: AudioDeviceID) -> Bool {

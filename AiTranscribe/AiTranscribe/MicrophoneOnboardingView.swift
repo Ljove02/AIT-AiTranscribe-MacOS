@@ -605,7 +605,7 @@ private final class MicrophonePreviewLevelMonitor: NSObject, ObservableObject, A
         session.sessionPreset = .low
         defer { session.commitConfiguration() }
 
-        guard let device = AVCaptureDevice.default(for: .audio) else {
+        guard let device = AudioRecorder.currentRecordingCaptureDevice() else {
             throw MicrophonePreviewError.noDevice
         }
 

@@ -1288,7 +1288,7 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
     private func startOnQueue() {
         // The default input can change while the app is running, and the
         // handle can go stale after another process has had the device.
-        let currentUID = AVCaptureDevice.default(for: .audio)?.uniqueID
+        let currentUID = AudioRecorder.currentRecordingCaptureDevice()?.uniqueID
         if isConfigured, currentUID != configuredDeviceUID {
             teardownOnQueue()
         }
@@ -1304,7 +1304,7 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
             session.startRunning()
         }
 
-        log("start: running=\(session.isRunning) device=\(AVCaptureDevice.default(for: .audio)?.localizedName ?? "none") floor=\(noiseFloor) calibrated=\(usesCalibratedNoiseFloor)")
+        log("start: running=\(session.isRunning) device=\(AudioRecorder.currentRecordingCaptureDevice()?.localizedName ?? "none") floor=\(noiseFloor) calibrated=\(usesCalibratedNoiseFloor)")
         publish(level: smoothedLevel)
         scheduleStalenessCheck()
     }
@@ -1429,7 +1429,7 @@ private final class RecordingIndicatorLevelMonitor: NSObject, ObservableObject, 
         session.sessionPreset = .low
         defer { session.commitConfiguration() }
 
-        guard let device = AVCaptureDevice.default(for: .audio) else {
+        guard let device = AudioRecorder.currentRecordingCaptureDevice() else {
             throw MonitorError.noDevice
         }
 
