@@ -38,14 +38,37 @@ final class AudioManager: ObservableObject {
     
     /// The target volume percentage for current session
     private var sessionTargetVolume: Double = 0.0
-    
+
+    /// Output device the current session ducked
+    private var duckedDeviceID: AudioDeviceID?
+
+    /// Volume multiplier applied while ducking (e.g. 0.3 for a 70% reduction)
+    private var duckMultiplier: Float = 1.0
+
+    /// Original volume per output profile, keyed by the device's nominal sample rate.
+    /// Bluetooth devices with a microphone (HFP) flip from the A2DP music profile
+    /// (44.1/48 kHz) to the call profile (16/24 kHz) when a mic opens, and each
+    /// profile keeps its own volume. Restoring one value into the wrong profile
+    /// is what left music stuck at the ducked level after recording.
+    private var originalVolumeByProfile: [Float64: Float] = [:]
+
+    /// Removes the sample-rate listener on the ducked device
+    private var removeProfileListener: (() -> Void)?
+
+    /// Ends the post-recording restore window
+    private var restoreWindowWork: DispatchWorkItem?
+
+    /// How long to keep re-applying the original volume after recording stops.
+    /// Bluetooth takes ~3s to switch back from HFP to A2DP after the mic closes.
+    private let restoreWindow: TimeInterval = 8.0
+
     /// Lock object for thread safety
     private let lock = NSLock()
-    
+
     // MARK: - Initialization
-    
+
     private init() {}
-    
+
     deinit {
         // Note: deinit runs in nonisolated context, so we do direct cleanup
         // This is safe because deinit only runs when the object is being destroyed
@@ -54,82 +77,160 @@ final class AudioManager: ObservableObject {
             _ = AudioManager.writeCoreAudioVolume(originalVolume)
         }
     }
-    
+
     // MARK: - Public Methods - Session-Based API
-    
+
     /// Start a ducking session (call when recording starts)
     /// - Parameter reductionPercentage: How much to lower volume (0-99)
     ///   Example: If reduction is 80%, volume becomes original × 20%
     func startDuckingSession(reductionPercentage: Double) {
-        lock.lock()
-        
         // Prevent multiple duck calls during one session
         guard !isInRecordingSession else {
-            lock.unlock()
             print("AudioManager: Already in ducking session, ignoring duplicate call")
             return
         }
-        
-        // Store original volume
-        originalVolume = getSystemVolume()
-        isInRecordingSession = true
-        
-        // Calculate target volume: reduced by the percentage
-        // Example: 80% reduction on 100% = 20%, 80% reduction on 50% = 10%
+
         let reductionFactor = max(0.01, min(1.0, reductionPercentage / 100.0))
-        var targetVolume = Double(originalVolume) * (1.0 - reductionFactor)
-        
-        // Smart fallback: Never boost volume
-        // If calculation would boost (shouldn't happen with this formula, but be safe)
-        if targetVolume > Double(originalVolume) {
-            targetVolume = Double(originalVolume) * 0.5  // Safe fallback: reduce by 50%
-            print("AudioManager: Smart fallback triggered, reducing to 50% instead")
+        duckMultiplier = Float(1.0 - reductionFactor)
+        isInRecordingSession = true
+
+        guard let deviceID = Self.defaultOutputDeviceID(),
+              let currentVolume = Self.readCoreAudioVolume(deviceID: deviceID) else {
+            // No CoreAudio volume control — single-value AppleScript path
+            endRestoreWindow()
+            originalVolume = getSystemVolumeViaOSAScript()
+            applyVolumeChangeViaOSAScript(to: Double(originalVolume * duckMultiplier) * 100.0)
+            setDucking(true)
+            print("AudioManager: Started ducking session via AppleScript - reduced by \(Int(reductionPercentage))% (original: \(Int(originalVolume * 100))%)")
+            return
         }
-        
-        // Convert from 0-1 to 0-100 for AppleScript
-        let targetPercentage = targetVolume * 100.0
-        
-        lock.unlock()
-        
-        // Apply ducking (outside lock to avoid blocking)
-        applyVolumeChange(to: targetPercentage)
-        
-        // Update published property asynchronously to prevent "Publishing changes from within view updates"
-        // Use DispatchQueue.main.async to truly defer to next run loop (Task doesn't defer on MainActor)
-        DispatchQueue.main.async { [weak self] in
-            self?.isDucking = true
+
+        let profile = Self.nominalSampleRate(deviceID: deviceID)
+
+        if duckedDeviceID == deviceID, restoreWindowWork != nil {
+            // Recording again while the last restore is still settling (the
+            // device may still be in its call profile). Keep the originals we
+            // already know rather than capturing a ducked value as "original".
+            restoreWindowWork?.cancel()
+            restoreWindowWork = nil
+        } else {
+            endRestoreWindow()
+            duckedDeviceID = deviceID
+            originalVolumeByProfile = [:]
+            installProfileListener(deviceID: deviceID)
         }
-        
-        print("AudioManager: Started ducking session - reduced by \(Int(reductionPercentage))% (original: \(Int(originalVolume * 100))%, target: \(Int(targetPercentage))%)")
+
+        if originalVolumeByProfile[profile] == nil {
+            originalVolumeByProfile[profile] = currentVolume
+        }
+        let original = originalVolumeByProfile[profile] ?? currentVolume
+        originalVolume = original
+        let target = original * duckMultiplier
+        _ = Self.writeCoreAudioVolume(target, deviceID: deviceID)
+        setDucking(true)
+
+        print("AudioManager: Started ducking session - reduced by \(Int(reductionPercentage))% (original: \(Int(original * 100))%, target: \(Int(target * 100))%, profile: \(Int(profile)) Hz)")
     }
-    
+
     /// End a ducking session (call when recording stops)
     func endDuckingSession() {
-        lock.lock()
-        
         guard isInRecordingSession else {
-            lock.unlock()
             print("AudioManager: Not in ducking session, nothing to restore")
             return
         }
-        
-        let volumeToRestore = originalVolume
         isInRecordingSession = false
-        
-        lock.unlock()
-        
-        // Restore original volume (outside lock)
-        restoreToOriginalVolume()
-        
+        setDucking(false)
+
+        guard let deviceID = duckedDeviceID else {
+            restoreToOriginalVolumeViaOSAScript()
+            print("AudioManager: Ended ducking session, restored to \(Int(originalVolume * 100))%")
+            return
+        }
+
+        restoreCurrentProfile(deviceID: deviceID)
+
+        // Keep the profile listener alive briefly: when the Bluetooth device
+        // drops back from HFP to A2DP, the listener restores that profile too.
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.endRestoreWindow() }
+        }
+        restoreWindowWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + restoreWindow, execute: work)
+
+        print("AudioManager: Ended ducking session, restoring originals \(originalVolumeByProfile.map { "\(Int($0.key)) Hz: \(Int($0.value * 100))%" })")
+    }
+
+    private func setDucking(_ value: Bool) {
         // Update published property asynchronously to prevent "Publishing changes from within view updates"
         // Use DispatchQueue.main.async to truly defer to next run loop (Task doesn't defer on MainActor)
         DispatchQueue.main.async { [weak self] in
-            self?.isDucking = false
+            self?.isDucking = value
         }
-        
-        print("AudioManager: Ended ducking session, restored to \(Int(volumeToRestore * 100))%")
     }
-    
+
+    /// Write back the original volume for whichever profile the device is in now
+    private func restoreCurrentProfile(deviceID: AudioDeviceID) {
+        let profile = Self.nominalSampleRate(deviceID: deviceID)
+        guard let original = originalVolumeByProfile[profile] else { return }
+        if !Self.writeCoreAudioVolume(original, deviceID: deviceID) {
+            print("AudioManager: Failed to restore \(Int(profile)) Hz profile to \(Int(original * 100))%")
+        }
+    }
+
+    /// The ducked device switched profiles (sample rate changed)
+    private func handleProfileChange() {
+        guard let deviceID = duckedDeviceID else { return }
+        let profile = Self.nominalSampleRate(deviceID: deviceID)
+
+        if isInRecordingSession {
+            // New profile mid-recording (A2DP -> HFP): remember its own
+            // original volume, then duck it as well.
+            if originalVolumeByProfile[profile] == nil,
+               let current = Self.readCoreAudioVolume(deviceID: deviceID) {
+                originalVolumeByProfile[profile] = current
+            }
+            if let original = originalVolumeByProfile[profile] {
+                _ = Self.writeCoreAudioVolume(original * duckMultiplier, deviceID: deviceID)
+                print("AudioManager: Output switched to \(Int(profile)) Hz profile, ducked \(Int(original * 100))% -> \(Int(original * duckMultiplier * 100))%")
+            }
+        } else if restoreWindowWork != nil {
+            // Back to a profile we ducked earlier (HFP -> A2DP): restore it
+            restoreCurrentProfile(deviceID: deviceID)
+            print("AudioManager: Output switched to \(Int(profile)) Hz profile, restored")
+        }
+    }
+
+    private func installProfileListener(deviceID: AudioDeviceID) {
+        removeProfileListener?()
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            // Let the HAL finish the profile switch before touching volume
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                MainActor.assumeIsolated { self?.handleProfileChange() }
+            }
+        }
+        guard AudioObjectAddPropertyListenerBlock(deviceID, &address, DispatchQueue.main, block) == noErr else {
+            return
+        }
+        removeProfileListener = {
+            var address = address
+            AudioObjectRemovePropertyListenerBlock(deviceID, &address, DispatchQueue.main, block)
+        }
+    }
+
+    private func endRestoreWindow() {
+        restoreWindowWork?.cancel()
+        restoreWindowWork = nil
+        removeProfileListener?()
+        removeProfileListener = nil
+        duckedDeviceID = nil
+        originalVolumeByProfile = [:]
+    }
+
     /// Check if we're currently ducking (safe for UI)
     var currentlyDucking: Bool {
         lock.lock()
@@ -336,6 +437,11 @@ final class AudioManager: ObservableObject {
     /// Read output volume via CoreAudio (0.0 to 1.0), or nil if unavailable
     private nonisolated static func readCoreAudioVolume() -> Float? {
         guard let deviceID = defaultOutputDeviceID() else { return nil }
+        return readCoreAudioVolume(deviceID: deviceID)
+    }
+
+    /// Read a specific device's output volume (0.0 to 1.0), or nil if unavailable
+    private nonisolated static func readCoreAudioVolume(deviceID: AudioDeviceID) -> Float? {
 
         var volume = Float32(0)
         var size = UInt32(MemoryLayout<Float32>.size)
@@ -366,6 +472,11 @@ final class AudioManager: ObservableObject {
     /// Write output volume via CoreAudio (0.0 to 1.0), returns false if unavailable
     private nonisolated static func writeCoreAudioVolume(_ volume: Float) -> Bool {
         guard let deviceID = defaultOutputDeviceID() else { return false }
+        return writeCoreAudioVolume(volume, deviceID: deviceID)
+    }
+
+    /// Write a specific device's output volume (0.0 to 1.0), returns false if unavailable
+    private nonisolated static func writeCoreAudioVolume(_ volume: Float, deviceID: AudioDeviceID) -> Bool {
 
         var clamped = Float32(max(0.0, min(1.0, volume)))
         let size = UInt32(MemoryLayout<Float32>.size)
@@ -392,6 +503,20 @@ final class AudioManager: ObservableObject {
             }
         }
         return didSet
+    }
+
+    /// Nominal sample rate of a device — stands in for its active Bluetooth
+    /// profile (A2DP runs at 44.1/48 kHz, HFP at 16/24 kHz)
+    private nonisolated static func nominalSampleRate(deviceID: AudioDeviceID) -> Float64 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var rate = Float64(0)
+        var size = UInt32(MemoryLayout<Float64>.size)
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &rate) == noErr else { return 0 }
+        return rate
     }
 
     /// Check that a property exists and is settable on the device

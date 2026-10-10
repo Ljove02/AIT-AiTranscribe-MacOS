@@ -382,7 +382,8 @@ class SessionRecorder: NSObject, ObservableObject {
 
     // MARK: - Recording Control
 
-    func startRecording(sessionDir: URL, micDeviceId: AudioDeviceID? = nil) async -> Bool {
+    func startRecording(sessionDir: URL, micDeviceId requestedMicDeviceId: AudioDeviceID? = nil) async -> Bool {
+        let micDeviceId = AudioRecorder.resolveRecordingDevice(requestedMicDeviceId)
         guard !isRecording else { return false }
 
         // Check microphone permission BEFORE creating capture session.

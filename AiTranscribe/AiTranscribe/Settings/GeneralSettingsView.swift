@@ -10,6 +10,7 @@ struct GeneralSettingsView: View {
 
     @AppStorage("autoPasteAfterTranscription") private var autoPasteAfterTranscription = false
     @AppStorage("playSounds") private var playSounds = true
+    @AppStorage(AudioRecorder.preferBuiltInMicOverBluetoothKey) private var preferBuiltInMicOverBluetooth = true
     @AppStorage("indicatorPosition") private var indicatorPosition = "topCenter"
     @AppStorage("recordingIndicatorStyle") private var recordingIndicatorStyle = "classic"
     @AppStorage("recordingIndicatorNoiseFloorRMS") private var recordingIndicatorNoiseFloorRMS = 0.0
@@ -148,6 +149,15 @@ struct GeneralSettingsView: View {
                 // Audio section
                 Group {
                     SettingsSectionHeader(title: "Audio")
+
+                    SettingsRow(
+                        title: "Prefer built-in mic over Bluetooth",
+                        description: "Bluetooth mics switch speakers and headphones into call mode, which lowers audio quality and changes their volume."
+                    ) {
+                        Toggle("", isOn: $preferBuiltInMicOverBluetooth)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
 
                     AudioDuckingSettings()
                 }

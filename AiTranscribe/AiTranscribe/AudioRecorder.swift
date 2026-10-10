@@ -357,8 +357,9 @@ class AudioRecorder: NSObject, ObservableObject {
     /// Start recording audio with an optional specific device
     /// - Parameter deviceId: CoreAudio AudioDeviceID to record from. If nil, uses system default.
     /// - Returns: True if recording started successfully
-    func startRecording(deviceId: AudioDeviceID? = nil) async -> Bool {
+    func startRecording(deviceId requestedDeviceId: AudioDeviceID? = nil) async -> Bool {
         guard !isRecording else { return false }
+        let deviceId = AudioRecorder.resolveRecordingDevice(requestedDeviceId)
 
         // Clear previous recording
         recordedBuffers.removeAll()
@@ -928,6 +929,50 @@ class AudioRecorder: NSObject, ObservableObject {
         }
 
         return inputDevices
+    }
+
+    static let preferBuiltInMicOverBluetoothKey = "preferBuiltInMicOverBluetooth"
+
+    /// Whether Bluetooth microphones get swapped for the built-in mic (default on)
+    static var prefersBuiltInMicOverBluetooth: Bool {
+        UserDefaults.standard.object(forKey: preferBuiltInMicOverBluetoothKey) as? Bool ?? true
+    }
+
+    static func transportType(_ deviceId: AudioDeviceID) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var transport: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(deviceId, &address, 0, nil, &size, &transport) == noErr else { return nil }
+        return transport
+    }
+
+    static func isBluetoothDevice(_ deviceId: AudioDeviceID) -> Bool {
+        let transport = transportType(deviceId)
+        return transport == kAudioDeviceTransportTypeBluetooth
+            || transport == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    /// Pick the device to actually record from.
+    ///
+    /// Opening a Bluetooth mic forces the device from A2DP (music) into HFP
+    /// (call) mode: the mic drops to 16 kHz speakerphone quality, playback goes
+    /// mono/16 kHz, and output volume jumps to the separate call-profile level.
+    /// With the preference on, a Bluetooth selection (explicit or system
+    /// default) records from the built-in mic instead, so the Bluetooth device
+    /// stays in A2DP.
+    static func resolveRecordingDevice(_ requested: AudioDeviceID?) -> AudioDeviceID? {
+        guard prefersBuiltInMicOverBluetooth else { return requested }
+        let device = requested ?? getDefaultInputDeviceId()
+        guard device != 0, isBluetoothDevice(device) else { return requested }
+        guard let builtIn = listInputDevices().first(where: {
+            transportType($0.id) == kAudioDeviceTransportTypeBuiltIn
+        }) else { return requested }
+        print("AudioRecorder: \(getInputDeviceName(device) ?? "Bluetooth mic") is Bluetooth — recording from \(builtIn.name) to keep it out of HFP call mode")
+        return builtIn.id
     }
 
     /// Set the system default input device
