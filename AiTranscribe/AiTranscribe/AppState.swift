@@ -2333,13 +2333,22 @@ class AppState: ObservableObject {
                     finalChunk: rollingTailChunk,
                     totalDurationSeconds: recordedDuration
                 )
-            } else if audioData != nil, let rollingAPISession, rollingAPISession.hasStarted {
+            } else if let audioData, let rollingAPISession, rollingAPISession.hasStarted {
                 statusMessage = "Finishing API batches..."
                 AppLogger.info("QuickPipeline using rolling public API batches for final transcript")
-                result = try await rollingAPISession.finish(
-                    finalChunk: rollingTailChunk,
-                    totalDurationSeconds: recordedDuration
-                )
+                do {
+                    result = try await rollingAPISession.finish(
+                        finalChunk: rollingTailChunk,
+                        totalDurationSeconds: recordedDuration
+                    )
+                } catch {
+                    result = try await transcribeFullRecordingAfterBatchFailure(
+                        audioData: audioData,
+                        providerId: selectedProviderId,
+                        durationSeconds: recordedDuration,
+                        batchError: error
+                    )
+                }
             } else if let audioData {
                 AppLogger.info(String(
                     format: "QuickPipeline using single-shot transcription provider=%@ duration=%.2fs localRollingSession=%@ apiRollingSession=%@ rollingStarted=%@",
@@ -2580,7 +2589,7 @@ class AppState: ObservableObject {
             isQuickRecordingTransitioning = false
             isQuickTranscriptionInFlight = false
             if "\(error)".contains("timed out") || "\(error)".contains("timeout") {
-                statusMessage = "Transcription timed out - try shorter audio"
+                statusMessage = "Transcription timed out"
             } else if selectedProviderId != TranscriptionProviderDescriptor.localBackend.id,
                       let localizedError = error as? LocalizedError,
                       let description = localizedError.errorDescription {
@@ -2590,6 +2599,86 @@ class AppState: ObservableObject {
             }
             recordingIndicator.hide()
             print("Stop recording error: \(error)")
+
+            // Never lose a long recording silently: keep the audio and tell the user.
+            if let audioData, recordedDuration >= 5 {
+                let savedURL = saveFailedQuickRecording(audioData)
+                presentQuickTranscriptionFailure(error, savedURL: savedURL)
+            }
+        }
+    }
+
+    /// Last resort when rolling API batches fail: upload the whole recording once
+    /// on a fresh connection.
+    private func transcribeFullRecordingAfterBatchFailure(
+        audioData: Data,
+        providerId: String,
+        durationSeconds: Double,
+        batchError: Error
+    ) async throws -> TranscriptionProviderResult {
+        // OpenAI rejects uploads over 25 MB (~13 min of 16 kHz WAV).
+        guard !(batchError is CancellationError), audioData.count < 24_000_000 else {
+            throw batchError
+        }
+
+        AppLogger.warning(String(
+            format: "QuickPipeline batch transcription failed, falling back to single upload duration=%.2fs bytes=%d error=%@",
+            durationSeconds,
+            audioData.count,
+            batchError.localizedDescription
+        ))
+        statusMessage = "Uploading full recording..."
+        let provider = transcriptionProvider(for: providerId)
+        let request = TranscriptionRequest(
+            audioData: audioData,
+            recordedDurationSeconds: durationSeconds,
+            workflow: .basic,
+            model: currentTranscriptionModel(for: provider.descriptor)
+        )
+        do {
+            return try await provider.transcribe(request) { _ in }
+        } catch {
+            AppLogger.error("QuickPipeline single-upload fallback failed error=\(error.localizedDescription)")
+            throw batchError
+        }
+    }
+
+    private func saveFailedQuickRecording(_ audioData: Data) -> URL? {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        let directory = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AiTranscribe/FailedRecordings", isDirectory: true)
+        let url = directory.appendingPathComponent("recording-\(formatter.string(from: Date())).wav")
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try audioData.write(to: url)
+            AppLogger.info("QuickPipeline saved failed recording path=\(url.path)")
+            return url
+        } catch {
+            AppLogger.error("QuickPipeline could not save failed recording error=\(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func presentQuickTranscriptionFailure(_ error: Error, savedURL: URL?) {
+        let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Transcription failed"
+            if savedURL != nil {
+                alert.informativeText = "\(detail)\n\nYour recording was saved, so nothing is lost."
+                alert.addButton(withTitle: "Show Recording")
+                alert.addButton(withTitle: "OK")
+            } else {
+                alert.informativeText = detail
+                alert.addButton(withTitle: "OK")
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            if alert.runModal() == .alertFirstButtonReturn, let savedURL {
+                NSWorkspace.shared.activateFileViewerSelecting([savedURL])
+            }
         }
     }
 

@@ -2,9 +2,9 @@ import Foundation
 
 struct ElevenLabsTranscriptionClient {
     private let endpoint = URL(string: "https://api.elevenlabs.io/v1/speech-to-text")!
-    private let session: URLSession
+    private let session: URLSession?
 
-    init(session: URLSession = .shared) {
+    init(session: URLSession? = nil) {
         self.session = session
     }
 
@@ -18,7 +18,7 @@ struct ElevenLabsTranscriptionClient {
         let boundary = "Boundary-\(UUID().uuidString)"
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.timeoutInterval = 300
+        request.timeoutInterval = 90
         request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = multipartBody(
@@ -35,7 +35,7 @@ struct ElevenLabsTranscriptionClient {
             fileData: audioData
         )
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await upload(request, modelId: modelId)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw ElevenLabsTranscriptionError.invalidResponse
         }
@@ -76,6 +76,13 @@ struct ElevenLabsTranscriptionClient {
         body.appendString("--\(boundary)--\r\n")
 
         return body
+    }
+
+    private func upload(_ request: URLRequest, modelId: String) async throws -> (Data, URLResponse) {
+        if let session {
+            return try await session.data(for: request)
+        }
+        return try await TranscriptionUploadSession.data(for: request, label: "provider=elevenlabs model=\(modelId)")
     }
 
     private func decodeErrorMessage(from data: Data) -> String? {

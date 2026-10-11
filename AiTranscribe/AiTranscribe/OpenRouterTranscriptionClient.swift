@@ -2,9 +2,9 @@ import Foundation
 
 struct OpenRouterTranscriptionClient {
     private let endpoint = URL(string: "https://openrouter.ai/api/v1/audio/transcriptions")!
-    private let session: URLSession
+    private let session: URLSession?
 
-    init(session: URLSession = .shared) {
+    init(session: URLSession? = nil) {
         self.session = session
     }
 
@@ -16,7 +16,7 @@ struct OpenRouterTranscriptionClient {
     ) async throws -> OpenRouterTranscriptionResponse {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.timeoutInterval = 300
+        request.timeoutInterval = 90
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("AiTranscribe", forHTTPHeaderField: "X-OpenRouter-Title")
@@ -30,7 +30,7 @@ struct OpenRouterTranscriptionClient {
         )
         request.httpBody = try JSONEncoder().encode(body)
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await upload(request, modelId: modelId)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw OpenRouterTranscriptionError.invalidResponse
         }
@@ -53,6 +53,13 @@ struct OpenRouterTranscriptionClient {
         } catch {
             throw OpenRouterTranscriptionError.decodingFailed
         }
+    }
+
+    private func upload(_ request: URLRequest, modelId: String) async throws -> (Data, URLResponse) {
+        if let session {
+            return try await session.data(for: request)
+        }
+        return try await TranscriptionUploadSession.data(for: request, label: "provider=openrouter model=\(modelId)")
     }
 
     private func decodeErrorMessage(from data: Data) -> String? {
