@@ -2128,7 +2128,6 @@ private struct PolishPresetDetailView: View {
     @State private var isRecordingShortcut = false
     @State private var showingIconPicker = false
     @State private var showAdvancedModules: Bool
-    @State private var renderAdvancedModules: Bool
     @State private var inputModules: Set<PolishInputModule>
     @State private var outputModules: Set<PolishOutputModule>
     @State private var isEditingName = false
@@ -2171,7 +2170,6 @@ private struct PolishPresetDetailView: View {
         _pasteBehavior = State(initialValue: preset?.pasteBehavior ?? .copyOnly)
         _shortcut = State(initialValue: preset?.shortcut ?? "")
         _showAdvancedModules = State(initialValue: preset?.isMultiStep ?? false)
-        _renderAdvancedModules = State(initialValue: preset?.isMultiStep ?? false)
         _inputModules = State(initialValue: Set(preset?.inputModules ?? PolishPreset.defaultInputModules))
         _outputModules = State(initialValue: Set(preset?.outputModules ?? PolishPreset.defaultOutputModules))
     }
@@ -2197,7 +2195,7 @@ private struct PolishPresetDetailView: View {
                     }
                 }
 
-                if renderAdvancedModules {
+                if showAdvancedModules {
                     VStack(alignment: .leading, spacing: 10) {
                         if preset != nil, onAIDraft != nil {
                             HStack {
@@ -2210,8 +2208,8 @@ private struct PolishPresetDetailView: View {
                     }
                     .transition(
                         .asymmetric(
-                            insertion: .opacity.combined(with: .move(edge: .top)),
-                            removal: .opacity
+                            insertion: .opacity.combined(with: .offset(y: -14)),
+                            removal: .opacity.combined(with: .offset(y: -8))
                         )
                     )
                 }
@@ -2244,6 +2242,7 @@ private struct PolishPresetDetailView: View {
             .padding(.horizontal, 28)
             .padding(.top, 8)
             .padding(.bottom, 92)
+            .background(OverlayScrollerConfigurator())
         }
         .scrollIndicators(.automatic)
         .safeAreaInset(edge: .bottom) {
@@ -2650,21 +2649,8 @@ private struct PolishPresetDetailView: View {
     }
 
     private func toggleAdvancedModules() {
-        let willShowAdvanced = !showAdvancedModules
-        showAdvancedModules = willShowAdvanced
-
-        if willShowAdvanced {
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(95))
-                guard showAdvancedModules else { return }
-                withAnimation(.easeOut(duration: 0.28)) {
-                    renderAdvancedModules = true
-                }
-            }
-        } else {
-            withAnimation(.easeOut(duration: 0.11)) {
-                renderAdvancedModules = false
-            }
+        withAnimation(.smooth(duration: 0.32)) {
+            showAdvancedModules.toggle()
         }
     }
 
@@ -4219,5 +4205,55 @@ private struct PolishDraftReviewView: View {
         .padding(.horizontal, 28)
         .padding(.vertical, 12)
         .background(.ultraThinMaterial)
+    }
+}
+
+/// Forces the enclosing NSScrollView to use overlay-style scrollers so the
+/// vertical scroller never claims layout width. Without this, toggling
+/// Advanced mode makes the content grow past the viewport, a legacy scroller
+/// appears, and the whole detail column shifts left by the scroller width.
+private struct OverlayScrollerConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> OverlayScrollerProbeView {
+        OverlayScrollerProbeView()
+    }
+
+    func updateNSView(_ nsView: OverlayScrollerProbeView, context: Context) {}
+}
+
+private final class OverlayScrollerProbeView: NSView {
+    private var styleObserver: NSObjectProtocol?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyOverlayStyle()
+
+        guard styleObserver == nil else { return }
+        // AppKit re-applies the system preference (legacy scrollers when a
+        // mouse is attached) whenever it changes; pin overlay back on.
+        styleObserver = NotificationCenter.default.addObserver(
+            forName: NSScroller.preferredScrollerStyleDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.applyOverlayStyle()
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        applyOverlayStyle()
+    }
+
+    private func applyOverlayStyle() {
+        guard let scrollView = enclosingScrollView else { return }
+        if scrollView.scrollerStyle != .overlay {
+            scrollView.scrollerStyle = .overlay
+        }
+    }
+
+    deinit {
+        if let styleObserver {
+            NotificationCenter.default.removeObserver(styleObserver)
+        }
     }
 }
