@@ -1,26 +1,22 @@
 # v0.3.0 — Polish, Cloud Providers, Rolling Transcription & The Performance Release
 
-<!-- HERO IMAGE SLOT — design roadmap banner like v0.2.0's DesignRoad image -->
-
 The biggest release yet. v0.2.0 brought summaries; v0.3.0 brings a full **LLM text-transformation system** (Polish), **cloud provider support** for both transcription and language models, **rolling transcription** that works while you speak, a **session mixer**, **session automation**, a **rebuilt onboarding**, and a performance overhaul that cut recording CPU usage from ~108% to ~14%. Over **30,000 lines** of new code across 82 files.
+
+AiTranscribe is no longer local-only: plug in **OpenAI, ElevenLabs, or OpenRouter** for transcription and polishes — or keep everything 100% on-device, exactly as before. Your choice, per preset.
 
 ---
 
 ## Showcase
 
-<!-- VIDEO SLOT: main showcase — Polish flow end to end (record → polish → floating response window) -->
+https://github.com/user-attachments/assets/583bdd76-36cb-4922-b42d-7296a6272ac3
 
-### Polish Routes
+> The whole app in one pass — redesigned glass UI, Dashboard, Sessions, History, Models, and the new settings.
 
-<!-- VIDEO SLOT: routes — switching apps, polishes firing per app -->
+### Polish in Action
 
-### Session Mixer
+https://github.com/user-attachments/assets/3d57b6e5-7efa-4ca1-951d-de7df93e3556
 
-<!-- VIDEO SLOT: mixer — channel strips in menu bar, meters on the indicator -->
-
-### New Onboarding
-
-<!-- VIDEO SLOT: onboarding — branching Local / API / Both flow -->
+> Record → polish → floating response window. Custom LLM transformations on your voice, routed automatically per app.
 
 ---
 

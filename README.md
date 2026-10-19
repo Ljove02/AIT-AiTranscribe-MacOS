@@ -32,15 +32,11 @@ https://github.com/user-attachments/assets/583bdd76-36cb-4922-b42d-7296a6272ac3
 
 > Completely redesigned UI with transparent glass cards, capsule buttons, and smooth stagger animations. Navigate through Dashboard, Sessions, History, Models, Polish, and more — all from a collapsible sidebar. Transform text with custom AI polishes, summarize recordings with on-device AI, track your stats, and manage everything in one place.
 
-### Recording Indicator
-
+### The Polish System
 
 https://github.com/user-attachments/assets/3d57b6e5-7efa-4ca1-951d-de7df93e3556
 
-
-> The floating indicator features GPU-synced side-wave arcs that expand with your voice, a glassy capsule design, magnetic snap to 8 screen positions — and during sessions, live dBFS meter arcs for mic and desktop audio.
-
-<!-- VIDEO SLOT: Polish flow showcase (record → polish → floating markdown response) -->
+> Record once, get it back transformed. Polishes are custom LLM text transformations with their own prompts, models, and shortcuts — and with Polish Routes, the frontmost app picks the right one automatically. Results land in a floating window with a native Markdown renderer.
 
 ---
 
