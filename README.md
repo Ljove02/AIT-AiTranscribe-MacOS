@@ -27,13 +27,16 @@ A powerful macOS menu bar application for speech-to-text transcription, AI text 
 
 ## Showcase
 
-https://github.com/user-attachments/assets/a5f44cdb-234e-43ad-b4c2-4f566bf4b369
+
+https://github.com/user-attachments/assets/583bdd76-36cb-4922-b42d-7296a6272ac3
 
 > Completely redesigned UI with transparent glass cards, capsule buttons, and smooth stagger animations. Navigate through Dashboard, Sessions, History, Models, Polish, and more — all from a collapsible sidebar. Transform text with custom AI polishes, summarize recordings with on-device AI, track your stats, and manage everything in one place.
 
 ### Recording Indicator
 
-https://github.com/user-attachments/assets/543446b2-f50c-416b-acde-471ee3c46c13
+
+https://github.com/user-attachments/assets/3d57b6e5-7efa-4ca1-951d-de7df93e3556
+
 
 > The floating indicator features GPU-synced side-wave arcs that expand with your voice, a glassy capsule design, magnetic snap to 8 screen positions — and during sessions, live dBFS meter arcs for mic and desktop audio.
 
