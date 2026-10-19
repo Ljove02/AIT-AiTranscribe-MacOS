@@ -31,6 +31,24 @@ import Combine  // Apple's framework for reactive programming
 private struct PolishApplicationResult {
     let text: String
     let estimatedCostUSD: Double?
+    let screenshotData: Data?
+}
+
+private enum PolishApplicationError: LocalizedError {
+    case visionModelRequired(modelName: String)
+    case localModelRequired
+    case localVisionUnsupported
+
+    var errorDescription: String? {
+        switch self {
+        case .visionModelRequired(let modelName):
+            return "\(modelName) is not marked as a vision-capable LLM. Enable Vision on the model card or choose another LLM before using Screenshot context."
+        case .localModelRequired:
+            return "Pick or download a local LLM before using Polish in Local mode."
+        case .localVisionUnsupported:
+            return "Screenshot Polish currently requires a public vision-capable LLM. Switch to Public mode or disable Screenshot for this Polish."
+        }
+    }
 }
 
 /*
@@ -41,6 +59,21 @@ private struct PolishApplicationResult {
  @MainActor guarantees safety.
  */
 @MainActor
+/// Live recording telemetry (duration/volume at 10 Hz). Kept OFF AppState:
+/// publishing these on AppState re-rendered every @EnvironmentObject observer
+/// (menu bar, settings dashboard) ten times a second for the whole recording
+/// — profiled at ~half the app's 100%+ CPU spike. Only the small views that
+/// actually display these values observe this object.
+final class RecordingActivityModel: ObservableObject {
+    @Published var duration: Double = 0.0
+    @Published var volume: Double = 0.0
+
+    func reset() {
+        duration = 0.0
+        volume = 0.0
+    }
+}
+
 class AppState: ObservableObject {
 
     /// Shared singleton so AppDelegate can access it at launch (for onboarding)
@@ -51,13 +84,24 @@ class AppState: ObservableObject {
     // =========================================================================
 
     /// Is the ASR model loaded in memory?
-    @Published var isModelLoaded: Bool = false
+    @Published var isModelLoaded: Bool = false {
+        didSet { refreshActiveTranscriptionModelName() }
+    }
 
     /// Which model is currently loaded (e.g., "parakeet-v2", "parakeet-v3")
-    @Published var loadedModelId: String? = nil
+    @Published var loadedModelId: String? = nil {
+        didSet { refreshActiveTranscriptionModelName() }
+    }
 
     /// Available models from backend
-    @Published var availableModels: [ModelInfoResponse] = []
+    @Published var availableModels: [ModelInfoResponse] = [] {
+        didSet { refreshActiveTranscriptionModelName() }
+    }
+
+    /// Display name of the transcription model that will handle the next
+    /// recording, shown in the menu bar chip. Resolved by
+    /// refreshActiveTranscriptionModelName() for both Local and Public modes.
+    @Published var activeTranscriptionModelName: String = ""
 
     /// Available summarization models from backend
     @Published var availableSummaryModels: [SummaryModelInfoResponse] = []
@@ -71,8 +115,19 @@ class AppState: ObservableObject {
     /// Selected polish preset for quick transcription. Nil means raw transcript only.
     @Published var selectedPolishPresetId: String? = UserDefaults.standard.string(forKey: "selectedPolishPresetId")
 
+    /// Whether AiTranscribe should choose a Polish from the active app.
+    @Published var polishRoutingEnabled: Bool = PolishRoutingStore.isEnabled()
+
+    /// What to do when no active-app route matches.
+    @Published var polishRoutingFallback: PolishRoutingFallback = PolishRoutingStore.fallback()
+
+    /// User-editable active-app routing rules for Polishes.
+    @Published var polishRoutingRules: [PolishRoutingRule] = PolishRoutingStore.loadRules(presets: PolishPresetStore.load())
+
     /// Is the model currently loading?
-    @Published var isModelLoading: Bool = false
+    @Published var isModelLoading: Bool = false {
+        didSet { refreshActiveTranscriptionModelName() }
+    }
 
     /// Which model is currently being loaded (for UI feedback)
     @Published var loadingModelId: String? = nil
@@ -101,11 +156,9 @@ class AppState: ObservableObject {
     /// Set by SessionManager to prevent concurrent recording conflicts
     var isSessionRecordingActive: Bool = false
 
-    /// Current recording duration in seconds
-    @Published var recordingDuration: Double = 0.0
-
-    /// Current audio volume (0.0 to 1.0)
-    @Published var currentVolume: Double = 0.0
+    /// Live duration/volume during recording. Deliberately NOT @Published on
+    /// AppState — see RecordingActivityModel.
+    let recordingActivity = RecordingActivityModel()
 
     /// Last transcribed text
     @Published var lastTranscription: String = ""
@@ -174,7 +227,8 @@ class AppState: ObservableObject {
     @AppStorage("mutePlaybackDuringRecording") private var _mutePlaybackDuringRecording = false
     var mutePlaybackDuringRecording: Bool {
         get { _mutePlaybackDuringRecording }
-        set { 
+        set {
+            guard newValue != _mutePlaybackDuringRecording else { return }
             _mutePlaybackDuringRecording = newValue
             objectWillChange.send()
         }
@@ -186,6 +240,7 @@ class AppState: ObservableObject {
     var muteMode: String {
         get { _muteMode }
         set {
+            guard newValue != _muteMode else { return }
             _muteMode = newValue
             // Defer objectWillChange to next run loop to prevent publishing during view updates
             DispatchQueue.main.async { [weak self] in
@@ -200,6 +255,8 @@ class AppState: ObservableObject {
     var duckVolume: Double {
         get { _duckVolume }
         set {
+            // Slider drags re-set the same value repeatedly — don't publish then.
+            guard newValue != _duckVolume else { return }
             _duckVolume = newValue
             // Defer objectWillChange to next run loop to prevent publishing during view updates
             DispatchQueue.main.async { [weak self] in
@@ -245,7 +302,14 @@ class AppState: ObservableObject {
     /// Idle timeout before model is auto-unloaded (2 minutes)
     private let idleTimeoutSeconds: TimeInterval = 120
     /// Tracks whether we triggered an auto-load for the current recording session
-    private var isAutoLoadingModel: Bool = false
+    private var isAutoLoadingModel: Bool = false {
+        didSet { refreshActiveTranscriptionModelName() }
+    }
+
+    /// Last-seen values of the defaults keys the model chip depends on.
+    /// currentTranscriptionModel(for:) self-heals by writing defaults, so the
+    /// defaults observer must ignore notifications that change none of these.
+    private var lastActiveModelDefaultsSnapshot: String = ""
 
     /// Floating recording indicator
     let recordingIndicator = RecordingIndicatorController()
@@ -255,10 +319,13 @@ class AppState: ObservableObject {
 
     /// Swift-native audio recorder (uses AVFoundation for proper permissions)
     let audioRecorder = AudioRecorder()
+    private let quickSystemAudioRecorder = QuickSystemAudioRecorder()
 
     /// Processes sealed basic-recording chunks while recording continues.
     private var rollingBasicBatchSession: RollingBasicBatchSession?
     private var rollingAPIBatchSession: RollingAPIBatchSession?
+    private var pendingQuickPolishContext: PolishRuntimeContext?
+    private var pendingQuickPolishScreenshotTask: Task<Void, Never>?
 
 
     // =========================================================================
@@ -281,6 +348,22 @@ class AppState: ObservableObject {
 
         // Check accessibility permissions if real-time output is enabled
         checkAccessibilityPermissionsIfNeeded()
+
+        // The mode switch and the public model selection both live in
+        // UserDefaults, so the model chip has to watch defaults changes too.
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                let snapshot = self.activeModelDefaultsSnapshot()
+                guard snapshot != self.lastActiveModelDefaultsSnapshot else { return }
+                self.lastActiveModelDefaultsSnapshot = snapshot
+                self.refreshActiveTranscriptionModelName()
+            }
+            .store(in: &cancellables)
+
+        lastActiveModelDefaultsSnapshot = activeModelDefaultsSnapshot()
+        refreshActiveTranscriptionModelName()
     }
 
     // =========================================================================
@@ -529,9 +612,14 @@ class AppState: ObservableObject {
         }
     }
 
-    /// Load all history entries (for stats computation)
+    /// Load all history entries (for stats computation) — served from the in-memory store
     func loadAllHistoryEntries() async -> [TranscriptionEntry] {
         await historyManager.loadAllEntries()
+    }
+
+    /// Flush any pending history writes to disk (for app termination)
+    func flushHistoryWrites() async {
+        await historyManager.flushPendingWrites()
     }
 
     /// Clear all history
@@ -549,8 +637,9 @@ class AppState: ObservableObject {
     func checkAccessibilityPermissionsIfNeeded() {
         let realTimeOutput = UserDefaults.standard.bool(forKey: "realTimeOutput")
         let autoPaste = UserDefaults.standard.bool(forKey: "autoPasteAfterTranscription")
+        let selectedPolishNeedsAccessibility = selectedPolishPreset?.requiresAccessibilityPermission ?? false
 
-        if (realTimeOutput || autoPaste) && !KeyboardSimulator.shared.hasAccessibilityPermission {
+        if (realTimeOutput || autoPaste || selectedPolishNeedsAccessibility) && !KeyboardSimulator.shared.hasAccessibilityPermission {
             // Request permission (shows system dialog)
             KeyboardSimulator.shared.requestAccessibilityPermission()
         }
@@ -561,28 +650,133 @@ class AppState: ObservableObject {
         return KeyboardSimulator.shared.hasAccessibilityPermission
     }
 
-    private func polishTranscript(_ transcript: String, using preset: PolishPreset) async throws -> PolishApplicationResult {
-        let resolvedModel = resolvedLanguageModelForPolish(preset)
+    private func polishTranscript(
+        _ transcript: String,
+        using preset: PolishPreset,
+        context: PolishRuntimeContext? = nil,
+        modelSource: PolishModelSource? = nil,
+        onDelta: ((String) async -> Void)? = nil
+    ) async throws -> PolishApplicationResult {
+        if preset.bypassLLM {
+            // No model resolution, no vision gate, no LLM call. Only the voice
+            // and desktop audio transcripts survive; clipboard, screenshot, and
+            // active app context are ignored.
+            let voice = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            let desktop = context?.desktopAudioTranscript?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let text: String
+            if voice.isEmpty {
+                text = desktop
+            } else if desktop.isEmpty {
+                text = voice
+            } else {
+                text = "[user]\n\(voice)\n\n[desktop]\n\(desktop)"
+            }
+            AppLogger.info(String(
+                format: "AppState: polish bypassLLM preset=%@ voiceWords=%d desktopWords=%d",
+                preset.displayName,
+                voice.split(separator: " ").count,
+                desktop.split(separator: " ").count
+            ))
+            if let onDelta {
+                await onDelta(text)
+            }
+            return PolishApplicationResult(
+                text: text,
+                estimatedCostUSD: nil,
+                screenshotData: nil
+            )
+        }
+
+        let resolvedSource = modelSource ?? currentPolishModelSource
+        let resolvedModel = try resolvedLanguageModelForPolish(preset, source: resolvedSource)
+        var runtimeContext = context ?? PolishContextReader.collect(for: preset)
+        if preset.usesClipboardText {
+            if runtimeContext.clipboardText == nil {
+                runtimeContext.clipboardText = PolishContextReader.readClipboardTextIfChanged(after: runtimeContext.clipboardBaselineChangeCount)
+            }
+            if runtimeContext.clipboardText == nil,
+               runtimeContext.clipboardBaselineChangeCount != nil {
+                AppLogger.info("PolishContext: skipped unchanged clipboard for quick run")
+            }
+        }
+        if preset.usesActiveApp {
+            runtimeContext.activeAppName = PolishContextReader.readActiveAppName()
+        }
+        let polishInput = polishInputText(
+            transcript: transcript,
+            context: runtimeContext
+        )
+        let screenshotDataURL = runtimeContext.screenshotDataURL
+        if screenshotDataURL != nil && !resolvedModel.supportsVision {
+            throw PolishApplicationError.visionModelRequired(modelName: resolvedModel.displayName)
+        }
         let startedAt = Date()
-        print("AppState: polish start provider=\(resolvedModel.providerName) model=\(resolvedModel.modelId) preset=\(preset.displayName) inputWords=\(transcript.split(separator: " ").count)")
-        let apiKey = try resolvedAPIKeyForPolish(providerId: resolvedModel.providerId)
+        AppLogger.info(String(
+            format: "AppState: polish start provider=%@ model=%@ preset=%@ inputWords=%d clipboard=%@ clipboardChars=%d desktopAudio=%@ desktopWords=%d screenshot=%@ screenshotBytes=%d activeApp=%@",
+            resolvedModel.providerName,
+            resolvedModel.modelId,
+            preset.displayName,
+            transcript.split(separator: " ").count,
+            runtimeContext.clipboardText == nil ? "no" : "yes",
+            runtimeContext.clipboardText?.count ?? 0,
+            runtimeContext.desktopAudioTranscript == nil ? "no" : "yes",
+            runtimeContext.desktopAudioTranscript?.split(separator: " ").count ?? 0,
+            screenshotDataURL == nil ? "no" : "yes",
+            runtimeContext.screenshotByteCount,
+            runtimeContext.activeAppName ?? "none"
+        ))
         let response: OpenAILanguageModelResponse
 
-        if resolvedModel.providerId == TranscriptionProviderDescriptor.openRouter.id {
-            response = try await OpenRouterLanguageModelClient().polishText(
-                transcript: transcript,
+        if resolvedSource == .local {
+            response = try await polishTextLocally(
+                polishInput,
                 preset: preset,
-                modelId: resolvedModel.modelId,
-                apiKey: apiKey,
-                providerOnly: resolvedModel.openRouterProviderOnly
+                model: resolvedModel,
+                screenshotDataURL: screenshotDataURL,
+                onDelta: onDelta
             )
+        } else if resolvedModel.providerId == TranscriptionProviderDescriptor.openRouter.id {
+            let apiKey = try resolvedAPIKeyForPolish(providerId: resolvedModel.providerId)
+            if let onDelta {
+                response = try await OpenRouterLanguageModelClient().polishTextStreamed(
+                    transcript: polishInput,
+                    preset: preset,
+                    modelId: resolvedModel.modelId,
+                    apiKey: apiKey,
+                    providerOnly: resolvedModel.openRouterProviderOnly,
+                    screenshotDataURL: screenshotDataURL,
+                    onDelta: onDelta
+                )
+            } else {
+                response = try await OpenRouterLanguageModelClient().polishText(
+                    transcript: polishInput,
+                    preset: preset,
+                    modelId: resolvedModel.modelId,
+                    apiKey: apiKey,
+                    providerOnly: resolvedModel.openRouterProviderOnly,
+                    screenshotDataURL: screenshotDataURL
+                )
+            }
         } else {
-            response = try await OpenAILanguageModelClient().polishText(
-                transcript: transcript,
-                preset: preset,
-                modelId: resolvedModel.modelId,
-                apiKey: apiKey
-            )
+            let apiKey = try resolvedAPIKeyForPolish(providerId: resolvedModel.providerId)
+            if let onDelta {
+                response = try await OpenAILanguageModelClient().polishTextStreamed(
+                    transcript: polishInput,
+                    preset: preset,
+                    modelId: resolvedModel.modelId,
+                    apiKey: apiKey,
+                    screenshotDataURL: screenshotDataURL,
+                    onDelta: onDelta
+                )
+            } else {
+                response = try await OpenAILanguageModelClient().polishText(
+                    transcript: polishInput,
+                    preset: preset,
+                    modelId: resolvedModel.modelId,
+                    apiKey: apiKey,
+                    screenshotDataURL: screenshotDataURL
+                )
+            }
         }
 
         let estimatedCost = resolvedModel.estimatedCost(
@@ -602,7 +796,152 @@ class AppState: ObservableObject {
 
         return PolishApplicationResult(
             text: response.text,
-            estimatedCostUSD: estimatedCost
+            estimatedCostUSD: estimatedCost,
+            screenshotData: runtimeContext.screenshotData
+        )
+    }
+
+    private func polishInputText(
+        transcript: String,
+        context: PolishRuntimeContext
+    ) -> String {
+        guard context.hasContext else { return transcript }
+
+        var sections: [String] = []
+
+        let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedTranscript.isEmpty {
+            sections.append(
+                """
+                User microphone transcript:
+                [user]
+                \(trimmedTranscript)
+                """
+            )
+        }
+
+        if let desktopAudioTranscript = context.desktopAudioTranscript?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !desktopAudioTranscript.isEmpty {
+            sections.append(
+                """
+                Desktop/system audio transcript:
+                [desktop]
+                \(desktopAudioTranscript)
+                """
+            )
+        }
+
+        if let clipboardText = context.clipboardText {
+            sections.append(
+                """
+                Exact clipboard context:
+                \(clipboardText)
+                """
+            )
+        }
+
+        if context.screenshotData?.isEmpty == false {
+            sections.append(
+                """
+                Screenshot context:
+                A selected screen region image is attached as multimodal input. Inspect the actual visible image; never repeat this placeholder sentence as the screenshot description.
+                """
+            )
+        }
+
+        if let activeAppName = context.activeAppName {
+            sections.append(
+                """
+                Active app:
+                \(activeAppName)
+                """
+            )
+        }
+
+        return sections.isEmpty ? transcript : sections.joined(separator: "\n\n---\n\n")
+    }
+
+    private func polishTextLocally(
+        _ inputText: String,
+        preset: PolishPreset,
+        model: APILanguageModel,
+        screenshotDataURL: String?,
+        onDelta: ((String) async -> Void)?
+    ) async throws -> OpenAILanguageModelResponse {
+        let startedAt = Date()
+        var latestText = ""
+        var lastStreamedText = ""
+        var processingTimeSeconds: Double?
+        var failureMessage: String?
+
+        let instruction = """
+        You are polishing a voice transcript.
+
+        Polish instruction:
+        \(preset.trimmedPrompt)
+
+        Rules:
+        - Preserve the speaker's intent and language.
+        - If clipboard text, desktop audio, screenshot, or active app context is provided, use it only as supporting context for the user's intent.
+        - If a screenshot is attached, inspect the actual visible image. Do not describe the placeholder sentence as the screenshot.
+        - Do not add facts that are not present.
+        - Return only the final polished text.
+        """
+
+        try await apiClient.polishLocally(
+            inputText: inputText,
+            modelId: model.modelId,
+            presetId: preset.id,
+            displayName: preset.displayName,
+            systemPrompt: instruction,
+            maxOutputTokens: max(512, min(8_000, Int(Double(inputText.split(separator: " ").count) * 2.4))),
+            screenshotDataURL: screenshotDataURL
+        ) { event in
+            switch event.event {
+            case "partial":
+                let partial = event.text ?? ""
+                guard !partial.isEmpty else { return }
+                latestText = partial
+                if let onDelta, partial.hasPrefix(lastStreamedText) {
+                    let delta = String(partial.dropFirst(lastStreamedText.count))
+                    if !delta.isEmpty {
+                        lastStreamedText = partial
+                        Task { await onDelta(delta) }
+                    }
+                } else if let onDelta {
+                    lastStreamedText = partial
+                    Task { await onDelta(partial) }
+                }
+            case "done":
+                latestText = event.text ?? latestText
+                processingTimeSeconds = event.processingTimeSeconds
+                if let onDelta, latestText.hasPrefix(lastStreamedText) {
+                    let delta = String(latestText.dropFirst(lastStreamedText.count))
+                    if !delta.isEmpty {
+                        lastStreamedText = latestText
+                        Task { await onDelta(delta) }
+                    }
+                }
+            case "error":
+                failureMessage = event.message ?? "Local polish failed."
+            case "cancelled":
+                failureMessage = "Local polish cancelled."
+            default:
+                break
+            }
+        }
+
+        if let failureMessage {
+            throw APIError.serverError(failureMessage)
+        }
+
+        let text = latestText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw OpenAILanguageModelError.emptyOutput }
+        return OpenAILanguageModelResponse(
+            text: text,
+            processingTimeSeconds: processingTimeSeconds ?? Date().timeIntervalSince(startedAt),
+            inputTokens: nil,
+            outputTokens: nil
         )
     }
 
@@ -614,15 +953,22 @@ class AppState: ObservableObject {
         return trimmed
     }
 
-    private func resolvedLanguageModelForPolish(_ preset: PolishPreset) -> APILanguageModel {
+    private var currentPolishModelSource: PolishModelSource {
+        selectedTranscriptionProviderId == TranscriptionProviderDescriptor.localBackend.id ? .local : .public
+    }
+
+    private func resolvedLanguageModelForPolish(_ preset: PolishPreset, source: PolishModelSource) throws -> APILanguageModel {
+        switch source {
+        case .public:
+            return resolvedPublicLanguageModelForPolish(preset)
+        case .local:
+            return try resolvedLocalLanguageModelForPolish(preset)
+        }
+    }
+
+    private func resolvedPublicLanguageModelForPolish(_ preset: PolishPreset) -> APILanguageModel {
         let models = APILanguageModelStore.load()
         let selectedModelId = UserDefaults.standard.string(forKey: "selectedOpenAILanguageModel")
-
-        if preset.isBuiltIn,
-           let selectedModelId,
-           let selectedModel = models.first(where: { $0.modelId == selectedModelId }) {
-            return routedLanguageModelForPolish(selectedModel)
-        }
 
         if let presetModel = models.first(where: { $0.providerId == preset.modelProviderId && $0.modelId == preset.modelId }) {
             return routedLanguageModelForPolish(presetModel)
@@ -647,6 +993,31 @@ class AppState: ObservableObject {
         return routedLanguageModelForPolish(models.first ?? APILanguageModelStore.defaultModels[0])
     }
 
+    private func resolvedLocalLanguageModelForPolish(_ preset: PolishPreset) throws -> APILanguageModel {
+        let downloadedModels = availableSummaryModels.filter(\.downloaded)
+        guard !downloadedModels.isEmpty else {
+            throw PolishApplicationError.localModelRequired
+        }
+
+        let preferredModelId = preset.localModelId
+            ?? UserDefaults.standard.string(forKey: "preferredSummaryModelId")
+        let selectedModel = preferredModelId.flatMap { id in
+            downloadedModels.first(where: { $0.id == id })
+        } ?? downloadedModels.first
+
+        guard let selectedModel else {
+            throw PolishApplicationError.localModelRequired
+        }
+
+        return APILanguageModel(
+            providerId: "local-summary",
+            providerName: "Local LLM",
+            modelId: selectedModel.id,
+            displayName: selectedModel.displayName,
+            supportsVision: selectedModel.supportsVision
+        )
+    }
+
     private func routedLanguageModelForPolish(_ model: APILanguageModel) -> APILanguageModel {
         guard model.providerId == TranscriptionProviderDescriptor.openAI.id,
               model.modelId.contains("/"),
@@ -663,6 +1034,7 @@ class AppState: ObservableObject {
             inputCostPerMillionTokensUSD: model.inputCostPerMillionTokensUSD,
             outputCostPerMillionTokensUSD: model.outputCostPerMillionTokensUSD,
             openRouterProviderOnly: model.openRouterProviderOnly,
+            supportsVision: model.supportsVision,
             createdAt: model.createdAt
         )
     }
@@ -731,12 +1103,6 @@ class AppState: ObservableObject {
     func fetchAvailableModels() async {
         do {
             availableModels = try await apiClient.listModels()
-            // Force all windows to redisplay — on macOS 26 Tahoe, @Published
-            // changes can fail to trigger SwiftUI view updates due to the
-            // display cycle exception (caught by DisplayCycleFix).
-            for window in NSApp.windows {
-                window.display()
-            }
         } catch {
             print("Failed to fetch models: \(error)")
         }
@@ -807,15 +1173,20 @@ class AppState: ObservableObject {
 
     func reloadPolishPresets() {
         polishPresets = PolishPresetStore.load()
+        polishRoutingRules = normalizedPolishRoutingRules()
     }
 
     func savePolishPresets(_ presets: [PolishPreset]) {
         PolishPresetStore.save(presets)
         polishPresets = PolishPresetStore.load()
+        polishRoutingRules = normalizedPolishRoutingRules()
+        HotkeyManager.shared.refreshHotkeys()
     }
 
     func upsertPolishPreset(_ preset: PolishPreset) {
         polishPresets = PolishPresetStore.upsert(preset, in: polishPresets)
+        polishRoutingRules = normalizedPolishRoutingRules()
+        HotkeyManager.shared.refreshHotkeys()
     }
 
     func deletePolishPreset(id: String) {
@@ -823,6 +1194,8 @@ class AppState: ObservableObject {
         if selectedPolishPresetId == id {
             setSelectedPolishPreset(nil)
         }
+        polishRoutingRules = normalizedPolishRoutingRules()
+        HotkeyManager.shared.refreshHotkeys()
     }
 
     func setSelectedPolishPreset(_ id: String?) {
@@ -834,6 +1207,291 @@ class AppState: ObservableObject {
         }
         UserDefaults.standard.synchronize()
         print("AppState: selected polish preset = \(id ?? "raw")")
+        checkAccessibilityPermissionsIfNeeded()
+    }
+
+    private func normalizedPolishRoutingRules() -> [PolishRoutingRule] {
+        let validPresetIds = Set(polishPresets.map(\.id))
+        var changed = false
+        let normalized = polishRoutingRules.map { rule -> PolishRoutingRule in
+            var copy = rule
+            if copy.routeId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                copy.routeId = "route-\(copy.intent.rawValue)"
+                changed = true
+            }
+            if copy.routeTitle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                copy.routeTitle = copy.intent.displayName
+                changed = true
+            }
+            if copy.routeDescription?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                copy.routeDescription = copy.intent.description
+                changed = true
+            }
+            guard !validPresetIds.contains(rule.presetId) else { return copy }
+            copy.presetId = PolishRoutingStore.preferredPresetId(for: rule.intent, presets: polishPresets)
+            changed = true
+            return copy
+        }
+        if changed {
+            PolishRoutingStore.saveRules(normalized)
+        }
+        return normalized
+    }
+
+    func setPolishRoutingEnabled(_ enabled: Bool) {
+        polishRoutingEnabled = enabled
+        PolishRoutingStore.setEnabled(enabled)
+        objectWillChange.send()
+    }
+
+    func setPolishRoutingFallback(_ fallback: PolishRoutingFallback) {
+        polishRoutingFallback = fallback
+        PolishRoutingStore.setFallback(fallback)
+        objectWillChange.send()
+    }
+
+    func savePolishRoutingRules(_ rules: [PolishRoutingRule]) {
+        let sorted = rules.sorted { lhs, rhs in
+            if lhs.effectiveRouteId != rhs.effectiveRouteId {
+                return lhs.effectiveRouteId < rhs.effectiveRouteId
+            }
+            if lhs.priority != rhs.priority {
+                return lhs.priority < rhs.priority
+            }
+            return lhs.displayAppName.localizedCaseInsensitiveCompare(rhs.displayAppName) == .orderedAscending
+        }
+        polishRoutingRules = sorted
+        PolishRoutingStore.saveRules(sorted)
+        objectWillChange.send()
+    }
+
+    func updatePolishRoutingRule(_ rule: PolishRoutingRule) {
+        var rules = polishRoutingRules
+        if let index = rules.firstIndex(where: { $0.id == rule.id }) {
+            rules[index] = rule
+        } else {
+            rules.append(rule)
+        }
+        savePolishRoutingRules(rules)
+    }
+
+    func deletePolishRoutingRule(id: String) {
+        savePolishRoutingRules(polishRoutingRules.filter { $0.id != id })
+    }
+
+    func addPolishRoute(title: String, description: String, presetId: String? = nil) -> String? {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return nil }
+
+        let routeId = "route-\(UUID().uuidString.lowercased())"
+        let trimmedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nextPriority = (polishRoutingRules.map(\.priority).max() ?? 0) + 1
+        let rule = PolishRoutingRule(
+            id: "route-entry-\(UUID().uuidString.lowercased())",
+            intent: .custom,
+            routeId: routeId,
+            routeTitle: trimmedTitle,
+            routeDescription: trimmedDescription.isEmpty ? nil : trimmedDescription,
+            appName: "",
+            bundleIdentifier: nil,
+            windowTitleContains: nil,
+            presetId: presetId ?? PolishRoutingStore.preferredPresetId(for: .custom, presets: polishPresets),
+            isEnabled: true,
+            priority: nextPriority,
+            createdAt: Date()
+        )
+        savePolishRoutingRules(polishRoutingRules + [rule])
+        return routeId
+    }
+
+    func deletePolishRoute(routeId: String) {
+        savePolishRoutingRules(polishRoutingRules.filter { $0.effectiveRouteId != routeId })
+    }
+
+    func updatePolishRoute(
+        routeId: String,
+        title: String,
+        description: String,
+        presetId: String,
+        isEnabled: Bool
+    ) {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return }
+        let trimmedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        var rules = polishRoutingRules
+        for index in rules.indices where rules[index].effectiveRouteId == routeId {
+            rules[index].routeId = routeId
+            rules[index].routeTitle = trimmedTitle
+            rules[index].routeDescription = trimmedDescription.isEmpty ? nil : trimmedDescription
+            rules[index].presetId = presetId
+            rules[index].isEnabled = isEnabled
+        }
+        savePolishRoutingRules(rules)
+    }
+
+    func addPolishRoutingApp(
+        routeId: String,
+        appName: String,
+        bundleIdentifier: String? = nil
+    ) {
+        let trimmedAppName = appName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAppName.isEmpty,
+              let route = polishRoutingRules.first(where: { $0.effectiveRouteId == routeId }) else {
+            return
+        }
+        let normalizedBundle = bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let duplicate = polishRoutingRules.contains { rule in
+            rule.effectiveRouteId == routeId &&
+            rule.displayAppName.compare(trimmedAppName, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame &&
+            (rule.bundleIdentifier ?? "") == (normalizedBundle ?? "")
+        }
+        guard !duplicate else { return }
+
+        let routeRules = polishRoutingRules.filter { $0.effectiveRouteId == routeId }
+        let nextPriority = (routeRules.map(\.priority).max() ?? 0) + 1
+        let newRule = PolishRoutingRule(
+            id: "route-app-\(UUID().uuidString.lowercased())",
+            intent: route.intent,
+            routeId: route.effectiveRouteId,
+            routeTitle: route.routeDisplayName,
+            routeDescription: route.routeDetails,
+            appName: trimmedAppName,
+            bundleIdentifier: normalizedBundle?.isEmpty == false ? normalizedBundle : nil,
+            windowTitleContains: nil,
+            presetId: route.presetId,
+            isEnabled: route.isEnabled,
+            priority: nextPriority,
+            createdAt: Date()
+        )
+        savePolishRoutingRules(polishRoutingRules + [newRule])
+    }
+
+    func addPolishRoutingRule(
+        intent: PolishRoutingIntent,
+        appName: String,
+        bundleIdentifier: String? = nil,
+        presetId: String? = nil
+    ) {
+        let trimmedAppName = appName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAppName.isEmpty else { return }
+        let normalizedBundle = bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let duplicate = polishRoutingRules.contains { rule in
+            rule.intent == intent &&
+            rule.displayAppName.compare(trimmedAppName, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame &&
+            (rule.bundleIdentifier ?? "") == (normalizedBundle ?? "")
+        }
+        guard !duplicate else { return }
+
+        var rules = polishRoutingRules
+        let nextPriority = (rules.filter { $0.intent == intent }.map(\.priority).max() ?? 0) + 1
+        rules.append(PolishRoutingRule(
+            id: "route-\(UUID().uuidString.lowercased())",
+            intent: intent,
+            routeId: "route-\(intent.rawValue)",
+            routeTitle: intent.displayName,
+            routeDescription: intent.description,
+            appName: trimmedAppName,
+            bundleIdentifier: normalizedBundle?.isEmpty == false ? normalizedBundle : nil,
+            windowTitleContains: nil,
+            presetId: presetId ?? PolishRoutingStore.preferredPresetId(for: intent, presets: polishPresets),
+            isEnabled: true,
+            priority: nextPriority,
+            createdAt: Date()
+        ))
+        savePolishRoutingRules(rules)
+    }
+
+    func addCurrentAppToPolishRouting(intent: PolishRoutingIntent) {
+        guard let appName = PolishContextReader.readActiveAppName() else { return }
+        addPolishRoutingRule(
+            intent: intent,
+            appName: appName,
+            bundleIdentifier: PolishContextReader.readActiveBundleIdentifier(),
+            presetId: PolishRoutingStore.preferredPresetId(for: intent, presets: polishPresets)
+        )
+    }
+
+    func polishRoutingPreview() -> PolishRoutingPreview {
+        resolvePolishRoutingPreview()
+    }
+
+    private func resolvePolishRoutingPreview() -> PolishRoutingPreview {
+        let appName = PolishContextReader.readActiveAppName()
+        let bundleIdentifier = PolishContextReader.readActiveBundleIdentifier()
+        let rules = normalizedPolishRoutingRules()
+        let enabledRules = polishRoutingEnabled ? rules.filter(\.isEnabled) : []
+        let matchedRule = enabledRules
+            .filter { rule in
+                guard !rule.trimmedAppName.isEmpty else { return false }
+                let appMatches = appName?.compare(
+                    rule.trimmedAppName,
+                    options: [.caseInsensitive, .diacriticInsensitive]
+                ) == .orderedSame
+                let bundleMatches = rule.bundleIdentifier != nil &&
+                    bundleIdentifier?.compare(
+                        rule.bundleIdentifier ?? "",
+                        options: [.caseInsensitive, .diacriticInsensitive]
+                    ) == .orderedSame
+                return appMatches || bundleMatches
+            }
+            .sorted { lhs, rhs in
+                if lhs.priority != rhs.priority { return lhs.priority < rhs.priority }
+                return lhs.createdAt < rhs.createdAt
+            }
+            .first
+        let matchedPreset = matchedRule.flatMap { rule in
+            polishPresets.first { $0.id == rule.presetId && $0.isEnabled }
+        }
+        let fallbackPreset = polishRoutingFallback == .selectedPolish ? selectedPolishPreset : nil
+        return PolishRoutingPreview(
+            appName: appName,
+            bundleIdentifier: bundleIdentifier,
+            matchedRule: matchedPreset == nil ? nil : matchedRule,
+            matchedPreset: matchedPreset,
+            fallbackPreset: fallbackPreset,
+            fallback: polishRoutingFallback
+        )
+    }
+
+    private func resolveQuickPolishPresetForRecording(oneShotPresetId: String? = nil) -> PolishPreset? {
+        if let oneShotPresetId {
+            guard let preset = polishPresets.first(where: {
+                $0.id == oneShotPresetId && $0.isEnabled
+            }) else {
+                activeQuickPolishPresetId = nil
+                activeQuickPolishRouteDescription = nil
+                AppLogger.warning("QuickPipeline one-shot Polish unavailable id=\(oneShotPresetId)")
+                return nil
+            }
+
+            activeQuickPolishPresetId = preset.id
+            activeQuickPolishRouteDescription = "Shortcut -> \(preset.displayName)"
+            AppLogger.info("QuickPipeline one-shot Polish preset=\(preset.displayName)")
+            return preset
+        }
+
+        let preview = resolvePolishRoutingPreview()
+        let preset = preview.resolvedPreset
+        activeQuickPolishPresetId = preset?.id
+        if let matchedRule = preview.matchedRule, let preset {
+            activeQuickPolishRouteDescription = "\(matchedRule.routeDisplayName) -> \(preset.displayName)"
+            AppLogger.info("PolishRouting: matched app=\(preview.appName ?? "unknown") intent=\(matchedRule.intent.rawValue) preset=\(preset.displayName)")
+        } else if let preset {
+            activeQuickPolishRouteDescription = "Fallback -> \(preset.displayName)"
+        } else {
+            activeQuickPolishRouteDescription = nil
+        }
+        return preset
+    }
+
+    private var activeQuickPolishPreset: PolishPreset? {
+        guard let activeQuickPolishPresetId else { return nil }
+        return polishPresets.first { $0.id == activeQuickPolishPresetId && $0.isEnabled }
+    }
+
+    private func clearActiveQuickPolishPreset() {
+        activeQuickPolishPresetId = nil
+        activeQuickPolishRouteDescription = nil
     }
 
     var selectedPolishPreset: PolishPreset? {
@@ -1183,12 +1841,16 @@ class AppState: ObservableObject {
     /// Provider selected when the current quick recording started.
     /// UI can switch Local/Public while recording, but the active pipeline must stay stable.
     private var activeQuickRecordingProviderId: String?
+    private var activeQuickCapturesMicrophone = true
+    private var activeQuickCapturesDesktopAudio = false
+    private var activeQuickPolishPresetId: String?
+    private var activeQuickPolishRouteDescription: String?
 
     /// Task for streaming session
     private var streamingTask: Task<Void, Never>?
 
     /// Start recording audio
-    func startRecording() async {
+    func startRecording(oneShotPolishPresetId: String? = nil) async {
         guard !isQuickRecordingTransitioning, !isQuickTranscriptionInFlight, !isRecording else {
             AppLogger.warning("QuickPipeline start ignored reason=busy recording=\(isRecording) transitioning=\(isQuickRecordingTransitioning) transcribing=\(isQuickTranscriptionInFlight)")
             statusMessage = isQuickTranscriptionInFlight ? "Finishing previous recording..." : statusMessage
@@ -1209,9 +1871,31 @@ class AppState: ObservableObject {
         idleUnloadTimer = nil
 
         let selectedProviderId = selectedTranscriptionProviderId
+        pendingQuickPolishScreenshotTask?.cancel()
+        pendingQuickPolishScreenshotTask = nil
+        let resolvedPolishPreset = resolveQuickPolishPresetForRecording(
+            oneShotPresetId: oneShotPolishPresetId
+        )
+        if oneShotPolishPresetId != nil, resolvedPolishPreset == nil {
+            clearPendingQuickPolishContext()
+            isQuickRecordingTransitioning = false
+            statusMessage = "Polish shortcut is unavailable"
+            return
+        }
+        if let polishPreset = resolvedPolishPreset {
+            if polishPreset.requiresAccessibilityPermission,
+               !KeyboardSimulator.shared.hasAccessibilityPermission {
+                KeyboardSimulator.shared.requestAccessibilityPermission()
+            }
+            pendingQuickPolishContext = PolishContextReader.collectForQuickRun(for: polishPreset)
+        } else {
+            clearPendingQuickPolishContext()
+        }
 
         if selectedProviderId != TranscriptionProviderDescriptor.localBackend.id {
             guard APIKeychainStore.hasAPIKey(providerId: selectedProviderId) else {
+                clearPendingQuickPolishContext()
+                clearActiveQuickPolishPreset()
                 isQuickRecordingTransitioning = false
                 statusMessage = "Add \(publicProviderName(for: selectedProviderId)) API key first"
                 return
@@ -1228,6 +1912,8 @@ class AppState: ObservableObject {
                     }
                 } else {
                     // No preferred model — first-time user needs to pick one
+                    clearPendingQuickPolishContext()
+                    clearActiveQuickPolishPreset()
                     isQuickRecordingTransitioning = false
                     statusMessage = "Load model first"
                     return
@@ -1247,9 +1933,13 @@ class AppState: ObservableObject {
         let streamingEnabled = UserDefaults.standard.bool(forKey: "realTimeStreaming")
 
         activeQuickRecordingProviderId = selectedProviderId
+        let activePreset = resolvedPolishPreset
+        activeQuickCapturesMicrophone = activePreset?.usesVoiceTranscript ?? true
+        activeQuickCapturesDesktopAudio = activePreset?.usesDesktopAudio == true
 
         if selectedProviderId == TranscriptionProviderDescriptor.localBackend.id,
            streamingEnabled,
+           activeQuickCapturesMicrophone,
            KeyboardSimulator.shared.hasAccessibilityPermission {
             await startStreamingRecording()
         } else {
@@ -1260,8 +1950,21 @@ class AppState: ObservableObject {
     /// Start normal (non-streaming) recording
     /// Uses Swift's AVFoundation for proper microphone permission handling
     private func startNormalRecording(providerId: String) async {
+        let shouldCaptureMicrophone = activeQuickCapturesMicrophone
+        let shouldCaptureDesktopAudio = activeQuickCapturesDesktopAudio
+
+        guard shouldCaptureMicrophone || shouldCaptureDesktopAudio else {
+            activeQuickCapturesMicrophone = true
+            activeQuickCapturesDesktopAudio = false
+            activeQuickRecordingProviderId = nil
+            clearActiveQuickPolishPreset()
+            isQuickRecordingTransitioning = false
+            statusMessage = "Enable voice or desktop audio"
+            return
+        }
+
         // Check microphone permission
-        if !AudioRecorder.hasMicrophonePermission {
+        if shouldCaptureMicrophone && !AudioRecorder.hasMicrophonePermission {
             AudioRecorder.requestMicrophonePermission { [weak self] granted in
                 guard let self = self else { return }
                 if granted {
@@ -1271,6 +1974,7 @@ class AppState: ObservableObject {
                 } else {
                     self.isQuickRecordingTransitioning = false
                     self.activeQuickRecordingProviderId = nil
+                    self.clearActiveQuickPolishPreset()
                     self.statusMessage = "Microphone permission denied"
                     if self.mutePlaybackDuringRecording {
                         self.audioManager.endDuckingSession()
@@ -1280,7 +1984,41 @@ class AppState: ObservableObject {
             return
         }
 
-        configureRollingBasicBatchingIfNeeded(providerId: providerId)
+        if shouldCaptureMicrophone {
+            configureRollingBasicBatchingIfNeeded(providerId: providerId)
+        } else {
+            cleanupRollingBasicBatching()
+        }
+
+        if shouldCaptureDesktopAudio {
+            let systemAudioStarted = await quickSystemAudioRecorder.startRecording()
+            if !systemAudioStarted {
+                AppLogger.warning("QuickPipeline desktop audio module unavailable")
+                activeQuickCapturesDesktopAudio = false
+                if !shouldCaptureMicrophone {
+                    activeQuickRecordingProviderId = nil
+                    clearActiveQuickPolishPreset()
+                    isQuickRecordingTransitioning = false
+                    statusMessage = "Screen Recording permission needed"
+                    if mutePlaybackDuringRecording {
+                        audioManager.endDuckingSession()
+                    }
+                    return
+                }
+            }
+        }
+
+        if !shouldCaptureMicrophone {
+            isRecording = true
+            isStreamingMode = false
+            isQuickRecordingTransitioning = false
+            statusMessage = "Recording desktop audio..."
+            SoundManager.shared.playStartSound()
+            recordingIndicator.show()
+            scheduleQuickPolishScreenshotCaptureIfNeeded()
+            startDesktopAudioPolling()
+            return
+        }
 
         // Start Swift-native recording with selected device
         if await audioRecorder.startRecording(deviceId: selectedDeviceId) {
@@ -1295,11 +2033,18 @@ class AppState: ObservableObject {
             // Show floating indicator
             recordingIndicator.show()
 
+            scheduleQuickPolishScreenshotCaptureIfNeeded()
+
             // Start polling audio recorder for volume updates
             startVolumePolling()
         } else {
+            if quickSystemAudioRecorder.isRecording {
+                await quickSystemAudioRecorder.cancelRecording()
+            }
             cleanupRollingBasicBatching()
+            clearPendingQuickPolishContext()
             activeQuickRecordingProviderId = nil
+            clearActiveQuickPolishPreset()
             isQuickRecordingTransitioning = false
             statusMessage = "Failed to start recording"
             if mutePlaybackDuringRecording {
@@ -1314,8 +2059,19 @@ class AppState: ObservableObject {
         statusTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self, self.audioRecorder.isRecording else { return }
             DispatchQueue.main.async {
-                self.currentVolume = Double(self.audioRecorder.currentVolume)
-                self.recordingDuration = self.audioRecorder.duration
+                self.recordingActivity.volume = Double(self.audioRecorder.currentVolume)
+                self.recordingActivity.duration = self.audioRecorder.duration
+            }
+        }
+    }
+
+    private func startDesktopAudioPolling() {
+        statusTimer?.invalidate()
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self = self, self.quickSystemAudioRecorder.isRecording else { return }
+            DispatchQueue.main.async {
+                self.recordingActivity.volume = 0
+                self.recordingActivity.duration = self.quickSystemAudioRecorder.duration
             }
         }
     }
@@ -1335,6 +2091,8 @@ class AppState: ObservableObject {
 
         // Show floating indicator
         recordingIndicator.show()
+
+        scheduleQuickPolishScreenshotCaptureIfNeeded()
 
         // Start streaming in background task
         streamingTask = Task {
@@ -1375,6 +2133,9 @@ class AppState: ObservableObject {
                 self.isQuickRecordingTransitioning = false
                 self.isQuickTranscriptionInFlight = false
                 self.activeQuickRecordingProviderId = nil
+                self.clearActiveQuickPolishPreset()
+                self.activeQuickCapturesMicrophone = true
+                self.activeQuickCapturesDesktopAudio = false
                 self.statusMessage = "Ready"
                 self.recordingIndicator.hide()
                 
@@ -1384,6 +2145,55 @@ class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    private func scheduleQuickPolishScreenshotCaptureIfNeeded() {
+        guard let preset = activeQuickPolishPreset,
+              preset.usesScreenSnapshot,
+              !preset.bypassLLM else {
+            return
+        }
+
+        let presetId = preset.id
+        pendingQuickPolishScreenshotTask?.cancel()
+        pendingQuickPolishScreenshotTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(850))
+            guard !Task.isCancelled else { return }
+
+            let screenshotURL = await PolishContextReader.captureScreenshotRegion()
+            guard !Task.isCancelled,
+                  let screenshotURL else {
+                AppLogger.info("PolishContext: screenshot capture cancelled or empty")
+                return
+            }
+            guard let screenshotData = try? Data(contentsOf: screenshotURL),
+                  !screenshotData.isEmpty else {
+                try? FileManager.default.removeItem(at: screenshotURL)
+                AppLogger.warning("PolishContext: screenshot capture produced unreadable image data")
+                return
+            }
+
+            await MainActor.run {
+                guard let self,
+                      self.activeQuickPolishPreset?.id == presetId,
+                      self.pendingQuickPolishContext != nil else {
+                    try? FileManager.default.removeItem(at: screenshotURL)
+                    return
+                }
+                self.pendingQuickPolishContext?.screenshotURL = screenshotURL
+                self.pendingQuickPolishContext?.screenshotData = screenshotData
+                AppLogger.info("PolishContext: screenshot captured path=\(screenshotURL.path) bytes=\(screenshotData.count)")
+            }
+        }
+    }
+
+    private func clearPendingQuickPolishContext() {
+        pendingQuickPolishScreenshotTask?.cancel()
+        pendingQuickPolishScreenshotTask = nil
+        if let screenshotURL = pendingQuickPolishContext?.screenshotURL {
+            try? FileManager.default.removeItem(at: screenshotURL)
+        }
+        pendingQuickPolishContext = nil
     }
 
     /// Stop recording and get transcription
@@ -1431,6 +2241,7 @@ class AppState: ObservableObject {
                 isQuickRecordingTransitioning = false
                 isQuickTranscriptionInFlight = false
                 activeQuickRecordingProviderId = nil
+                clearActiveQuickPolishPreset()
                 statusMessage = "Model failed to load"
                 recordingIndicator.hide()
                 if mutePlaybackDuringRecording { audioManager.endDuckingSession() }
@@ -1445,14 +2256,20 @@ class AppState: ObservableObject {
 
         // Stop Swift AudioRecorder and get WAV data
         let audioStopStartedAt = Date()
-        guard let audioData = await audioRecorder.stopRecording() else {
+        let audioData = activeQuickCapturesMicrophone ? await audioRecorder.stopRecording() : nil
+        let desktopRecording = await stopQuickSystemAudioIfNeeded()
+        if activeQuickCapturesMicrophone && audioData == nil && desktopRecording == nil {
             isRecording = false
             isQuickRecordingTransitioning = false
             isQuickTranscriptionInFlight = false
             activeQuickRecordingProviderId = nil
+            clearActiveQuickPolishPreset()
+            activeQuickCapturesMicrophone = true
+            activeQuickCapturesDesktopAudio = false
             statusMessage = "No audio recorded"
             recordingIndicator.hide()
             cleanupRollingBasicBatching()
+            clearPendingQuickPolishContext()
             
             // End ducking session (error path)
             if mutePlaybackDuringRecording {
@@ -1462,7 +2279,8 @@ class AppState: ObservableObject {
         }
         let audioStopElapsed = Date().timeIntervalSince(audioStopStartedAt)
 
-        let recordedDuration = audioRecorder.duration
+        let recordedDuration = activeQuickCapturesMicrophone ? audioRecorder.duration : 0
+        let effectiveDuration = max(recordedDuration, desktopRecording?.durationSeconds ?? 0)
         isRecording = false
         isQuickRecordingTransitioning = false
 
@@ -1471,16 +2289,21 @@ class AppState: ObservableObject {
             audioManager.endDuckingSession()
         }
 
-        guard recordedDuration >= 0.75 else {
+        let hasDesktopRecording = desktopRecording != nil
+        guard recordedDuration >= 0.75 || hasDesktopRecording else {
             cleanupRollingBasicBatching()
             isQuickTranscriptionInFlight = false
             activeQuickRecordingProviderId = nil
+            clearActiveQuickPolishPreset()
+            activeQuickCapturesMicrophone = true
+            activeQuickCapturesDesktopAudio = false
             statusMessage = "Recording too short"
             recordingIndicator.hide()
+            clearPendingQuickPolishContext()
             AppLogger.warning(String(
                 format: "QuickPipeline discarded too-short recording duration=%.2fs bytes=%d",
                 recordedDuration,
-                audioData.count
+                audioData?.count ?? 0
             ))
             return
         }
@@ -1491,8 +2314,8 @@ class AppState: ObservableObject {
         let rollingTailChunk = rollingWasUsed ? audioRecorder.finalizeRollingTailChunk() : nil
         AppLogger.info(String(
             format: "QuickPipeline audioFinalized duration=%.2fs bytes=%d finalizeElapsed=%.2fs provider=%@ rollingBatches=%@ tailChunk=%@",
-            recordedDuration,
-            audioData.count,
+            effectiveDuration,
+            audioData?.count ?? desktopRecording?.audioData.count ?? 0,
             audioStopElapsed,
             publicProviderName(for: selectedProviderId),
             rollingWasUsed ? "true" : "false",
@@ -1503,21 +2326,30 @@ class AppState: ObservableObject {
             let result: TranscriptionProviderResult
             let transcriptionStartedAt = Date()
 
-            if let rollingSession, rollingSession.hasStarted {
+            if audioData != nil, let rollingSession, rollingSession.hasStarted {
                 statusMessage = "Finishing batches..."
                 AppLogger.info("QuickPipeline using rolling local batches for final transcript")
                 result = try await rollingSession.finish(
                     finalChunk: rollingTailChunk,
                     totalDurationSeconds: recordedDuration
                 )
-            } else if let rollingAPISession, rollingAPISession.hasStarted {
+            } else if let audioData, let rollingAPISession, rollingAPISession.hasStarted {
                 statusMessage = "Finishing API batches..."
                 AppLogger.info("QuickPipeline using rolling public API batches for final transcript")
-                result = try await rollingAPISession.finish(
-                    finalChunk: rollingTailChunk,
-                    totalDurationSeconds: recordedDuration
-                )
-            } else {
+                do {
+                    result = try await rollingAPISession.finish(
+                        finalChunk: rollingTailChunk,
+                        totalDurationSeconds: recordedDuration
+                    )
+                } catch {
+                    result = try await transcribeFullRecordingAfterBatchFailure(
+                        audioData: audioData,
+                        providerId: selectedProviderId,
+                        durationSeconds: recordedDuration,
+                        batchError: error
+                    )
+                }
+            } else if let audioData {
                 AppLogger.info(String(
                     format: "QuickPipeline using single-shot transcription provider=%@ duration=%.2fs localRollingSession=%@ apiRollingSession=%@ rollingStarted=%@",
                     publicProviderName(for: selectedProviderId),
@@ -1544,6 +2376,17 @@ class AppState: ObservableObject {
                         self.statusMessage = "Transcribing... (\(Int(update.elapsedSeconds))s)"
                     }
                 }
+            } else {
+                let provider = transcriptionProvider(for: selectedProviderId)
+                result = TranscriptionProviderResult(
+                    text: "",
+                    durationSeconds: effectiveDuration,
+                    processingTimeSeconds: 0,
+                    realtimeFactor: 0,
+                    provider: provider.descriptor,
+                    model: currentTranscriptionModel(for: provider.descriptor),
+                    workflow: .basic
+                )
             }
             let transcriptionElapsed = Date().timeIntervalSince(transcriptionStartedAt)
             AppLogger.info(String(
@@ -1561,6 +2404,8 @@ class AppState: ObservableObject {
 
             cleanupRollingBasicBatching()
             activeQuickRecordingProviderId = nil
+            activeQuickCapturesMicrophone = true
+            activeQuickCapturesDesktopAudio = false
             let usage = result.usage
             lastTranscriptionUsage = usage
             let rawTranscriptionText = result.text
@@ -1570,19 +2415,80 @@ class AppState: ObservableObject {
             var appliedPolishPresetName: String?
             var polishEstimatedCostUSD: Double?
             var polishFailureMessage: String?
+            var didPresentFloatingPolish = false
+            var clipboardScreenshotData: Data?
+            var pasteBehavior: PolishPasteBehavior?
+            var shouldPasteTextAndScreenshot = false
 
-            if let polishPreset = selectedPolishPreset {
+            if let polishPreset = activeQuickPolishPreset {
+                pasteBehavior = polishPreset.pasteBehavior
+                if let desktopRecording,
+                   polishPreset.usesDesktopAudio {
+                    do {
+                        statusMessage = "Transcribing desktop audio..."
+                        let desktopResult = try await transcribeQuickDesktopAudio(
+                            desktopRecording,
+                            providerId: selectedProviderId
+                        )
+                        pendingQuickPolishContext?.desktopAudioTranscript = desktopResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        AppLogger.info(String(
+                            format: "QuickPipeline desktopAudioComplete provider=%@ model=%@ duration=%.2fs words=%d cost=$%.6f",
+                            desktopResult.provider.displayName,
+                            desktopResult.model.id,
+                            desktopResult.durationSeconds,
+                            desktopResult.text.split(separator: " ").count,
+                            desktopResult.usage.estimatedCostUSD ?? 0
+                        ))
+                    } catch {
+                        AppLogger.warning("QuickPipeline desktop audio transcription failed error=\(error.localizedDescription)")
+                    }
+                }
                 statusMessage = "Polishing with \(polishPreset.displayName)..."
+                let shouldShowFloatingWindow = polishPreset.outputModules.contains(.floatingWindow)
+                if shouldShowFloatingWindow {
+                    didPresentFloatingPolish = true
+                    recordingIndicator.presentPolishResponse(
+                        presetName: polishPreset.displayName,
+                        screenshotData: pendingQuickPolishContext?.screenshotData
+                    )
+                }
                 let polishStartedAt = Date()
+                let polishDeltaHandler: ((String) async -> Void)?
+                if shouldShowFloatingWindow {
+                    polishDeltaHandler = { [weak self] delta in
+                        await MainActor.run {
+                            guard let self else { return }
+                            self.recordingIndicator.appendPolishResponse(delta: delta)
+                        }
+                    }
+                } else {
+                    polishDeltaHandler = nil
+                }
                 do {
-                    let polishResult = try await polishTranscript(rawTranscriptionText, using: polishPreset)
+                    let polishResult = try await polishTranscript(
+                        rawTranscriptionText,
+                        using: polishPreset,
+                        context: pendingQuickPolishContext,
+                        modelSource: selectedProviderId == TranscriptionProviderDescriptor.localBackend.id ? .local : .public,
+                        onDelta: polishDeltaHandler
+                    )
                     let polished = polishResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !polished.isEmpty {
                         polishedTranscriptionText = polished
                         appliedPolishPresetId = polishPreset.id
                         appliedPolishPresetName = polishPreset.displayName
                         polishEstimatedCostUSD = polishResult.estimatedCostUSD
-                        finalTranscriptionText = polishPreset.outputBehavior == .copyRaw ? rawTranscriptionText : polished
+                        finalTranscriptionText = polished
+                        if polishPreset.outputModules.contains(.copyTextAndScreenshot) {
+                            clipboardScreenshotData = polishResult.screenshotData
+                            shouldPasteTextAndScreenshot = true
+                        }
+                        if shouldShowFloatingWindow {
+                            recordingIndicator.completePolishResponse(
+                                text: finalTranscriptionText,
+                                screenshotData: polishResult.screenshotData
+                            )
+                        }
                     }
                     print(String(
                         format: "AppState: quick polish applied preset=%@ elapsed=%.2fs estimatedCost=$%.6f outputWords=%d",
@@ -1595,14 +2501,22 @@ class AppState: ObservableObject {
                     print("Polish failed: \(error)")
                     let description = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     polishFailureMessage = "Polish failed: \(description)"
+                    if shouldShowFloatingWindow {
+                        recordingIndicator.completePolishResponse(
+                            text: polishFailureMessage ?? "Polish failed.",
+                            screenshotData: pendingQuickPolishContext?.screenshotData
+                        )
+                    }
                 }
             }
+            clearPendingQuickPolishContext()
 
             lastTranscription = finalTranscriptionText
             statusMessage = polishFailureMessage ?? "Ready"
 
-            // Hide indicator after transcription completes
-            recordingIndicator.hide()
+            if !didPresentFloatingPolish {
+                recordingIndicator.hide()
+            }
 
             // Save to history
             let entry = TranscriptionEntry(
@@ -1634,30 +2548,48 @@ class AppState: ObservableObject {
             ))
 
             // ALWAYS copy to clipboard (default behavior)
-            copyToClipboard(finalTranscriptionText)
+            copyToClipboard(finalTranscriptionText, screenshotData: clipboardScreenshotData)
 
-            // Auto-paste if enabled (simulates Cmd+V)
-            let autoPaste = UserDefaults.standard.bool(forKey: "autoPasteAfterTranscription")
-            if autoPaste && hasAccessibilityPermission {
-                // Small delay to ensure clipboard is ready
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    KeyboardSimulator.shared.pasteAsync()
+            let shouldAutoPaste: Bool
+            if pasteBehavior != nil {
+                shouldAutoPaste = pasteBehavior == .pasteIntoApp
+            } else {
+                shouldAutoPaste = UserDefaults.standard.bool(forKey: "autoPasteAfterTranscription")
+            }
+
+            if shouldAutoPaste && hasAccessibilityPermission {
+                if shouldPasteTextAndScreenshot, let clipboardScreenshotData {
+                    let pasteTarget = PolishContextReader.readActiveAppName()
+                    if isMarkdownFriendlyPasteTarget(pasteTarget) {
+                        pasteScreenshotThenText(finalTranscriptionText, screenshotData: clipboardScreenshotData)
+                    } else {
+                        AppLogger.warning("QuickPipeline skipped image+text auto-paste because activeApp=\(pasteTarget ?? "unknown") is not markdown-friendly")
+                    }
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        KeyboardSimulator.shared.pasteAsync()
+                    }
                 }
             }
 
             isQuickTranscriptionInFlight = false
+            clearActiveQuickPolishPreset()
 
             // Start idle unload timer — unloads model after 2 minutes of inactivity
             startIdleUnloadTimer()
 
         } catch {
+            _ = await stopQuickSystemAudioIfNeeded()
             cleanupRollingBasicBatching()
             activeQuickRecordingProviderId = nil
+            clearActiveQuickPolishPreset()
+            activeQuickCapturesMicrophone = true
+            activeQuickCapturesDesktopAudio = false
             isRecording = false
             isQuickRecordingTransitioning = false
             isQuickTranscriptionInFlight = false
             if "\(error)".contains("timed out") || "\(error)".contains("timeout") {
-                statusMessage = "Transcription timed out - try shorter audio"
+                statusMessage = "Transcription timed out"
             } else if selectedProviderId != TranscriptionProviderDescriptor.localBackend.id,
                       let localizedError = error as? LocalizedError,
                       let description = localizedError.errorDescription {
@@ -1667,7 +2599,106 @@ class AppState: ObservableObject {
             }
             recordingIndicator.hide()
             print("Stop recording error: \(error)")
+
+            // Never lose a long recording silently: keep the audio and tell the user.
+            if let audioData, recordedDuration >= 5 {
+                let savedURL = saveFailedQuickRecording(audioData)
+                presentQuickTranscriptionFailure(error, savedURL: savedURL)
+            }
         }
+    }
+
+    /// Last resort when rolling API batches fail: upload the whole recording once
+    /// on a fresh connection.
+    private func transcribeFullRecordingAfterBatchFailure(
+        audioData: Data,
+        providerId: String,
+        durationSeconds: Double,
+        batchError: Error
+    ) async throws -> TranscriptionProviderResult {
+        // OpenAI rejects uploads over 25 MB (~13 min of 16 kHz WAV).
+        guard !(batchError is CancellationError), audioData.count < 24_000_000 else {
+            throw batchError
+        }
+
+        AppLogger.warning(String(
+            format: "QuickPipeline batch transcription failed, falling back to single upload duration=%.2fs bytes=%d error=%@",
+            durationSeconds,
+            audioData.count,
+            batchError.localizedDescription
+        ))
+        statusMessage = "Uploading full recording..."
+        let provider = transcriptionProvider(for: providerId)
+        let request = TranscriptionRequest(
+            audioData: audioData,
+            recordedDurationSeconds: durationSeconds,
+            workflow: .basic,
+            model: currentTranscriptionModel(for: provider.descriptor)
+        )
+        do {
+            return try await provider.transcribe(request) { _ in }
+        } catch {
+            AppLogger.error("QuickPipeline single-upload fallback failed error=\(error.localizedDescription)")
+            throw batchError
+        }
+    }
+
+    private func saveFailedQuickRecording(_ audioData: Data) -> URL? {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        let directory = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AiTranscribe/FailedRecordings", isDirectory: true)
+        let url = directory.appendingPathComponent("recording-\(formatter.string(from: Date())).wav")
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try audioData.write(to: url)
+            AppLogger.info("QuickPipeline saved failed recording path=\(url.path)")
+            return url
+        } catch {
+            AppLogger.error("QuickPipeline could not save failed recording error=\(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func presentQuickTranscriptionFailure(_ error: Error, savedURL: URL?) {
+        let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Transcription failed"
+            if savedURL != nil {
+                alert.informativeText = "\(detail)\n\nYour recording was saved, so nothing is lost."
+                alert.addButton(withTitle: "Show Recording")
+                alert.addButton(withTitle: "OK")
+            } else {
+                alert.informativeText = detail
+                alert.addButton(withTitle: "OK")
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            if alert.runModal() == .alertFirstButtonReturn, let savedURL {
+                NSWorkspace.shared.activateFileViewerSelecting([savedURL])
+            }
+        }
+    }
+
+    private func stopQuickSystemAudioIfNeeded() async -> QuickSystemAudioRecording? {
+        guard quickSystemAudioRecorder.isRecording else { return nil }
+        return await quickSystemAudioRecorder.stopRecording()
+    }
+
+    private func transcribeQuickDesktopAudio(
+        _ recording: QuickSystemAudioRecording,
+        providerId: String
+    ) async throws -> TranscriptionProviderResult {
+        let provider = transcriptionProvider(for: providerId)
+        let request = TranscriptionRequest(
+            audioData: recording.audioData,
+            recordedDurationSeconds: recording.durationSeconds,
+            workflow: .basic,
+            model: currentTranscriptionModel(for: provider.descriptor)
+        )
+        return try await provider.transcribe(request) { _ in }
     }
 
     private func configureRollingBasicBatchingIfNeeded(providerId: String) {
@@ -1920,6 +2951,42 @@ class AppState: ObservableObject {
         return currentLocalTranscriptionModel()
     }
 
+    /// The defaults keys that feed refreshActiveTranscriptionModelName().
+    /// "apiTranscriptionModels" mirrors APITranscriptionModelStore.storageKey,
+    /// which is private to the store.
+    private func activeModelDefaultsSnapshot() -> String {
+        let defaults = UserDefaults.standard
+        return [
+            defaults.string(forKey: "selectedTranscriptionProviderId") ?? "",
+            defaults.string(forKey: "selectedOpenAITranscriptionModel") ?? "",
+            defaults.data(forKey: "apiTranscriptionModels")?.base64EncodedString() ?? ""
+        ].joined(separator: "|")
+    }
+
+    /// Recomputes `activeTranscriptionModelName` for the menu bar chip.
+    /// Both branches resolve through `currentTranscriptionModel(for:)` so the
+    /// public-mode fallback chain (and its self-healing UserDefaults write)
+    /// stays in one place.
+    private func refreshActiveTranscriptionModelName() {
+        let providerId = selectedTranscriptionProviderId
+        let name: String
+        if providerId == TranscriptionProviderDescriptor.localBackend.id {
+            if isModelLoading || isAutoLoadingModel {
+                name = "Loading model..."
+            } else if !isModelLoaded {
+                name = "No model"
+            } else {
+                let model = currentTranscriptionModel(for: TranscriptionProviderDescriptor.localBackend)
+                name = model.displayName == "Unknown" ? (loadedModelId ?? "No model") : model.displayName
+            }
+        } else {
+            name = currentTranscriptionModel(for: transcriptionProvider(for: providerId).descriptor).displayName
+        }
+        if activeTranscriptionModelName != name {
+            activeTranscriptionModelName = name
+        }
+    }
+
     /// Stop streaming recording
     private func stopStreamingRecording() async {
         statusMessage = "Finishing..."
@@ -1969,14 +3036,23 @@ class AppState: ObservableObject {
             isStreamingMode = false
         } else {
             // Cancel Swift AudioRecorder (no backend call needed)
-            await audioRecorder.cancelRecording()
+            if activeQuickCapturesMicrophone {
+                await audioRecorder.cancelRecording()
+            }
+            if activeQuickCapturesDesktopAudio || quickSystemAudioRecorder.isRecording {
+                await quickSystemAudioRecorder.cancelRecording()
+            }
             cleanupRollingBasicBatching()
         }
 
+        clearPendingQuickPolishContext()
         isRecording = false
         isQuickRecordingTransitioning = false
         isQuickTranscriptionInFlight = false
         activeQuickRecordingProviderId = nil
+        clearActiveQuickPolishPreset()
+        activeQuickCapturesMicrophone = true
+        activeQuickCapturesDesktopAudio = false
         statusMessage = "Cancelled"
     }
 
@@ -1997,8 +3073,7 @@ class AppState: ObservableObject {
     private func stopStatusPolling() {
         statusTimer?.invalidate()
         statusTimer = nil
-        recordingDuration = 0.0
-        currentVolume = 0.0
+        recordingActivity.reset()
     }
 
     private func pollRecordingStatus() async {
@@ -2053,10 +3128,79 @@ class AppState: ObservableObject {
     }
 
     /// Copy text to the system clipboard
-    func copyToClipboard(_ text: String) {
+    func copyToClipboard(_ text: String, screenshotData: Data? = nil) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+
+        guard let screenshotData,
+              let image = NSImage(data: screenshotData) else {
+            pasteboard.setString(text, forType: .string)
+            return
+        }
+
+        let didWrite = writeTextAndImage(
+            text: text,
+            image: image,
+            to: pasteboard
+        )
+        if !didWrite {
+            pasteboard.setString(text, forType: .string)
+        }
+    }
+
+    func copyTextAndImageToClipboard(text: String, screenshotData: Data?) {
+        copyToClipboard(text, screenshotData: screenshotData)
+    }
+
+    private func pasteScreenshotThenText(_ text: String, screenshotData: Data) {
+        copyImageToClipboard(screenshotData)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            KeyboardSimulator.shared.pasteAsync()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
+            self?.copyToClipboard(text)
+            KeyboardSimulator.shared.pasteAsync()
+        }
+    }
+
+    private func copyImageToClipboard(_ screenshotData: Data) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+
+        guard let image = NSImage(data: screenshotData) else { return }
+        pasteboard.writeObjects([image])
+    }
+
+    private func isMarkdownFriendlyPasteTarget(_ appName: String?) -> Bool {
+        guard let normalized = appName?.lowercased() else { return false }
+        return [
+            "obsidian",
+            "visual studio code",
+            "code",
+            "cursor",
+            "codex",
+            "typora",
+            "markedit",
+            "ia writer",
+            "zettlr",
+            "logseq"
+        ].contains { normalized.contains($0) }
+    }
+
+    private func writeTextAndImage(text: String, image: NSImage, to pasteboard: NSPasteboard) -> Bool {
+        let imageItem = NSPasteboardItem()
+        if let tiffData = image.tiffRepresentation {
+            imageItem.setData(tiffData, forType: .tiff)
+            if let bitmap = NSBitmapImageRep(data: tiffData),
+               let pngData = bitmap.representation(using: .png, properties: [:]) {
+                imageItem.setData(pngData, forType: .png)
+            }
+        }
+
+        let textItem = NSPasteboardItem()
+        textItem.setString("\n\n\(text)", forType: .string)
+
+        return pasteboard.writeObjects([imageItem, textItem])
     }
 
 
@@ -2065,6 +3209,402 @@ class AppState: ObservableObject {
     // =========================================================================
     // The old UserDefaults-based history methods have been replaced by
     // the JSON-based HistoryManager methods defined earlier in this file.
+}
+
+
+// =============================================================================
+// POLISH FLOATING RESPONSE
+// =============================================================================
+
+@MainActor
+final class PolishFloatingResponseModel: ObservableObject {
+    enum Phase: Equatable {
+        case compact
+        case wide
+        case shell
+    }
+
+    @Published var presetName: String
+    @Published var screenshotData: Data?
+    @Published var fullText: String = ""
+    @Published var visibleText: String = ""
+    @Published var phase: Phase = .compact
+    @Published var isLoading = true
+    @Published var isComplete = false
+
+    init(presetName: String, screenshotData: Data?) {
+        self.presetName = presetName
+        self.screenshotData = screenshotData
+    }
+
+    func reset(presetName: String, screenshotData: Data?) {
+        self.presetName = presetName
+        self.screenshotData = screenshotData
+        fullText = ""
+        visibleText = ""
+        phase = .compact
+        isLoading = true
+        isComplete = false
+    }
+
+    func showWide() {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            phase = .wide
+        }
+    }
+
+    func showShell() {
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.88)) {
+            phase = .shell
+        }
+    }
+
+    func append(delta: String) {
+        guard !delta.isEmpty else { return }
+        fullText += delta
+        visibleText = fullText
+        if isLoading {
+            withAnimation(.easeOut(duration: 0.16)) {
+                isLoading = false
+            }
+        }
+        isComplete = false
+    }
+
+    func complete(text: String, screenshotData: Data?) {
+        if let screenshotData {
+            self.screenshotData = screenshotData
+        }
+        fullText = text
+        visibleText = text
+        if isLoading {
+            withAnimation(.easeOut(duration: 0.16)) {
+                self.isLoading = false
+            }
+        }
+        isComplete = true
+    }
+
+    func cancelReveal() {
+    }
+}
+
+@MainActor
+private final class PolishFloatingResponsePresenter {
+    static let shared = PolishFloatingResponsePresenter()
+
+    private var window: NSWindow?
+    private var model: PolishFloatingResponseModel?
+
+    private init() {}
+
+    func show(text: String, presetName: String) {
+        show(text: text, presetName: presetName, screenshotData: nil)
+    }
+
+    func show(text: String, presetName: String, screenshotData: Data?) {
+        showLoading(presetName: presetName, screenshotData: screenshotData)
+        complete(text: text, presetName: presetName, screenshotData: screenshotData)
+    }
+
+    func showLoading(presetName: String, screenshotData: Data?) {
+        let responseModel: PolishFloatingResponseModel
+        if let model {
+            model.reset(presetName: presetName, screenshotData: screenshotData)
+            responseModel = model
+        } else {
+            responseModel = PolishFloatingResponseModel(presetName: presetName, screenshotData: screenshotData)
+            model = responseModel
+        }
+
+        let window = ensureWindow(model: responseModel)
+        let capsuleFrame = frame(width: 76, height: 42)
+        window.setFrame(capsuleFrame, display: true)
+        window.contentView?.frame = NSRect(origin: .zero, size: capsuleFrame.size)
+        window.alphaValue = 0
+        window.orderFront(nil)
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.16
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().alphaValue = 1
+        } completionHandler: { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                self?.expandIntoReader(screenshotData: screenshotData)
+            }
+        }
+    }
+
+    func complete(text: String, presetName: String, screenshotData: Data?) {
+        if model == nil || window == nil {
+            showLoading(presetName: presetName, screenshotData: screenshotData)
+        }
+        model?.presetName = presetName
+        model?.complete(text: text, screenshotData: screenshotData)
+    }
+
+    private func ensureWindow(model: PolishFloatingResponseModel) -> NSWindow {
+        if let window {
+            return window
+        }
+
+        let view = PolishFloatingResponseView(
+            model: model,
+            onCopy: { [weak self] in
+                guard let self else { return }
+                self.copyFloatingResponseToPasteboard()
+                self.close()
+            },
+            onClose: { [weak self] in
+                self?.close()
+            }
+        )
+
+        let hostingView = NSHostingView(rootView: view)
+        if #available(macOS 13.0, *) {
+            hostingView.sizingOptions = []
+        }
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = .clear
+
+        let window = NSPanel(
+            contentRect: frame(width: 76, height: 42),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isReleasedWhenClosed = false
+        window.ignoresMouseEvents = false
+        if let contentView = window.contentView {
+            contentView.wantsLayer = true
+            contentView.layer?.backgroundColor = .clear
+        }
+
+        self.window = window
+        return window
+    }
+
+    private func copyFloatingResponseToPasteboard() {
+        let pasteboard = NSPasteboard.general
+        let text = model?.fullText ?? ""
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
+    private func expandIntoReader(screenshotData: Data?) {
+        guard let window else { return }
+        let wideFrame = frame(width: 420, height: 46)
+        let readerFrame = frame(width: 720, height: screenshotData == nil ? 560 : 720, topOffset: 88)
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.24
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            window.animator().setFrame(wideFrame, display: true)
+        } completionHandler: { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                self?.model?.showWide()
+                self?.model?.showShell()
+            }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.34
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                window.animator().setFrame(readerFrame, display: true)
+            }
+        }
+    }
+
+    private func frame(width: CGFloat, height: CGFloat, topOffset: CGFloat = 8) -> NSRect {
+        guard let screenFrame = NSScreen.main?.visibleFrame else {
+            return NSRect(x: 0, y: 0, width: width, height: height)
+        }
+
+        return NSRect(
+            x: screenFrame.midX - width / 2,
+            y: screenFrame.maxY - height - topOffset,
+            width: width,
+            height: height
+        )
+    }
+
+    private func close() {
+        model?.cancelReveal()
+        window?.orderOut(nil)
+    }
+}
+
+struct PolishFloatingResponseView: View {
+    @ObservedObject var model: PolishFloatingResponseModel
+    let onCopy: () -> Void
+    let onClose: () -> Void
+
+    private var screenshotImage: NSImage? {
+        guard let screenshotData = model.screenshotData else { return nil }
+        return NSImage(data: screenshotData)
+    }
+
+    var body: some View {
+        Group {
+            if model.phase == .shell {
+                shellView
+                    .transition(.opacity)
+            } else {
+                capsuleView
+                    .transition(.opacity)
+            }
+        }
+        .animation(.spring(response: 0.42, dampingFraction: 0.88), value: model.phase)
+    }
+
+    private var capsuleView: some View {
+        loaderDot(size: model.phase == .wide ? 16 : 15)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.28), lineWidth: 0.8))
+    }
+
+    private var shellView: some View {
+        ZStack(alignment: .top) {
+            readerContent
+
+            if model.visibleText.isEmpty {
+                loaderDot(size: 16)
+                    .padding(.top, 18)
+                    .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .strokeBorder(.white.opacity(0.16), lineWidth: 0.9)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+    }
+
+    private var readerContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if let screenshotImage {
+                        Image(nsImage: screenshotImage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 560, maxHeight: 300)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+                        .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .top)))
+                    }
+
+                    if model.visibleText.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(.white.opacity(0.12))
+                                .frame(width: 430, height: 8)
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(.white.opacity(0.08))
+                                .frame(width: 360, height: 8)
+                        }
+                        .frame(maxWidth: 560, alignment: .topLeading)
+                        .padding(.top, screenshotImage == nil ? 90 : 0)
+                    } else {
+                        PolishMarkdownView(text: model.visibleText)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: 560, alignment: .topLeading)
+                            .transition(.opacity)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 28)
+                .padding(.top, 58)
+                .padding(.bottom, 24)
+            }
+            .scrollIndicators(.hidden)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+
+            HStack {
+                Text(model.isComplete ? "\(model.fullText.split(separator: " ").count) words" : "Streaming response...")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.tertiary)
+
+                Spacer()
+
+                Button(action: onClose) {
+                    Text("Close")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Color.primary.opacity(0.055), in: Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onCopy) {
+                    Label("Copy", systemImage: "doc.on.doc")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 7)
+                        .background(Color.blue, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(model.fullText.isEmpty)
+                .opacity(model.fullText.isEmpty ? 0.45 : 1)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 18)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func loaderDot(size: CGFloat) -> some View {
+        Circle()
+            .fill(.white.opacity(0.92))
+            .frame(width: size, height: size)
+            .shadow(color: .white.opacity(0.45), radius: 8)
+            .overlay(
+                Circle()
+                    .strokeBorder(.white.opacity(0.30), lineWidth: 1)
+                    .scaleEffect(model.visibleText.isEmpty ? 1.45 : 1.0)
+                    .opacity(model.visibleText.isEmpty ? 0.0 : 0.7)
+                    .animation(
+                        .easeOut(duration: 0.9).repeatForever(autoreverses: false),
+                        value: model.visibleText.isEmpty
+                    )
+            )
+    }
+}
+
+private struct LoadingCapsule: View {
+    @State private var pulse = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .fill(.white.opacity(0.75))
+                    .frame(width: 4, height: 4)
+                    .scaleEffect(pulse ? 1.0 : 0.55)
+                    .opacity(pulse ? 0.95 : 0.35)
+                    .animation(
+                        .easeInOut(duration: 0.62)
+                        .repeatForever(autoreverses: true)
+                        .delay(Double(index) * 0.12),
+                        value: pulse
+                    )
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(.white.opacity(0.08), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 0.7))
+        .onAppear { pulse = true }
+    }
 }
 
 

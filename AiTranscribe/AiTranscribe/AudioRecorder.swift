@@ -306,6 +306,7 @@ class AudioRecorder: NSObject, ObservableObject {
 
     /// Adaptive gain — compensates for hardware gain changes
     private var micGain: Float = 2.0
+    private let inputGainGuard = InputGainGuard()
 
     /// All recorded buffers (16kHz mono)
     private var recordedBuffers: [AVAudioPCMBuffer] = []
@@ -356,8 +357,9 @@ class AudioRecorder: NSObject, ObservableObject {
     /// Start recording audio with an optional specific device
     /// - Parameter deviceId: CoreAudio AudioDeviceID to record from. If nil, uses system default.
     /// - Returns: True if recording started successfully
-    func startRecording(deviceId: AudioDeviceID? = nil) async -> Bool {
+    func startRecording(deviceId requestedDeviceId: AudioDeviceID? = nil) async -> Bool {
         guard !isRecording else { return false }
+        let deviceId = AudioRecorder.resolveRecordingDevice(requestedDeviceId)
 
         // Clear previous recording
         recordedBuffers.removeAll()
@@ -369,6 +371,7 @@ class AudioRecorder: NSObject, ObservableObject {
         micCallbackCount = 0
         fallbackMonitorTask?.cancel()
         recordingToken = UUID()
+        inputGainGuard.begin(deviceId: deviceId)
 
         // Create our target format (16kHz mono for speech recognition)
         guard let targetFormat = AVAudioFormat(
@@ -471,6 +474,7 @@ class AudioRecorder: NSObject, ObservableObject {
         durationTimer = nil
         fallbackMonitorTask?.cancel()
         fallbackMonitorTask = nil
+        inputGainGuard.end()
 
         if usingCompatibilityMicrophone {
             compatibilityMicCapture.stop()
@@ -520,6 +524,7 @@ class AudioRecorder: NSObject, ObservableObject {
         durationTimer = nil
         fallbackMonitorTask?.cancel()
         fallbackMonitorTask = nil
+        inputGainGuard.end()
 
         if usingCompatibilityMicrophone {
             compatibilityMicCapture.stop()
@@ -926,6 +931,63 @@ class AudioRecorder: NSObject, ObservableObject {
         return inputDevices
     }
 
+    static let preferBuiltInMicOverBluetoothKey = "preferBuiltInMicOverBluetooth"
+
+    /// Whether Bluetooth microphones get swapped for the built-in mic (default on)
+    static var prefersBuiltInMicOverBluetooth: Bool {
+        UserDefaults.standard.object(forKey: preferBuiltInMicOverBluetoothKey) as? Bool ?? true
+    }
+
+    static func transportType(_ deviceId: AudioDeviceID) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var transport: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(deviceId, &address, 0, nil, &size, &transport) == noErr else { return nil }
+        return transport
+    }
+
+    static func isBluetoothDevice(_ deviceId: AudioDeviceID) -> Bool {
+        let transport = transportType(deviceId)
+        return transport == kAudioDeviceTransportTypeBluetooth
+            || transport == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    /// Pick the device to actually record from.
+    ///
+    /// Opening a Bluetooth mic forces the device from A2DP (music) into HFP
+    /// (call) mode: the mic drops to 16 kHz speakerphone quality, playback goes
+    /// mono/16 kHz, and output volume jumps to the separate call-profile level.
+    /// With the preference on, a Bluetooth selection (explicit or system
+    /// default) records from the built-in mic instead, so the Bluetooth device
+    /// stays in A2DP.
+    static func resolveRecordingDevice(_ requested: AudioDeviceID?) -> AudioDeviceID? {
+        guard prefersBuiltInMicOverBluetooth else { return requested }
+        let device = requested ?? getDefaultInputDeviceId()
+        guard device != 0, isBluetoothDevice(device) else { return requested }
+        guard let builtIn = listInputDevices().first(where: {
+            transportType($0.id) == kAudioDeviceTransportTypeBuiltIn
+        }) else { return requested }
+        print("AudioRecorder: \(getInputDeviceName(device) ?? "Bluetooth mic") is Bluetooth — recording from \(builtIn.name) to keep it out of HFP call mode")
+        return builtIn.id
+    }
+
+    /// The capture device a recording would use right now: the mic picked in
+    /// the menu (persisted by name), else the system default, after the
+    /// Bluetooth preference. Lets side monitors like the recording indicator
+    /// measure the same mic instead of opening the system default — which, on
+    /// a Bluetooth speaker, forces HFP and silences playback.
+    static func currentRecordingCaptureDevice() -> AVCaptureDevice? {
+        let preferredName = UserDefaults.standard.string(forKey: "preferredMicDeviceName")
+        let selected = preferredName.flatMap { name in
+            listInputDevices().first(where: { $0.name == name })?.id
+        }
+        return captureDevice(for: resolveRecordingDevice(selected))
+    }
+
     /// Set the system default input device
     @discardableResult
     static func setDefaultInputDevice(_ deviceId: AudioDeviceID) -> Bool {
@@ -1265,5 +1327,107 @@ struct InputDevice: Identifiable, Equatable, Hashable {
 
     var displayName: String {
         name + (isDefault ? " (Default)" : "")
+    }
+}
+
+// MARK: - Input Gain Guard
+
+/// Keeps the microphone's *hardware* input gain at full while recording.
+///
+/// Video call apps — Chrome/WebRTC most aggressively — run automatic gain
+/// control that adjusts `kAudioDevicePropertyVolumeScalar` on the input
+/// device. That is a persistent, system-wide device property, not something
+/// scoped to the call: it stays lowered after the meeting ends, and survives
+/// quitting the app. Anything recorded afterwards is quiet at the source.
+///
+/// This cannot be repaired downstream. Make-up gain applied to an already
+/// attenuated signal raises the noise floor with it, so the recording gets
+/// louder without getting clearer. The only real fix is to stop losing the
+/// headroom in the first place.
+///
+/// The guard restores full gain once, when recording starts. It deliberately
+/// does not keep watching: see `begin` for why re-asserting it fights the call
+/// app and stutters the call.
+final class InputGainGuard {
+    /// Below this, the device is considered to have been turned down by
+    /// something else and is restored.
+    private let minimumAcceptable: Float = 0.95
+
+    private var guardedDeviceId: AudioDeviceID?
+
+
+    /// Gain the device was found at when guarding began, for diagnostics.
+    private(set) var originalVolume: Float?
+
+    private static var volumeAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyVolumeScalar,
+        mScope: kAudioDevicePropertyScopeInput,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    /// Current hardware input gain, or nil if the device exposes no such
+    /// control (many USB interfaces and virtual devices do not).
+    static func inputVolume(deviceId: AudioDeviceID) -> Float? {
+        var address = volumeAddress
+        guard AudioObjectHasProperty(deviceId, &address) else { return nil }
+        var value: Float32 = 0
+        var size = UInt32(MemoryLayout<Float32>.size)
+        guard AudioObjectGetPropertyData(deviceId, &address, 0, nil, &size, &value) == noErr else {
+            return nil
+        }
+        return value
+    }
+
+    @discardableResult
+    static func setInputVolume(_ volume: Float, deviceId: AudioDeviceID) -> Bool {
+        var address = volumeAddress
+        guard AudioObjectHasProperty(deviceId, &address) else { return false }
+        var settable = DarwinBoolean(false)
+        guard AudioObjectIsPropertySettable(deviceId, &address, &settable) == noErr,
+              settable.boolValue else { return false }
+        var value = Float32(max(0, min(volume, 1)))
+        return AudioObjectSetPropertyData(
+            deviceId, &address, 0, nil,
+            UInt32(MemoryLayout<Float32>.size), &value
+        ) == noErr
+    }
+
+    /// Restore full gain and keep watching for as long as recording runs.
+    func begin(deviceId: AudioDeviceID?) {
+        let device = deviceId ?? AudioRecorder.getDefaultInputDeviceId()
+        guard device != 0 else { return }
+        end()
+        guardedDeviceId = device
+
+        let current = Self.inputVolume(deviceId: device)
+        originalVolume = current
+        guard let current else {
+            print("InputGainGuard: device \(device) exposes no input volume control")
+            return
+        }
+
+        if current < minimumAcceptable {
+            let restored = Self.setInputVolume(1.0, deviceId: device)
+            print(String(
+                format: "InputGainGuard: input gain was %.3f (%.1f dB down) — restore to 1.0 %@",
+                current, 20 * log10(max(current, 0.0001)), restored ? "succeeded" : "FAILED"
+            ))
+        }
+
+        // Deliberately a single write, with no listener and no repeating
+        // check. Holding the gain by re-writing it turns into a fight: a call
+        // app's gain control lowers the device, we raise it, our write fires
+        // another change notification, it lowers again. Nothing rate-limits
+        // that, every write goes through the HAL to the driver, and it stalls
+        // the other app's capture — a call visibly stutters for the few
+        // seconds it takes their gain control to settle.
+        //
+        // Starting the recording from full input is most of the benefit
+        // anyway, and if something lowers it mid-session the meters now show
+        // that happening and the fader is there to answer it.
+    }
+
+    func end() {
+        guardedDeviceId = nil
     }
 }

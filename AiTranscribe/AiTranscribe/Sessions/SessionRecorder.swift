@@ -47,18 +47,20 @@ import AVFAudio
 
 /// Records both system audio and microphone into a single M4A file
 class SessionRecorder: NSObject, ObservableObject {
-    private struct AudioLevelAnalysis {
+    /// nonisolated: built and consumed on the detached diagnostics task, so
+    /// the memberwise init must not be main-actor isolated.
+    private nonisolated struct AudioLevelAnalysis {
         let activeRMS: Float
+        /// RMS over every sample, ungated. Kept for diagnostics: comparing it
+        /// against activeRMS shows how much of the track is silence.
+        let ungatedRMS: Float
         let peak: Float
+        /// 99.9th percentile magnitude across active samples. Used instead of
+        /// `peak` when planning the mix so a single transient (a cough, a
+        /// notification chime) cannot dictate the gain for a whole session.
+        let loudPeak: Float
         let activeSamples: Int64
         let totalSamples: Int64
-    }
-
-    private struct MixVolumePlan {
-        let micGain: Float
-        let systemGain: Float
-        let micAnalysis: AudioLevelAnalysis?
-        let systemAnalysis: AudioLevelAnalysis?
     }
 
     private static func fourCCString(_ value: OSType) -> String {
@@ -72,7 +74,7 @@ class SessionRecorder: NSObject, ObservableObject {
         return String(cString: bytes)
     }
 
-    private static func clampUnit(_ value: Float) -> Float {
+    private nonisolated static func clampUnit(_ value: Float) -> Float {
         min(max(value, -1.0), 1.0)
     }
 
@@ -162,88 +164,6 @@ class SessionRecorder: NSObject, ObservableObject {
             return false
         }
         return true
-    }
-
-    private func applyGain(_ gain: Float, to buffer: AVAudioPCMBuffer) {
-        guard gain != 1.0 else { return }
-
-        let format = buffer.format
-        let frames = Int(buffer.frameLength)
-        guard frames > 0 else { return }
-
-        let channels = max(Int(format.channelCount), 1)
-        let audioBuffers = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
-
-        switch format.commonFormat {
-        case .pcmFormatFloat32:
-            if format.isInterleaved {
-                guard let rawData = audioBuffers[0].mData?.assumingMemoryBound(to: Float.self) else { return }
-                for index in 0..<(frames * channels) {
-                    rawData[index] = Self.clampUnit(rawData[index] * gain)
-                }
-            } else {
-                for channel in 0..<channels {
-                    guard let rawData = audioBuffers[channel].mData?.assumingMemoryBound(to: Float.self) else { return }
-                    for frame in 0..<frames {
-                        rawData[frame] = Self.clampUnit(rawData[frame] * gain)
-                    }
-                }
-            }
-        case .pcmFormatFloat64:
-            if format.isInterleaved {
-                guard let rawData = audioBuffers[0].mData?.assumingMemoryBound(to: Double.self) else { return }
-                for index in 0..<(frames * channels) {
-                    rawData[index] = Double(Self.clampUnit(Float(rawData[index]) * gain))
-                }
-            } else {
-                for channel in 0..<channels {
-                    guard let rawData = audioBuffers[channel].mData?.assumingMemoryBound(to: Double.self) else { return }
-                    for frame in 0..<frames {
-                        rawData[frame] = Double(Self.clampUnit(Float(rawData[frame]) * gain))
-                    }
-                }
-            }
-        case .pcmFormatInt16:
-            let maxValue = Float(Int16.max)
-            let minValue = Float(Int16.min)
-            if format.isInterleaved {
-                guard let rawData = audioBuffers[0].mData?.assumingMemoryBound(to: Int16.self) else { return }
-                for index in 0..<(frames * channels) {
-                    let scaled = Float(rawData[index]) * gain
-                    rawData[index] = Int16(min(max(scaled, minValue), maxValue))
-                }
-            } else {
-                for channel in 0..<channels {
-                    guard let rawData = audioBuffers[channel].mData?.assumingMemoryBound(to: Int16.self) else { return }
-                    for frame in 0..<frames {
-                        let scaled = Float(rawData[frame]) * gain
-                        rawData[frame] = Int16(min(max(scaled, minValue), maxValue))
-                    }
-                }
-            }
-        case .pcmFormatInt32:
-            let maxValue = Float(Int32.max)
-            let minValue = Float(Int32.min)
-            if format.isInterleaved {
-                guard let rawData = audioBuffers[0].mData?.assumingMemoryBound(to: Int32.self) else { return }
-                for index in 0..<(frames * channels) {
-                    let scaled = Float(rawData[index]) * gain
-                    rawData[index] = Int32(min(max(scaled, minValue), maxValue))
-                }
-            } else {
-                for channel in 0..<channels {
-                    guard let rawData = audioBuffers[channel].mData?.assumingMemoryBound(to: Int32.self) else { return }
-                    for frame in 0..<frames {
-                        let scaled = Float(rawData[frame]) * gain
-                        rawData[frame] = Int32(min(max(scaled, minValue), maxValue))
-                    }
-                }
-            }
-        case .otherFormat:
-            return
-        @unknown default:
-            return
-        }
     }
 
     private func normalizeMicBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
@@ -371,7 +291,27 @@ class SessionRecorder: NSObject, ObservableObject {
 
     @Published var isRecording = false
     @Published var duration: TimeInterval = 0
-    @Published var micVolume: Float = 0
+
+    /// Live meter readings in dBFS, for the indicator and the mixer.
+    @Published var micLevel: AudioLevelReading = .silent
+    @Published var systemLevel: AudioLevelReading = .silent
+
+    let micMeter = AudioLevelMeter()
+    let systemMeter = AudioLevelMeter()
+
+    /// Faders. Applied during capture, so the meters above show what is
+    /// actually going into the file rather than what arrived before the fader.
+    let micGain = GainStage()
+    let systemGain = GainStage()
+
+    /// Fader positions in dB, for the mixer to bind to.
+    @Published var micGainDB: Double = 0 {
+        didSet { micGain.setDecibels(Float(micGainDB)) }
+    }
+    @Published var systemGainDB: Double = 0 {
+        didSet { systemGain.setDecibels(Float(systemGainDB)) }
+    }
+    private var meterTimer: Timer?
     @Published var hasSystemAudio = false
     @Published var isConverting = false
 
@@ -396,8 +336,14 @@ class SessionRecorder: NSObject, ObservableObject {
     private var sysFileFormat: AVAudioFormat?
 
     private var outputURL: URL?       // Final audio.m4a
+    /// Keeps hardware input gain at full; call apps lower it system-wide.
+    private let inputGainGuard = InputGainGuard()
+
     private var tempMicURL: URL?      // Temporary mic_temp.caf
     private var tempSysURL: URL?      // Temporary sys_temp.caf
+    /// The detached level scan for the current export. Held so temp-track
+    /// deletion can wait for it instead of racing it.
+    private var levelDiagnosticsTask: Task<Void, Never>?
     private var durationTimer: Timer?
     private var startTime: Date?
 
@@ -412,22 +358,16 @@ class SessionRecorder: NSObject, ObservableObject {
     private var micFormatSummary: String?
     private var micCaptureSummary: String?
 
-    /// Adaptive mic gain — compensates for hardware gain changes
-    /// (e.g. Google Meet lowering mic volume when joining a call)
-    private var micGain: Float = 2.0
-    private var appliedMixMicGain: Float = 1.0
-    private var appliedMixSystemGain: Float = 1.0
     private var analyzedMixMicRMS: Float = 0
     private var analyzedMixMicPeak: Float = 0
     private var analyzedMixSystemRMS: Float = 0
     private var analyzedMixSystemPeak: Float = 0
-    private var sessionRecordedMicGain: Float = SessionAudioMixPreferences.baselineMicGain
-    private var sessionRecordedSystemGain: Float = SessionAudioMixPreferences.baselineSystemGain
-    private var sessionMicTrimDB: Double = SessionAudioMixPreferences.defaultMicTrimDB
-    private var sessionSystemTrimDB: Double = SessionAudioMixPreferences.defaultSystemTrimDB
-    private let sessionMixPeakCeiling: Float = 0.94
-    private let sessionMixFixedMicGain: Float = 1.0
-    private let sessionMixFixedSystemGain: Float = 1.0
+
+    /// Output soft limiter. Samples below the threshold pass through
+    /// untouched; above it they are smoothly compressed and approach the
+    /// ceiling asymptotically, so transients round over instead of clipping.
+    private let sessionMixLimiterThreshold: Float = 0.80
+    private let sessionMixLimiterCeiling: Float = 0.99
 
     /// Final output format: 16kHz mono AAC
     private let outputSampleRate: Double = 16000
@@ -442,7 +382,8 @@ class SessionRecorder: NSObject, ObservableObject {
 
     // MARK: - Recording Control
 
-    func startRecording(sessionDir: URL, micDeviceId: AudioDeviceID? = nil) async -> Bool {
+    func startRecording(sessionDir: URL, micDeviceId requestedMicDeviceId: AudioDeviceID? = nil) async -> Bool {
+        let micDeviceId = AudioRecorder.resolveRecordingDevice(requestedMicDeviceId)
         guard !isRecording else { return false }
 
         // Check microphone permission BEFORE creating capture session.
@@ -480,16 +421,11 @@ class SessionRecorder: NSObject, ObservableObject {
         micMaxPeak = 0
         micFormatSummary = nil
         micCaptureSummary = nil
-        appliedMixMicGain = 1.0
-        appliedMixSystemGain = 1.0
         analyzedMixMicRMS = 0
         analyzedMixMicPeak = 0
         analyzedMixSystemRMS = 0
         analyzedMixSystemPeak = 0
-        sessionMicTrimDB = SessionAudioMixPreferences.micTrimDB()
-        sessionSystemTrimDB = SessionAudioMixPreferences.systemTrimDB()
-        sessionRecordedMicGain = SessionAudioMixPreferences.effectiveMicGain()
-        sessionRecordedSystemGain = SessionAudioMixPreferences.effectiveSystemGain()
+        levelDiagnosticsTask = nil
 
         // System audio capture via ScreenCaptureKit.
         // Only attempt if Screen Recording permission is already granted.
@@ -511,6 +447,10 @@ class SessionRecorder: NSObject, ObservableObject {
 
         // Start microphone capture (creates micFile from the first PCM buffer)
         micFramesWritten = 0
+        // Restore hardware input gain before opening the mic, so the very
+        // first buffers are already at full level.
+        inputGainGuard.begin(deviceId: micDeviceId)
+
         let micStarted = startMicrophoneCapture(sessionDir: sessionDir, deviceId: micDeviceId)
         if !micStarted {
             print("SessionRecorder: Failed to start microphone — aborting")
@@ -533,6 +473,32 @@ class SessionRecorder: NSObject, ObservableObject {
         RunLoop.main.add(timer, forMode: .common)
         durationTimer = timer
 
+        // Meters redraw independently of capture. Ballistics are applied from
+        // elapsed time, so this rate only affects smoothness, not behaviour.
+        micMeter.reset()
+        systemMeter.reset()
+
+        // Faders belong to one recording. The recorder instance outlives the
+        // session, so without this a level set for one call would silently
+        // apply to the next one, which is the same trap the old adaptive gain
+        // fell into by never resetting.
+        micGainDB = 0
+        systemGainDB = 0
+        micGain.reset()
+        systemGain.reset()
+
+        let meters = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let mic = self.micMeter.reading()
+            let system = self.systemMeter.reading()
+            Task { @MainActor in
+                self.micLevel = mic
+                self.systemLevel = system
+            }
+        }
+        RunLoop.main.add(meters, forMode: .common)
+        meterTimer = meters
+
         isRecording = true
         print("SessionRecorder: Recording started")
         return true
@@ -543,6 +509,12 @@ class SessionRecorder: NSObject, ObservableObject {
 
         durationTimer?.invalidate()
         durationTimer = nil
+        meterTimer?.invalidate()
+        meterTimer = nil
+        micMeter.reset()
+        systemMeter.reset()
+        micLevel = .silent
+        systemLevel = .silent
 
         stopMicrophoneCapture()
         await systemCapture.stopCapture()
@@ -553,7 +525,6 @@ class SessionRecorder: NSObject, ObservableObject {
 
         isRecording = false
         hasSystemAudio = false
-        micVolume = 0
 
         if let start = startTime {
             duration = Date().timeIntervalSince(start)
@@ -561,6 +532,8 @@ class SessionRecorder: NSObject, ObservableObject {
         startTime = nil
 
         // Mix and convert to M4A
+        inputGainGuard.end()
+
         guard let micURL = tempMicURL, let m4aURL = outputURL else { return nil }
 
         isConverting = true
@@ -574,9 +547,24 @@ class SessionRecorder: NSObject, ObservableObject {
             if micActiveBuffers == 0 || micMaxPeak < 0.001 || outputSize < 10_000 {
                 writeLowAudioDiagnostics(outputURL: m4aURL)
             }
-            try? FileManager.default.removeItem(at: micURL)
-            if let sysURL = tempSysURL {
-                try? FileManager.default.removeItem(at: sysURL)
+            if UserDefaults.standard.bool(forKey: "sessionKeepTempTracks") {
+                // Diagnostic opt-in: the mixed file cannot tell you what each
+                // source actually contributed, so keep the separate tracks.
+                print("SessionRecorder: sessionKeepTempTracks set — preserving mic/system tracks")
+            } else {
+                // The detached level scan may still be reading these tracks,
+                // so deletion waits for it off the main actor. Captures are
+                // plain URLs; session directories are unique per session, so
+                // this can never touch a later recording's files.
+                let diagnostics = levelDiagnosticsTask
+                let sysURL = tempSysURL
+                Task.detached(priority: .utility) {
+                    await diagnostics?.value
+                    try? FileManager.default.removeItem(at: micURL)
+                    if let sysURL {
+                        try? FileManager.default.removeItem(at: sysURL)
+                    }
+                }
             }
             print("SessionRecorder: Recording stopped. Duration: \(Self.formatDuration(duration))")
             return m4aURL
@@ -593,8 +581,16 @@ class SessionRecorder: NSObject, ObservableObject {
 
         durationTimer?.invalidate()
         durationTimer = nil
+        meterTimer?.invalidate()
+        meterTimer = nil
+        micMeter.reset()
+        systemMeter.reset()
+        micLevel = .silent
+        systemLevel = .silent
         stopMicrophoneCapture()
         await systemCapture.stopCapture()
+
+        inputGainGuard.end()
 
         micFile = nil
         sysFile = nil
@@ -605,7 +601,6 @@ class SessionRecorder: NSObject, ObservableObject {
 
         isRecording = false
         hasSystemAudio = false
-        micVolume = 0
         duration = 0
         startTime = nil
 
@@ -668,7 +663,18 @@ class SessionRecorder: NSObject, ObservableObject {
         guard copyPCMData(from: sampleBuffer, frameCount: frameCount, into: pcmBuffer, sourceName: "system") else {
             return
         }
-        applyGain(sessionRecordedSystemGain, to: pcmBuffer)
+        systemGain.apply(to: pcmBuffer)
+
+        // Desktop audio had no metering at all before the mixer needed it.
+        var systemSumSquares = 0.0
+        var systemPeak: Float = 0
+        var systemCount = 0
+        Self.enumerateMonoSamples(in: pcmBuffer) { sample in
+            systemSumSquares += Double(sample) * Double(sample)
+            systemPeak = max(systemPeak, abs(sample))
+            systemCount += 1
+        }
+        systemMeter.add(sumSquares: systemSumSquares, peak: systemPeak, sampleCount: systemCount)
 
         // Write directly — no lock needed, only this callback writes to sysFile
         guard let sysFile else { return }
@@ -761,15 +767,15 @@ class SessionRecorder: NSObject, ObservableObject {
             }
         }
 
-        // Adaptive mic gain — compensates for hardware gain changes
-        // (e.g. Google Meet lowering mic volume when joining a call).
-        // Targets a comfortable speech RMS (~0.05). Gain adjusts smoothly
-        // to avoid pumping artifacts: fast attack, slow release.
+        micGain.apply(to: pcmBuffer)
+
+        // Measured after the fader, so the meter is what lands on disk. All gain
+        // is set by the user on the mixer while recording, and the buffers
+        // analysed, so a hot mic can no longer be clipped into the temp file
+        // (and can no longer poison the mix by pinning its measured peak).
         if let channelData = pcmBuffer.floatChannelData {
             let frames = Int(pcmBuffer.frameLength)
-            let channels = Int(sourceFormat.channelCount)
 
-            // Calculate RMS from first channel
             var sum: Float = 0
             var peak: Float = 0
             for i in 0..<frames {
@@ -778,32 +784,13 @@ class SessionRecorder: NSObject, ObservableObject {
                 peak = max(peak, abs(s))
             }
             let rms = sqrt(sum / Float(max(frames, 1)))
+            micMeter.add(sumSquares: Double(sum), peak: peak, sampleCount: frames)
             micMaxRMS = max(micMaxRMS, rms)
             micMaxPeak = max(micMaxPeak, peak)
             if rms > 0.0005 || peak > 0.001 {
                 micActiveBuffers += 1
             }
-
-            // Adjust gain toward target RMS (only when speech detected)
-            let targetRMS: Float = 0.05
-            if rms > 0.002 {
-                let desiredGain = min(targetRMS / rms, 10.0)
-                let alpha: Float = desiredGain > micGain ? 0.3 : 0.05
-                micGain += alpha * (desiredGain - micGain)
-            }
-            micGain = max(micGain, 1.0) // Never go below unity
-
-            for ch in 0..<channels {
-                for i in 0..<frames {
-                    channelData[ch][i] = min(max(channelData[ch][i] * micGain, -1.0), 1.0)
-                }
-            }
         }
-
-        applyGain(sessionRecordedMicGain, to: pcmBuffer)
-
-        // Update volume meter
-        updateMicVolume(from: pcmBuffer)
 
         // Write directly — only this callback writes to micFile
         guard let micFile else { return }
@@ -823,27 +810,6 @@ class SessionRecorder: NSObject, ObservableObject {
         micCapture.stop()
         micFileCreated = false
         print("SessionRecorder: Mic stopped (total frames written: \(micFramesWritten))")
-    }
-
-    private func updateMicVolume(from buffer: AVAudioPCMBuffer) {
-        guard let channelData = buffer.floatChannelData?[0] else { return }
-        let frameCount = Int(buffer.frameLength)
-        guard frameCount > 0 else { return }
-
-        var sum: Float = 0
-        for i in 0..<frameCount {
-            let sample = channelData[i]
-            sum += sample * sample
-        }
-        let rms = sqrt(sum / Float(frameCount))
-
-        let noiseGateThreshold: Float = 0.008
-        let gatedRMS = rms > noiseGateThreshold ? rms : 0
-        let scaledVolume = min(gatedRMS * 3.0, 1.0)
-
-        Task { @MainActor in
-            self.micVolume = scaledVolume
-        }
     }
 
     private func exportRecordedAudio(micURL: URL, sysURL: URL?, outputURL: URL) async -> Bool {
@@ -905,16 +871,10 @@ class SessionRecorder: NSObject, ObservableObject {
             "micActiveBuffers=\(micActiveBuffers)",
             "micMaxRMS=\(micMaxRMS)",
             "micMaxPeak=\(micMaxPeak)",
-            "sessionMicTrimDB=\(sessionMicTrimDB)",
-            "sessionSystemTrimDB=\(sessionSystemTrimDB)",
-            "sessionRecordedMicGain=\(sessionRecordedMicGain)",
-            "sessionRecordedSystemGain=\(sessionRecordedSystemGain)",
             "mixMicRMS=\(analyzedMixMicRMS)",
             "mixMicPeak=\(analyzedMixMicPeak)",
             "mixSystemRMS=\(analyzedMixSystemRMS)",
             "mixSystemPeak=\(analyzedMixSystemPeak)",
-            "mixMicGain=\(appliedMixMicGain)",
-            "mixSystemGain=\(appliedMixSystemGain)",
             "micFramesWritten=\(micFramesWritten)",
             "sysFramesWritten=\(sysFramesWritten)",
             "micExists=\(FileManager.default.fileExists(atPath: micURL.path))",
@@ -943,16 +903,10 @@ class SessionRecorder: NSObject, ObservableObject {
             "micActiveBuffers=\(micActiveBuffers)",
             "micMaxRMS=\(micMaxRMS)",
             "micMaxPeak=\(micMaxPeak)",
-            "sessionMicTrimDB=\(sessionMicTrimDB)",
-            "sessionSystemTrimDB=\(sessionSystemTrimDB)",
-            "sessionRecordedMicGain=\(sessionRecordedMicGain)",
-            "sessionRecordedSystemGain=\(sessionRecordedSystemGain)",
             "mixMicRMS=\(analyzedMixMicRMS)",
             "mixMicPeak=\(analyzedMixMicPeak)",
             "mixSystemRMS=\(analyzedMixSystemRMS)",
             "mixSystemPeak=\(analyzedMixSystemPeak)",
-            "mixMicGain=\(appliedMixMicGain)",
-            "mixSystemGain=\(appliedMixSystemGain)",
             "micFramesWritten=\(micFramesWritten)",
             "sysFramesWritten=\(sysFramesWritten)",
             "outputExists=\(FileManager.default.fileExists(atPath: outputURL.path))",
@@ -964,7 +918,7 @@ class SessionRecorder: NSObject, ObservableObject {
 
     // MARK: - Post-Recording: Mix and Convert
 
-    private func enumerateMonoSamples(in buffer: AVAudioPCMBuffer, _ body: (Float) -> Void) {
+    private nonisolated static func enumerateMonoSamples(in buffer: AVAudioPCMBuffer, _ body: (Float) -> Void) {
         let format = buffer.format
         let frames = Int(buffer.frameLength)
         guard frames > 0 else { return }
@@ -1078,51 +1032,106 @@ class SessionRecorder: NSObject, ObservableObject {
         }
     }
 
-    private func analyzeAudioLevels(at url: URL) -> AudioLevelAnalysis? {
+    /// Measures a track's speech level using a gate placed relative to the
+    /// track's own loudness (-10 dB below ungated RMS, mirroring EBU R128
+    /// relative gating) rather than at a fixed magnitude, so the measurement
+    /// stays scale-invariant: halving the input exactly halves the result.
+    ///
+    /// The gate depends on the ungated RMS, which is only known once the
+    /// whole file has been read — but instead of a second full pass, the
+    /// single scan keeps a log-spaced magnitude histogram (count and sum of
+    /// squares per bin) and derives the gated numbers from it afterwards.
+    /// Bins are the float's exponent plus top mantissa bits (~0.05 dB wide),
+    /// so a quiet file gets the same relative resolution as a loud one — the
+    /// same property the old peak-scaled linear histogram was built for.
+    ///
+    /// nonisolated static: runs on the detached diagnostics task, off the
+    /// main actor, and must not touch recorder state.
+    private nonisolated static func analyzeAudioLevels(at url: URL) -> AudioLevelAnalysis? {
         do {
             let audioFile = try AVAudioFile(forReading: url)
             let chunkSize: AVAudioFrameCount = 8192
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: chunkSize) else {
-                return nil
-            }
+            guard let buffer = AVAudioPCMBuffer(
+                pcmFormat: audioFile.processingFormat,
+                frameCapacity: chunkSize
+            ) else { return nil }
 
             var totalSamples: Int64 = 0
-            var activeSamples: Int64 = 0
-            var totalSumSquares: Double = 0
-            var activeSumSquares: Double = 0
+            var sumSquares: Double = 0
             var peak: Float = 0
-            let activityThreshold: Float = 0.004
+            // Top 15 bits of the float's bit pattern (8 exponent + 7 mantissa)
+            // give monotonic, log-spaced bins covering every magnitude.
+            let binShift: UInt32 = 17
+            let histogramBins = 16384
+            var counts = [Int64](repeating: 0, count: histogramBins)
+            var squares = [Double](repeating: 0, count: histogramBins)
 
             while true {
-                try audioFile.read(into: buffer, frameCount: chunkSize)
-                let frames = Int(buffer.frameLength)
-                if frames == 0 {
+                do {
+                    try audioFile.read(into: buffer, frameCount: chunkSize)
+                } catch {
+                    // AVAudioFile throws on the read past the end rather than
+                    // reporting a short read, so this is the normal way a
+                    // complete scan finishes. Everything accumulated so far is
+                    // valid — treating it as a failure discards the whole file.
                     break
                 }
+                let frames = Int(buffer.frameLength)
+                if frames == 0 { break }
 
                 enumerateMonoSamples(in: buffer) { sample in
                     let magnitude = abs(sample)
-                    let square = Double(sample * sample)
+                    let square = Double(sample) * Double(sample)
                     totalSamples += 1
-                    totalSumSquares += square
+                    sumSquares += square
                     peak = max(peak, magnitude)
+                    let bin = min(Int(magnitude.bitPattern >> binShift), histogramBins - 1)
+                    counts[bin] += 1
+                    squares[bin] += square
+                }
+            }
 
-                    if magnitude >= activityThreshold {
-                        activeSamples += 1
-                        activeSumSquares += square
+            guard totalSamples > 0, peak > 0 else { return nil }
+
+            let ungatedRMS = sqrt(sumSquares / Double(totalSamples))
+            let gate = max(Float(ungatedRMS) * 0.316, 1e-7)
+            // The gate lands inside one ~0.05 dB bin; the whole bin counts as
+            // gated, which is well inside diagnostic tolerance.
+            let gateBin = min(Int(gate.bitPattern >> binShift), histogramBins - 1)
+
+            var gatedSamples: Int64 = 0
+            var gatedSumSquares: Double = 0
+            for bin in gateBin..<histogramBins {
+                gatedSamples += counts[bin]
+                gatedSumSquares += squares[bin]
+            }
+
+            // 99.9th percentile over gated samples, so one transient cannot
+            // dominate the reported loudness for a whole session.
+            var loudPeak = peak
+            if gatedSamples > 0 {
+                let target = Int64(Double(gatedSamples) * 0.999)
+                var cumulative: Int64 = 0
+                for bin in gateBin..<histogramBins where counts[bin] > 0 {
+                    cumulative += counts[bin]
+                    if cumulative >= target {
+                        // Upper edge of the bin, reconstructed from its bits.
+                        loudPeak = min(Float(bitPattern: UInt32(bin + 1) << binShift), peak)
+                        break
                     }
                 }
             }
 
-            guard totalSamples > 0 else { return nil }
-            let rmsSamples = max(activeSamples, 1)
-            let rmsSumSquares = activeSamples > 0 ? activeSumSquares : totalSumSquares
-            let activeRMS = sqrt(rmsSumSquares / Double(rmsSamples))
+            let activeRMS = gatedSamples > 0
+                ? sqrt(gatedSumSquares / Double(gatedSamples))
+                : ungatedRMS
 
             return AudioLevelAnalysis(
                 activeRMS: Float(activeRMS),
+                ungatedRMS: Float(ungatedRMS),
                 peak: peak,
-                activeSamples: activeSamples,
+                loudPeak: loudPeak,
+                activeSamples: gatedSamples,
                 totalSamples: totalSamples
             )
         } catch {
@@ -1131,59 +1140,105 @@ class SessionRecorder: NSObject, ObservableObject {
         }
     }
 
-    private func determineMixVolumePlan(micURL: URL, sysURL: URL) -> MixVolumePlan {
-        let micAnalysis = analyzeAudioLevels(at: micURL)
-        let systemAnalysis = analyzeAudioLevels(at: sysURL)
+    /// Applies make-up gain and a soft limiter to one buffer of the 32-bit
+    /// float mix, in place, on its way from the reader to the encoder.
+    ///
+    /// Samples below `threshold` are untouched. Above it, magnitude is
+    /// compressed through tanh so it approaches `ceiling` without ever
+    /// reaching it — a transient rounds over instead of squaring off. This is
+    /// what lets the mix be leveled for loudness without either clipping or
+    /// letting one spike set the gain for the whole session.
+    private static func applyGainAndSoftLimit(
+        _ sampleBuffer: CMSampleBuffer,
+        gain: Float,
+        threshold: Float,
+        ceiling: Float
+    ) {
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
 
-        analyzedMixMicRMS = micAnalysis?.activeRMS ?? 0
-        analyzedMixMicPeak = micAnalysis?.peak ?? 0
-        analyzedMixSystemRMS = systemAnalysis?.activeRMS ?? 0
-        analyzedMixSystemPeak = systemAnalysis?.peak ?? 0
+        var lengthAtOffset = 0
+        var totalLength = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        guard CMBlockBufferGetDataPointer(
+            blockBuffer,
+            atOffset: 0,
+            lengthAtOffsetOut: &lengthAtOffset,
+            totalLengthOut: &totalLength,
+            dataPointerOut: &dataPointer
+        ) == noErr, let dataPointer else { return }
 
-        var micGain: Float = sessionMixFixedMicGain
-        var systemGain: Float = systemAnalysis == nil ? 1.0 : sessionMixFixedSystemGain
+        // Only process contiguous buffers; anything else is passed through
+        // untouched rather than risking a partial, mismatched write.
+        guard lengthAtOffset == totalLength else { return }
 
-        if let micAnalysis, let systemAnalysis {
-            let combinedPeak = (micAnalysis.peak * micGain) + (systemAnalysis.peak * systemGain)
-            if combinedPeak > sessionMixPeakCeiling, systemAnalysis.peak > 0.001 {
-                let allowableSystemPeak = max(sessionMixPeakCeiling - (micAnalysis.peak * micGain), 0)
-                let duckedSystemGain = allowableSystemPeak / systemAnalysis.peak
-                systemGain = max(0.25, min(systemGain, duckedSystemGain))
+        let count = totalLength / MemoryLayout<Float>.size
+        guard count > 0 else { return }
+        let range = ceiling - threshold
+        guard range > 0 else { return }
+
+        let samples = UnsafeMutableRawPointer(dataPointer).assumingMemoryBound(to: Float.self)
+        for index in 0..<count {
+            var value = samples[index] * gain
+            let magnitude = abs(value)
+            if magnitude > threshold {
+                let compressed = threshold + range * tanhf((magnitude - threshold) / range)
+                value = value < 0 ? -compressed : compressed
             }
-
-            let adjustedCombinedPeak = (micAnalysis.peak * micGain) + (systemAnalysis.peak * systemGain)
-            if adjustedCombinedPeak > sessionMixPeakCeiling {
-                let safeMicGain = max(
-                    1.0,
-                    (sessionMixPeakCeiling - (systemAnalysis.peak * systemGain)) / max(micAnalysis.peak, 0.001)
-                )
-                micGain = min(micGain, safeMicGain)
-            }
+            samples[index] = value
         }
-
-        appliedMixMicGain = micGain
-        appliedMixSystemGain = systemGain
-
-        let micRMSDescription = String(format: "%.4f", analyzedMixMicRMS)
-        let micPeakDescription = String(format: "%.4f", analyzedMixMicPeak)
-        let systemRMSDescription = String(format: "%.4f", analyzedMixSystemRMS)
-        let systemPeakDescription = String(format: "%.4f", analyzedMixSystemPeak)
-        let micGainDescription = String(format: "%.2f", micGain)
-        let systemGainDescription = String(format: "%.2f", systemGain)
-        print(
-            "SessionRecorder: Mix loudness analysis micRMS=\(micRMSDescription) " +
-            "micPeak=\(micPeakDescription) sysRMS=\(systemRMSDescription) " +
-            "sysPeak=\(systemPeakDescription) -> micGain=\(micGainDescription) " +
-            "sysGain=\(systemGainDescription)"
-        )
-
-        return MixVolumePlan(
-            micGain: micGain,
-            systemGain: systemGain,
-            micAnalysis: micAnalysis,
-            systemAnalysis: systemAnalysis
-        )
     }
+
+    /// Writes the level analysis next to the recording. `print` output is lost
+    /// for a normally launched app, and these numbers are the only way to tell
+    /// a mis-measured level from a mis-applied gain after the fact.
+    /// Records what each track actually captured, next to the recording.
+    /// Nothing acts on these numbers any more; they exist so a session that
+    /// came out wrong can be diagnosed after the fact instead of guessed at.
+    ///
+    /// The scan reads both tracks end to end — seconds of work for a long
+    /// session — so it runs detached rather than stalling stop/export on the
+    /// main thread. `stopRecording` awaits `levelDiagnosticsTask` before
+    /// deleting the temp tracks, so the scan never races their removal.
+    private func logCapturedLevels(micURL: URL, sysURL: URL) {
+        levelDiagnosticsTask = Task.detached(priority: .utility) {
+            let mic = SessionRecorder.analyzeAudioLevels(at: micURL)
+            let sys = SessionRecorder.analyzeAudioLevels(at: sysURL)
+            var lines = ["path=mix"]
+            lines.append(contentsOf: SessionRecorder.describe("mic", mic))
+            lines.append(contentsOf: SessionRecorder.describe("sys", sys))
+            SessionRecorder.writeLevelDiagnostics(lines, nextTo: micURL)
+        }
+    }
+
+    private nonisolated static func writeLevelDiagnostics(_ lines: [String], nextTo url: URL) {
+        let destination = url
+            .deletingLastPathComponent()
+            .appendingPathComponent("audio_levels.txt")
+        let text = lines.joined(separator: "\n") + "\n"
+        try? text.write(to: destination, atomically: true, encoding: .utf8)
+    }
+
+    private nonisolated static func describe(_ label: String, _ analysis: AudioLevelAnalysis?) -> [String] {
+        guard let analysis else { return ["\(label)=nil"] }
+        let activeFraction = analysis.totalSamples > 0
+            ? Double(analysis.activeSamples) / Double(analysis.totalSamples)
+            : 0
+        return [
+            "\(label).activeRMS=\(analysis.activeRMS)",
+            "\(label).ungatedRMS=\(analysis.ungatedRMS)",
+            "\(label).loudPeak=\(analysis.loudPeak)",
+            "\(label).peak=\(analysis.peak)",
+            "\(label).activeSamples=\(analysis.activeSamples)",
+            "\(label).totalSamples=\(analysis.totalSamples)",
+            "\(label).activeFraction=\(activeFraction)",
+            // A high crest ratio with a low active fraction points at a noise
+            // floor inflating the measurement rather than at real speech.
+            "\(label).crest=\(analysis.activeRMS > 0 ? analysis.loudPeak / analysis.activeRMS : 0)",
+        ]
+    }
+
+
+    // MARK: - Gain Envelope
 
     /// Mix mic + system audio tracks and convert to M4A (AAC 16kHz mono).
     /// AVMutableComposition layers both tracks at the same start time.
@@ -1202,7 +1257,11 @@ class SessionRecorder: NSObject, ObservableObject {
                 return false
             }
 
-            let mixVolumePlan = determineMixVolumePlan(micURL: micURL, sysURL: sysURL)
+            // Both tracks pass through at unity. Level is set by the user on
+            // the mixer while recording and is already in the captured audio,
+            // so nothing here second-guesses it. The limiter on the output is
+            // the only thing between this and the encoder.
+            logCapturedLevels(micURL: micURL, sysURL: sysURL)
             let composition = AVMutableComposition()
             var mixParameters: [AVMutableAudioMixInputParameters] = []
 
@@ -1217,7 +1276,7 @@ class SessionRecorder: NSObject, ObservableObject {
                     at: .zero
                 )
                 let parameters = AVMutableAudioMixInputParameters(track: compTrack)
-                parameters.setVolume(mixVolumePlan.micGain, at: .zero)
+                parameters.setVolume(1.0, at: .zero)
                 mixParameters.append(parameters)
             }
 
@@ -1233,7 +1292,7 @@ class SessionRecorder: NSObject, ObservableObject {
                         at: .zero
                     )
                     let parameters = AVMutableAudioMixInputParameters(track: compTrack)
-                    parameters.setVolume(mixVolumePlan.systemGain, at: .zero)
+                    parameters.setVolume(1.0, at: .zero)
                     mixParameters.append(parameters)
                 }
             }
@@ -1273,11 +1332,22 @@ class SessionRecorder: NSObject, ObservableObject {
             writer.startWriting()
             writer.startSession(atSourceTime: .zero)
 
+            let limiterThreshold = sessionMixLimiterThreshold
+            let limiterCeiling = sessionMixLimiterCeiling
+
             return await withCheckedContinuation { continuation in
                 let queue = DispatchQueue(label: "com.aitranscribe.audiomix")
                 writerInput.requestMediaDataWhenReady(on: queue) {
                     while writerInput.isReadyForMoreMediaData {
                         if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
+                            // Track gains are already applied by the audio mix;
+                            // this only rounds over the summed transients.
+                            Self.applyGainAndSoftLimit(
+                                sampleBuffer,
+                                gain: 1.0,
+                                threshold: limiterThreshold,
+                                ceiling: limiterCeiling
+                            )
                             writerInput.append(sampleBuffer)
                         } else {
                             writerInput.markAsFinished()
@@ -1300,8 +1370,11 @@ class SessionRecorder: NSObject, ObservableObject {
         }
     }
 
-    /// Convert a single track (mic-only fallback) to M4A.
+    /// Convert a single track (mic-only or system-only fallback) to M4A.
+    /// Passes the audio through untouched, as the mixed path does.
     private func convertSingleTrackToM4A(inputURL: URL, outputURL: URL) async -> Bool {
+        let gain: Float = 1.0
+
         let asset = AVURLAsset(url: inputURL)
 
         let audioTrack: AVAssetTrack
@@ -1349,11 +1422,21 @@ class SessionRecorder: NSObject, ObservableObject {
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
 
+        let exportGain = gain
+        let limiterThreshold = sessionMixLimiterThreshold
+        let limiterCeiling = sessionMixLimiterCeiling
+
         return await withCheckedContinuation { continuation in
             let queue = DispatchQueue(label: "com.aitranscribe.audioconvert")
             writerInput.requestMediaDataWhenReady(on: queue) {
                 while writerInput.isReadyForMoreMediaData {
                     if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
+                        Self.applyGainAndSoftLimit(
+                            sampleBuffer,
+                            gain: exportGain,
+                            threshold: limiterThreshold,
+                            ceiling: limiterCeiling
+                        )
                         writerInput.append(sampleBuffer)
                     } else {
                         writerInput.markAsFinished()

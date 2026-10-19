@@ -284,6 +284,11 @@ struct SessionDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .task(id: sessionId) {
+            // Transcript and summary markdown are no longer loaded with the
+            // session list — pull them in (off-main, cached) when a session opens.
+            sessionManager.ensureSessionContentLoaded(sessionId: sessionId)
+        }
     }
 
     // MARK: - Tab Switcher
@@ -423,8 +428,13 @@ struct SessionDetailView: View {
 
             if isTranscribing {
                 transcribingView()
-            } else if session.hasTranscription, let text = session.transcriptionText {
-                completedView(session, text: text)
+            } else if session.hasTranscription {
+                if let text = session.transcriptionText {
+                    completedView(session, text: text)
+                } else {
+                    // Transcript exists on disk but is still loading on demand.
+                    transcriptLoadingView()
+                }
             } else {
                 notTranscribedView(session)
             }
@@ -444,20 +454,26 @@ struct SessionDetailView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
-        } else if !isPublicMode && !appState.isServerConnected {
-            VStack(spacing: 10) {
-                ProgressView().scaleEffect(0.8)
-                Text("Server Starting...")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("Transcription will be available once the backend is ready.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(20)
-            .background(.thinMaterial, in: .rect(cornerRadius: 12, style: .continuous))
         } else {
-            notTranscribedControls(session)
+            VStack(alignment: .leading, spacing: 12) {
+                detailTranscriptionModePills
+
+                if !isPublicMode && !appState.isServerConnected {
+                    VStack(spacing: 10) {
+                        ProgressView().scaleEffect(0.8)
+                        Text("Server Starting...")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("Transcription will be available once the backend is ready.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(20)
+                    .background(.thinMaterial, in: .rect(cornerRadius: 12, style: .continuous))
+                } else {
+                    notTranscribedControls(session)
+                }
+            }
         }
     }
 
@@ -491,24 +507,10 @@ struct SessionDetailView: View {
                 .background(.thinMaterial, in: .rect(cornerRadius: 12, style: .continuous))
             } else {
                 glassCard {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Public Model")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Picker("", selection: $selectedOpenAITranscriptionModel) {
-                                ForEach(publicTranscriptionModels) { model in
-                                    Text("\(model.displayName) · \(model.providerName)").tag(model.modelId)
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(maxWidth: 260)
-                            .onChange(of: selectedOpenAITranscriptionModel) { _, modelId in
-                                if let model = publicTranscriptionModels.first(where: { $0.modelId == modelId }) {
-                                    selectedTranscriptionProviderId = model.providerId
-                                }
-                            }
+                    VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            detailControlLabel("PUBLIC MODEL")
+                            detailPublicTranscriptionModelMenu
                         }
 
                         HStack(spacing: 5) {
@@ -521,7 +523,7 @@ struct SessionDetailView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 8) {
-                            HStack {
+                            HStack(alignment: .center, spacing: 12) {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("API Batch Target")
                                         .font(.system(size: 11, weight: .semibold))
@@ -533,17 +535,13 @@ struct SessionDetailView: View {
 
                                 Spacer()
 
-                                Stepper(
-                                    publicSessionTargetBatchCount == 0 ? "Auto" : "\(normalizedManualPublicBatchTarget)",
-                                    value: $publicSessionTargetBatchCount,
+                                detailIntegerStepperPill(
+                                    label: "Batches",
+                                    value: manualPublicBatchBinding,
                                     in: 0...30,
-                                    step: 6
+                                    step: 6,
+                                    zeroLabel: "Auto"
                                 )
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .frame(width: 118)
-                                .onChange(of: publicSessionTargetBatchCount) { _, _ in
-                                    normalizePublicBatchTarget()
-                                }
                             }
 
                             HStack(spacing: 8) {
@@ -567,6 +565,7 @@ struct SessionDetailView: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
+
                     }
                 }
 
@@ -675,19 +674,10 @@ struct SessionDetailView: View {
                 .background(.thinMaterial, in: .rect(cornerRadius: 12, style: .continuous))
             } else {
                 glassCard {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Model")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Picker("", selection: $selectedModelId) {
-                                ForEach(availableModels) { model in
-                                    Text(model.displayName).tag(model.id)
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(maxWidth: 220)
+                    VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            detailControlLabel("LOCAL MODEL")
+                            detailLocalTranscriptionModelMenu
                         }
 
                         if selectedModelId == "whisper-large-v3" {
@@ -702,20 +692,25 @@ struct SessionDetailView: View {
                         }
 
                         // RAM budget
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("RAM Budget")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                Spacer()
-                                Text("\(String(format: "%.1f", ramBudgetGB)) GB")
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            }
-                            Slider(value: $ramBudgetGB, in: minRamBudget...maxRamBudget, step: 0.5)
-                                .onChange(of: ramBudgetGB) { _, _ in updateEstimate(session) }
-                                .onChange(of: selectedModelId) { _, _ in
-                                    if ramBudgetGB < minRamBudget { ramBudgetGB = minRamBudget }
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(alignment: .center, spacing: 12) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("RAM Budget")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                    Text("Controls local batching and memory headroom.")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.tertiary)
                                 }
+                                Spacer()
+                                detailDoubleStepperPill(
+                                    label: "RAM",
+                                    value: ramBudgetBinding(for: session),
+                                    in: minRamBudget...maxRamBudget,
+                                    step: 0.5,
+                                    suffix: "GB"
+                                )
+                            }
 
                             HStack(spacing: 8) {
                                 if let est = estimate {
@@ -753,6 +748,10 @@ struct SessionDetailView: View {
             }
         }
         .task {
+            if ramBudgetGB < minRamBudget { ramBudgetGB = minRamBudget }
+            updateEstimate(session)
+        }
+        .onChange(of: selectedModelId) { _, _ in
             if ramBudgetGB < minRamBudget { ramBudgetGB = minRamBudget }
             updateEstimate(session)
         }
@@ -804,6 +803,19 @@ struct SessionDetailView: View {
     }
 
     // MARK: State C — Completed
+
+    /// Placeholder while the transcript text loads on demand — brief, and never
+    /// shows the transcribe controls for a session that already has a transcript.
+    private func transcriptLoadingView() -> some View {
+        glassCard {
+            HStack(spacing: 8) {
+                ProgressView().scaleEffect(0.7)
+                Text("Loading transcript...")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
 
     private func completedView(_ session: Session, text: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -895,7 +907,7 @@ struct SessionDetailView: View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsSectionHeader(title: "Summary Studio")
 
-            if !session.hasTranscription || (session.transcriptionText?.isEmpty ?? true) {
+            if !session.hasTranscription {
                 HStack(spacing: 8) {
                     Image(systemName: "sparkles")
                         .font(.system(size: 12))
@@ -1126,69 +1138,47 @@ struct SessionDetailView: View {
 
                 Divider().opacity(0.3)
 
-                // Controls row: Length + Model side by side
-                HStack(spacing: 16) {
-                    // Length section
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("LENGTH")
-                            .font(.system(size: 9, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.tertiary)
-                            .tracking(0.5)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top, spacing: 18) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            detailControlLabel("SOURCE")
+                            detailSummaryModePills
+                        }
 
-                        HStack(spacing: 10) {
-                            Picker("", selection: Binding(
-                                get: { currentLengthOption },
-                                set: { currentLengthOption = $0 }
-                            )) {
-                                ForEach(SummaryLengthOption.allCases) { option in
-                                    Text(option.displayName).tag(option)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(maxWidth: 220)
+                        VStack(alignment: .leading, spacing: 6) {
+                            detailControlLabel(isPublicMode ? "PUBLIC LLM" : "LOCAL LLM")
+                            HStack(spacing: 8) {
+                                if isPublicMode {
+                                    detailPublicSummaryModelMenu
+                                } else {
+                                    detailLocalSummaryModelMenu
 
-                            if currentLengthOption == .custom {
-                                Stepper(value: $preferredSummaryCustomWords, in: 180...2200, step: 80) {
-                                    Text("~\(preferredSummaryCustomWords) words")
-                                        .font(.system(size: 10))
+                                    if let model = selectedSummaryModel, !model.downloaded, let onNavigateToModels {
+                                        capsuleButton(label: "Download", icon: "arrow.down.circle", style: .regular) {
+                                            onNavigateToModels(.summarization)
+                                        }
+                                    }
                                 }
-                                .frame(maxWidth: 180)
                             }
                         }
+
+                        Spacer(minLength: 0)
                     }
 
-                    Spacer()
-
-                    // Model section
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(isPublicMode ? "PUBLIC LLM" : "LOCAL LM")
-                            .font(.system(size: 9, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.tertiary)
-                            .tracking(0.5)
+                        detailControlLabel("LENGTH")
 
-                        HStack(spacing: 8) {
-                            if isPublicMode {
-                                Picker("", selection: $selectedOpenAILanguageModel) {
-                                    ForEach(apiLanguageModels) { model in
-                                        Text(model.displayName).tag(model.modelId)
-                                    }
-                                }
-                                .labelsHidden()
-                                .frame(maxWidth: 220)
-                            } else {
-                                Picker("", selection: $selectedSummaryModelId) {
-                                    ForEach(availableSummaryModels) { model in
-                                        Text(model.displayName).tag(model.id)
-                                    }
-                                }
-                                .labelsHidden()
-                                .frame(maxWidth: 200)
+                        HStack(spacing: 10) {
+                            detailSummaryLengthPills
 
-                                if let model = selectedSummaryModel, !model.downloaded, let onNavigateToModels {
-                                    capsuleButton(label: "Download", icon: "arrow.down.circle", style: .regular) {
-                                        onNavigateToModels(.summarization)
-                                    }
-                                }
+                            if currentLengthOption == .custom {
+                                detailIntegerStepperPill(
+                                    label: "Words",
+                                    value: summaryCustomWordsBinding,
+                                    in: 180...2200,
+                                    step: 80,
+                                    zeroLabel: nil
+                                )
                             }
                         }
                     }
@@ -1366,7 +1356,11 @@ struct SessionDetailView: View {
             }
 
             // Content — takes all remaining height
-            if let text, !text.isEmpty {
+            if isPresetGenerating && !isEditingSummary {
+                // Live stream: only this subview observes the high-frequency
+                // partial text, so ticks don't re-render the rest of the app.
+                SummaryStreamingText(stream: sessionManager.summaryStream, fallbackText: text)
+            } else if let text, !text.isEmpty {
                 if isEditingSummary {
                     TextEditor(text: $editableSummaryText)
                         .font(.system(.body, design: .monospaced))
@@ -1490,14 +1484,10 @@ struct SessionDetailView: View {
         }
     }
 
+    /// Saved (or cached) summary text. Live streaming text is rendered by
+    /// SummaryStreamingText, which observes SummaryStreamModel directly.
     private func previewText(for presetId: String) -> String? {
-        if sessionManager.currentSummarizingSessionId == sessionId,
-           sessionManager.summaryProgress?.activePresetId == presetId,
-           let liveText = sessionManager.summaryProgress?.partialText,
-           !liveText.isEmpty {
-            return liveText
-        }
-        return session?.summaries[presetId]?.text
+        session?.summaries[presetId]?.text
     }
 
     // MARK: - Delete Actions (inline)
@@ -1575,6 +1565,332 @@ struct SessionDetailView: View {
     }
 
     // MARK: - Reusable Components
+
+    private var detailTranscriptionModePills: some View {
+        detailSourcePills(
+            localTitle: "Local",
+            publicTitle: "Public API",
+            localWidth: 78,
+            publicWidth: 96,
+            selection: detailPublicModeBinding
+        )
+    }
+
+    private var detailSummaryModePills: some View {
+        detailSourcePills(
+            localTitle: "Local LLM",
+            publicTitle: "Public LLM",
+            localWidth: 92,
+            publicWidth: 104,
+            selection: detailPublicModeBinding
+        )
+    }
+
+    private var detailPublicTranscriptionModelMenu: some View {
+        Menu {
+            ForEach(publicTranscriptionModels) { model in
+                Button("\(model.displayName) · \(model.providerName)") {
+                    selectedTranscriptionProviderId = model.providerId
+                    selectedOpenAITranscriptionModel = model.modelId
+                }
+            }
+        } label: {
+            detailSelectPill(
+                title: selectedAPITranscriptionModel.map { "\($0.displayName) · \($0.providerName)" } ?? "Choose API transcription model",
+                icon: "waveform",
+                width: 330
+            )
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+    }
+
+    private var detailLocalTranscriptionModelMenu: some View {
+        Menu {
+            ForEach(availableModels) { model in
+                Button(model.displayName) {
+                    selectedModelId = model.id
+                    if ramBudgetGB < minRamBudget {
+                        ramBudgetGB = minRamBudget
+                    }
+                }
+            }
+        } label: {
+            detailSelectPill(
+                title: selectedModel?.displayName ?? "Choose local transcription model",
+                icon: "externaldrive.fill",
+                width: 300
+            )
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+    }
+
+    private var detailPublicSummaryModelMenu: some View {
+        Menu {
+            ForEach(apiLanguageModels) { model in
+                Button("\(model.displayName) · \(model.providerName)") {
+                    selectedOpenAILanguageModel = model.modelId
+                }
+            }
+        } label: {
+            detailSelectPill(
+                title: selectedAPILanguageModel.map { "\($0.displayName) · \($0.providerName)" } ?? "Choose API summary model",
+                icon: "sparkles",
+                width: 330
+            )
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+    }
+
+    private var detailLocalSummaryModelMenu: some View {
+        Menu {
+            ForEach(availableSummaryModels) { model in
+                Button(model.displayName) {
+                    selectedSummaryModelId = model.id
+                }
+            }
+        } label: {
+            detailSelectPill(
+                title: selectedSummaryModel?.displayName ?? "Choose local summary model",
+                icon: "sparkles",
+                width: 300
+            )
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+    }
+
+    private var detailSummaryLengthPills: some View {
+        HStack(spacing: 2) {
+            ForEach(SummaryLengthOption.allCases) { option in
+                let selected = currentLengthOption == option
+                Button {
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        currentLengthOption = option
+                    }
+                } label: {
+                    Text(option.displayName)
+                        .font(.system(size: 10, weight: selected ? .semibold : .medium))
+                        .foregroundStyle(selected ? .white : .secondary)
+                        .frame(width: option == .custom ? 70 : 58, height: 26)
+                        .background(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+
+    private var detailPublicModeBinding: Binding<Bool> {
+        Binding(
+            get: { isPublicMode },
+            set: { usePublic in
+                if usePublic {
+                    let model = selectedAPITranscriptionModel ?? publicTranscriptionModels.first
+                    selectedTranscriptionProviderId = model?.providerId ?? TranscriptionProviderDescriptor.openAI.id
+                    if let model {
+                        selectedOpenAITranscriptionModel = model.modelId
+                    }
+                } else {
+                    selectedTranscriptionProviderId = TranscriptionProviderDescriptor.localBackend.id
+                }
+            }
+        )
+    }
+
+    private var manualPublicBatchBinding: Binding<Int> {
+        Binding(
+            get: { publicSessionTargetBatchCount },
+            set: { newValue in
+                publicSessionTargetBatchCount = newValue
+                normalizePublicBatchTarget()
+            }
+        )
+    }
+
+    private var summaryCustomWordsBinding: Binding<Int> {
+        Binding(
+            get: { preferredSummaryCustomWords },
+            set: { preferredSummaryCustomWords = $0 }
+        )
+    }
+
+    private func ramBudgetBinding(for session: Session) -> Binding<Double> {
+        Binding(
+            get: { ramBudgetGB },
+            set: { newValue in
+                ramBudgetGB = min(max(newValue, minRamBudget), maxRamBudget)
+                updateEstimate(session)
+            }
+        )
+    }
+
+    private func detailControlLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold, design: .rounded))
+            .foregroundStyle(.tertiary)
+            .tracking(0.5)
+    }
+
+    private func detailSourcePills(
+        localTitle: String,
+        publicTitle: String,
+        localWidth: CGFloat,
+        publicWidth: CGFloat,
+        selection: Binding<Bool>
+    ) -> some View {
+        HStack(spacing: 2) {
+            detailSourcePillButton(title: localTitle, width: localWidth, selected: !selection.wrappedValue) {
+                withAnimation(.easeOut(duration: 0.12)) {
+                    selection.wrappedValue = false
+                }
+            }
+            detailSourcePillButton(title: publicTitle, width: publicWidth, selected: selection.wrappedValue) {
+                withAnimation(.easeOut(duration: 0.12)) {
+                    selection.wrappedValue = true
+                }
+            }
+        }
+        .padding(3)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+
+    private func detailSourcePillButton(title: String, width: CGFloat, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(selected ? .white : .secondary)
+                .frame(width: width, height: 26)
+                .background(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear), in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func detailSelectPill(title: String, icon: String, width: CGFloat) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 11)
+        .frame(width: width, height: 30)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+        .contentShape(Capsule())
+    }
+
+    private func detailIntegerStepperPill(
+        label: String,
+        value: Binding<Int>,
+        in range: ClosedRange<Int>,
+        step: Int,
+        zeroLabel: String?
+    ) -> some View {
+        let displayValue = zeroLabel != nil && value.wrappedValue == 0 ? zeroLabel! : "\(value.wrappedValue)"
+        return HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 48, alignment: .leading)
+
+            Button {
+                value.wrappedValue = max(range.lowerBound, value.wrappedValue - step)
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(value.wrappedValue <= range.lowerBound)
+
+            Text(displayValue)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.primary)
+                .frame(width: zeroLabel == nil ? 42 : 44)
+
+            Button {
+                value.wrappedValue = min(range.upperBound, value.wrappedValue + step)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(value.wrappedValue >= range.upperBound)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 9)
+        .frame(height: 30)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+
+    private func detailDoubleStepperPill(
+        label: String,
+        value: Binding<Double>,
+        in range: ClosedRange<Double>,
+        step: Double,
+        suffix: String
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 32, alignment: .leading)
+
+            Button {
+                value.wrappedValue = max(range.lowerBound, value.wrappedValue - step)
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(value.wrappedValue <= range.lowerBound)
+
+            Text("\(String(format: "%.1f", value.wrappedValue)) \(suffix)")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.primary)
+                .frame(width: 66)
+
+            Button {
+                value.wrappedValue = min(range.upperBound, value.wrappedValue + step)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(value.wrappedValue >= range.upperBound)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 9)
+        .frame(height: 30)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
 
     private func glassCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1694,6 +2010,31 @@ struct SessionDetailView: View {
     private func formatMB(_ mb: Int) -> String {
         if mb >= 1024 { return String(format: "%.1f GB", Double(mb) / 1024.0) }
         return "\(mb) MB"
+    }
+}
+
+// MARK: - Live Summary Stream View
+
+/// The only view observing SummaryStreamModel's high-frequency partial text —
+/// the same isolation pattern as RecordingActivityModel — so summary streaming
+/// re-renders just this markdown pane instead of the whole settings scene.
+private struct SummaryStreamingText: View {
+    @ObservedObject var stream: SummaryStreamModel
+    let fallbackText: String?
+
+    var body: some View {
+        ScrollView {
+            MarkdownView(text: stream.partialText ?? fallbackText ?? "")
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+                .padding(16)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.thinMaterial, in: .rect(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
+        )
     }
 }
 
@@ -1878,24 +2219,37 @@ private struct SummaryPresetManagerSheet: View {
     }
 
     private var sheetHeader: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Summary Presets")
-                    .font(.title3.weight(.semibold))
-                Text("Edit built-ins or add custom views.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+        HStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.14))
+                    .frame(width: 42, height: 42)
+                Image(systemName: "text.badge.star")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
             }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Summary Presets")
+                    .font(.system(size: 17, weight: .semibold, design: .rounded))
+                Text("Edit built-ins or add custom views.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
             Spacer()
+
             Button("Done") { dismiss() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .modifier(PresetSheetActionPillStyle(tint: .accentColor, prominent: true))
+                .keyboardShortcut(.defaultAction)
         }
         .padding(20)
     }
 
     private var presetSidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Button("New custom preset") {
+            Button {
                 let preset = SummaryPresetLibrary.makeCustomPreset(
                     name: "Custom Summary",
                     instructions: """
@@ -1907,8 +2261,21 @@ private struct SummaryPresetManagerSheet: View {
                 appState.upsertSummaryPreset(preset)
                 selectedPresetId = preset.id
                 loadDraft(from: preset)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .bold))
+                    Text("New custom preset")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .foregroundStyle(Color.accentColor)
+                .frame(maxWidth: .infinity)
+                .frame(height: 30)
+                .background(Color.accentColor.opacity(0.10), in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.18), lineWidth: 0.7))
+                .contentShape(Capsule())
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.plain)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
@@ -1933,8 +2300,9 @@ private struct SummaryPresetManagerSheet: View {
                     Text(preset.displayName)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.primary)
+                        .lineLimit(1)
                     Text(preset.isBuiltIn ? "Built-in" : "Custom")
-                        .font(.system(size: 10))
+                        .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(.tertiary)
                 }
                 Spacer()
@@ -1944,13 +2312,22 @@ private struct SummaryPresetManagerSheet: View {
                         .foregroundStyle(Color.accentColor)
                 }
             }
-            .padding(10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
             .background(
                 selectedPresetId == preset.id
-                    ? AnyShapeStyle(Color.accentColor.opacity(0.08))
-                    : AnyShapeStyle(.quaternary.opacity(0.3))
+                    ? AnyShapeStyle(Color.accentColor.opacity(0.10))
+                    : AnyShapeStyle(Color.primary.opacity(0.045)),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
             )
-            .clipShape(.rect(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        selectedPresetId == preset.id ? Color.accentColor.opacity(0.35) : Color.white.opacity(0.06),
+                        lineWidth: 0.7
+                    )
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -1959,26 +2336,37 @@ private struct SummaryPresetManagerSheet: View {
     private var presetEditor: some View {
         VStack(alignment: .leading, spacing: 16) {
             if let preset = selectedPreset {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Preset name")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("PRESET NAME")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
+                        .tracking(0.7)
                     TextField("Preset name", text: $draftName)
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 11)
+                        .frame(height: 34)
+                        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(.white.opacity(0.07), lineWidth: 0.5)
+                        )
                 }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Instructions")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("INSTRUCTIONS")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
+                        .tracking(0.7)
                     TextEditor(text: $draftInstructions)
                         .font(.system(size: 13))
+                        .scrollContentBackground(.hidden)
                         .frame(minHeight: 260)
                         .padding(10)
-                        .background(.thinMaterial, in: .rect(cornerRadius: 12, style: .continuous))
+                        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
+                                .strokeBorder(.white.opacity(0.07), lineWidth: 0.5)
                         )
                 }
 
@@ -1992,23 +2380,37 @@ private struct SummaryPresetManagerSheet: View {
     private func presetActionButtons(_ preset: SummaryPresetDefinition) -> some View {
         HStack(spacing: 10) {
             if preset.isBuiltIn {
-                Button("Reset to default") {
+                Button {
                     appState.resetBuiltInSummaryPreset(id: preset.id)
                     if let resetPreset = appState.summaryPresetDefinitions.first(where: { $0.id == preset.id }) {
                         loadDraft(from: resetPreset)
                     }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("Reset to default")
+                    }
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .modifier(PresetSheetActionPillStyle(tint: .primary, prominent: false))
             } else {
-                Button("Delete preset", role: .destructive) {
+                Button {
                     let deletedId = preset.id
                     appState.deleteSummaryPreset(id: deletedId)
                     selectedPresetId = appState.summaryPresetDefinitions.first?.id ?? SessionSummaryPreset.general.rawValue
                     if let nextPreset = appState.summaryPresetDefinitions.first(where: { $0.id == selectedPresetId }) {
                         loadDraft(from: nextPreset)
                     }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("Delete preset")
+                    }
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .modifier(PresetSheetActionPillStyle(tint: .red, prominent: false))
             }
 
             Spacer()
@@ -2022,13 +2424,33 @@ private struct SummaryPresetManagerSheet: View {
                 appState.upsertSummaryPreset(updated)
                 loadDraft(from: updated)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.plain)
+            .modifier(PresetSheetActionPillStyle(tint: .accentColor, prominent: true))
             .disabled(draftInstructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .opacity(draftInstructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
         }
     }
 
     private func loadDraft(from preset: SummaryPresetDefinition) {
         draftName = preset.displayName
         draftInstructions = preset.instructions
+    }
+}
+
+// MARK: - Preset Sheet Styling
+
+private struct PresetSheetActionPillStyle: ViewModifier {
+    let tint: Color
+    let prominent: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(prominent ? Color.white : tint)
+            .padding(.horizontal, 14)
+            .frame(height: 30)
+            .background(prominent ? AnyShapeStyle(tint) : AnyShapeStyle(Color.primary.opacity(0.075)), in: Capsule())
+            .overlay(Capsule().strokeBorder(prominent ? tint.opacity(0.28) : .white.opacity(0.07), lineWidth: 0.6))
+            .contentShape(Capsule())
     }
 }

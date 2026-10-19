@@ -80,7 +80,7 @@ struct ModelsOnboardingView: View {
             makeModel(
                 id: "whisper-base-en",
                 fallbackDisplay: "Whisper Base (English)",
-                fallbackDescription: "Fast, lightweight English transcription. GPU accelerated.",
+                fallbackDescription: "Fast English transcription with Metal GPU acceleration.",
                 fallbackSizeGB: 0.148,  // 148 MB
                 fallbackRamGB: 0.400,   // 400 MB
                 tags: ["Compact", "English", "Metal GPU"]
@@ -89,7 +89,7 @@ struct ModelsOnboardingView: View {
             makeModel(
                 id: "whisper-large-v3-turbo",
                 fallbackDisplay: "Whisper Large v3 Turbo",
-                fallbackDescription: "Fast multilingual with Metal GPU acceleration.",
+                fallbackDescription: "Balanced multilingual transcription with Metal GPU acceleration.",
                 fallbackSizeGB: 1.62,   // ~1620 MB
                 fallbackRamGB: 1.7,     // ~1700 MB
                 tags: ["Balanced", "Multilingual", "Metal GPU"]
@@ -98,28 +98,13 @@ struct ModelsOnboardingView: View {
     }
     
     var body: some View {
-        VStack(spacing: 24) {
-            // Header
-            VStack(spacing: 8) {
-                Text("Download Models")
-                    .font(.system(size: 32, weight: .bold))
-                
-                Text("Click a model to download and get started")
-                    .font(.title3)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                
-                // Warning about large models
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
-                    Text("Larger models take longer to download")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.top, 4)
-            }
-            .padding(.top, 30)
+        VStack(alignment: .leading, spacing: 0) {
+            OnboardingHeader(
+                eyebrow: "Local models",
+                title: "Choose what runs on this Mac",
+                subtitle: "Start with one private model. You can add the larger catalog later from Settings."
+            )
+            .padding(.bottom, 28)
             
             // Error alert
             .alert("Download Failed", isPresented: $showError) {
@@ -133,122 +118,81 @@ struct ModelsOnboardingView: View {
                 HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("Backend is starting — downloads will be available shortly...")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    Text("Backend is starting; downloads unlock shortly.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity)
-                .background(Color.orange.opacity(0.1))
-                .cornerRadius(8)
-                .padding(.horizontal, 40)
+                .padding(.bottom, 16)
             }
 
-            // Model List - SCROLLABLE to prevent pushing buttons
-            ScrollView {
-                VStack(spacing: 16) {
-                    ForEach(recommendedModels) { model in
-                        OnboardingModelCard(
-                            model: model,
-                            isDownloading: downloadingModels.contains(model.id),
-                            isLoading: loadingModels.contains(model.id),
-                            isDownloaded: downloadedModels.contains(model.id) || isModelAlreadyDownloaded(model.id),
-                            nemoAvailable: effectiveNemoAvailable,
-                            backendReady: backendManager.isServerReady,
-                            onDownload: {
-                                // Check if NeMo is required but not available
-                                if model.requiresNemo && !effectiveNemoAvailable {
-                                    // Store the pending model and show NeMo setup
-                                    pendingNemoModelId = model.id
-                                    showingNemoSetup = true
-                                } else {
-                                    Task {
-                                        await downloadModel(model.id)
-                                    }
-                                }
-                            },
-                            onInstallNemo: {
+            VStack(spacing: 0) {
+                ForEach(recommendedModels) { model in
+                    OnboardingModelCard(
+                        model: model,
+                        isDownloading: downloadingModels.contains(model.id),
+                        isLoading: loadingModels.contains(model.id),
+                        isDownloaded: downloadedModels.contains(model.id) || isModelAlreadyDownloaded(model.id),
+                        nemoAvailable: effectiveNemoAvailable,
+                        backendReady: backendManager.isServerReady,
+                        onDownload: {
+                            if model.requiresNemo && !effectiveNemoAvailable {
                                 pendingNemoModelId = model.id
                                 showingNemoSetup = true
+                            } else {
+                                Task {
+                                    await downloadModel(model.id)
+                                }
                             }
-                        )
-                    }
+                        },
+                        onInstallNemo: {
+                            pendingNemoModelId = model.id
+                            showingNemoSetup = true
+                        }
+                    )
                 }
-                .padding(.horizontal, 40)
             }
+            .padding(.top, 2)
 
-            // Hint about more models
-            HStack(spacing: 6) {
-                Image(systemName: "info.circle")
-                    .foregroundColor(.secondary)
-                Text("More models available in Settings → Models")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
-            }
+            localModelFootnote
+                .padding(.top, 20)
 
             Spacer()
             
             // Action Buttons
-            VStack(spacing: 12) {
-                if isDownloading {
-                    // Downloading state
-                    HStack {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Downloading...")
-                            .font(.title3.weight(.semibold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(Color.accentColor.opacity(0.1))
-                    .cornerRadius(10)
-                    .padding(.horizontal, 60)
-                } else if downloadedModels.count > 0 {
-                    // At least one model downloaded - can continue
-                    Button(action: onNext) {
-                        HStack {
-                            Text("Continue")
-                                .font(.title3.weight(.semibold))
-                            Image(systemName: "arrow.right")
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .padding(.horizontal, 60)
-                } else {
-                    // No models downloaded yet - show skip
-                    Button(action: onNext) {
-                        HStack {
-                            Text("Skip - Download Later")
-                                .font(.title3.weight(.semibold))
-                            Image(systemName: "arrow.right")
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .padding(.horizontal, 60)
-                }
-                
-                // Back button
-                Button(action: onBack) {
-                    HStack {
-                        Image(systemName: "chevron.left")
-                        Text("Back")
-                    }
-                    .font(.body.weight(.medium))
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
+            HStack {
+                OnboardingSecondaryActionButton(
+                    title: "Back",
+                    systemImage: "arrow.left",
+                    action: onBack
+                )
                 .disabled(isDownloading)
-                .padding(.bottom, 20)
+
+                Spacer()
+
+                if isDownloading {
+                    OnboardingPrimaryActionButton(
+                        title: "Downloading...",
+                        systemImage: "arrow.down",
+                        isLoading: true,
+                        action: {}
+                    )
+                } else if readyLocalModelCount > 0 {
+                    OnboardingPrimaryActionButton(
+                        title: "Continue",
+                        systemImage: "arrow.right",
+                        action: onNext
+                    )
+                } else {
+                    OnboardingPrimaryActionButton(
+                        title: "Skip Local",
+                        systemImage: "arrow.right",
+                        action: onNext
+                    )
+                }
             }
         }
-        .padding()
+        .padding(34)
         .onAppear {
             Task {
                 // Fetch models - server is already ready from first screen
@@ -276,6 +220,24 @@ struct ModelsOnboardingView: View {
             .environmentObject(appState)
             .environmentObject(backendManager)
         }
+    }
+
+    private var localModelFootnote: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text("\(readyLocalModelCount)")
+                .font(.system(size: 24, weight: .bold, design: .rounded))
+                .foregroundStyle(.primary)
+
+            Text("local model\(readyLocalModelCount == 1 ? "" : "s") ready now. More speech-to-text and local LLM models live in Settings > Models.")
+                .font(.system(size: 13, weight: .medium))
+                .lineSpacing(2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var readyLocalModelCount: Int {
+        downloadedModels.union(Set(appState.availableModels.filter(\.downloaded).map(\.id))).count
     }
     
     // MARK: - Helpers
@@ -407,148 +369,83 @@ struct OnboardingModelCard: View {
                 onDownload()
             }
         }) {
-            HStack(spacing: 16) {
-                // Status indicator
-                ZStack {
-                    Circle()
-                        .stroke(statusColor, lineWidth: 2)
-                        .frame(width: 24, height: 24)
+            VStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 18) {
+                    statusGlyph
+                        .padding(.top, 1)
 
-                    if isDownloading {
-                        ProgressView()
-                            .scaleEffect(0.5)
-                            .frame(width: 24, height: 24)
-                    } else if isLoading {
-                        ProgressView()
-                            .scaleEffect(0.5)
-                            .frame(width: 24, height: 24)
-                            .foregroundColor(.orange)
-                    } else if isDownloaded {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 20))
-                            .foregroundColor(.green)
-                    } else if model.requiresNemo && !nemoAvailable {
-                        Image(systemName: "cpu")
-                            .font(.system(size: 16))
-                            .foregroundColor(.orange)
-                    } else {
-                        Image(systemName: "arrow.down.circle")
-                            .font(.system(size: 18))
-                            .foregroundColor(.accentColor)
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(model.displayName)
+                                .font(.system(size: 18, weight: .bold, design: .rounded))
+                                .foregroundStyle(.primary)
+
+                            Text(primaryTag)
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                                .tracking(0.7)
+                                .textCase(.uppercase)
+                                .foregroundStyle(statusColor)
+                        }
+
+                        Text(model.description)
+                            .font(.system(size: 13, weight: .medium))
+                            .lineSpacing(2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if model.requiresNemo && !nemoAvailable {
+                            Label("Requires NeMo framework before download", systemImage: "cpu")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.orange)
+                        }
+                    }
+
+                    Spacer(minLength: 24)
+
+                    VStack(alignment: .trailing, spacing: 8) {
+                        Text(actionText)
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundStyle(statusColor)
+
+                        HStack(spacing: 12) {
+                            Label("\(model.downloadSizeGB, specifier: "%.1f") GB", systemImage: "arrow.down.circle")
+                            Label("\(model.ramSizeGB, specifier: "%.1f") GB RAM", systemImage: "memorychip")
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
                     }
                 }
 
-                // Model Info
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(model.displayName)
-                            .font(.headline)
-                            .foregroundColor(.primary)
-
-                        Spacer()
-
-                        // Status badge
-                        if isDownloaded {
-                            HStack(spacing: 4) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.green)
-                                Text("Ready")
-                                    .font(.caption.weight(.medium))
-                                    .foregroundColor(.green)
-                            }
-                        } else if isLoading {
-                            HStack(spacing: 4) {
-                                Text("Loading...")
-                                    .font(.caption.weight(.medium))
-                                    .foregroundColor(.orange)
-                            }
-                        } else if isDownloading {
-                            HStack(spacing: 4) {
-                                Text("Downloading...")
-                                    .font(.caption.weight(.medium))
-                                    .foregroundColor(.accentColor)
-                            }
-                        } else if model.requiresNemo && !nemoAvailable {
-                            // Show NeMo required badge
-                            HStack(spacing: 4) {
-                                Image(systemName: "cpu")
-                                    .foregroundColor(.orange)
-                                Text("Requires NeMo")
-                                    .font(.caption.weight(.medium))
-                                    .foregroundColor(.orange)
-                            }
-                        } else {
-                            // Show "Click to download" hint
-                            Text("Click to download")
-                                .font(.caption.weight(.medium))
-                                .foregroundColor(.accentColor)
-                        }
-                    }
-
-                    Text(model.description)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-
-                    // NeMo info for Parakeet models
-                    if model.requiresNemo && !nemoAvailable {
-                        HStack(spacing: 6) {
-                            Image(systemName: "info.circle.fill")
-                                .foregroundColor(.orange)
-                            Text("Requires NeMo framework (~3GB install)")
-                                .font(.caption)
-                                .foregroundColor(.orange)
-                        }
-                        .padding(.vertical, 4)
-                    }
-
-                    HStack(spacing: 12) {
-                        Label("\(model.downloadSizeGB, specifier: "%.1f") GB", systemImage: "arrow.down.circle")
-                        Label("\(model.ramSizeGB, specifier: "%.1f") GB RAM", systemImage: "memorychip")
-                    }
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                    // Tags
-                    HStack(spacing: 6) {
-                        ForEach(model.tags, id: \.self) { tag in
-                            Text(tag)
-                                .font(.caption2)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Color.accentColor.opacity(0.1))
-                                .foregroundColor(.accentColor)
-                                .cornerRadius(6)
-                        }
-
-                        // Add NeMo tag for Parakeet models
-                        if model.requiresNemo {
-                            Text("NeMo")
-                                .font(.caption2)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Color.purple.opacity(0.1))
-                                .foregroundColor(.purple)
-                                .cornerRadius(6)
-                        }
-                    }
-                    .padding(.top, 4)
-                }
-
-                Spacer()
+                Divider()
+                    .overlay(.white.opacity(0.08))
+                    .padding(.top, 18)
             }
-            .padding(16)
+            .padding(.vertical, 13)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
-            .background(backgroundColor)
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(borderColor, lineWidth: borderWidth)
-            )
         }
         .buttonStyle(.plain)
         .disabled(isDownloading || isDownloaded || isLoading || !backendReady)
         .help(helpText)
+    }
+
+    @ViewBuilder
+    private var statusGlyph: some View {
+        ZStack {
+            Circle()
+                .fill(statusColor.opacity(0.14))
+                .frame(width: 36, height: 36)
+
+            if isDownloading || isLoading {
+                ProgressView()
+                    .scaleEffect(0.62)
+                    .frame(width: 36, height: 36)
+            } else {
+                Image(systemName: statusIcon)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(statusColor)
+            }
+        }
     }
 
     private var helpText: String {
@@ -575,32 +472,37 @@ struct OnboardingModelCard: View {
         }
     }
 
-    private var backgroundColor: Color {
+    private var statusIcon: String {
         if isDownloaded {
-            return Color.green.opacity(0.05)
-        } else if isDownloading || isLoading {
-            return Color.accentColor.opacity(0.05)
+            return "checkmark"
         } else if model.requiresNemo && !nemoAvailable {
-            return Color.orange.opacity(0.03)
+            return "cpu"
+        } else if isDownloading || isLoading {
+            return "arrow.triangle.2.circlepath"
         } else {
-            return Color.clear
+            return "arrow.down"
         }
     }
 
-    private var borderColor: Color {
-        if isDownloaded {
-            return .green.opacity(0.3)
-        } else if isDownloading || isLoading {
-            return .accentColor.opacity(0.3)
-        } else if model.requiresNemo && !nemoAvailable {
-            return .orange.opacity(0.3)
-        } else {
-            return .gray.opacity(0.2)
+    private var primaryTag: String {
+        if model.tags.contains("Recommended") {
+            return "Recommended"
         }
+        return model.tags.first ?? "Local"
     }
 
-    private var borderWidth: CGFloat {
-        (isDownloaded || isDownloading || isLoading || (model.requiresNemo && !nemoAvailable)) ? 2 : 1
+    private var actionText: String {
+        if isDownloaded {
+            return "Ready"
+        } else if isLoading {
+            return "Loading"
+        } else if isDownloading {
+            return "Downloading"
+        } else if model.requiresNemo && !nemoAvailable {
+            return "Install NeMo"
+        } else {
+            return "Download"
+        }
     }
 }
 
@@ -612,4 +514,3 @@ struct OnboardingModelCard: View {
         .environmentObject(BackendManager())
         .frame(width: 800, height: 750)
 }
-

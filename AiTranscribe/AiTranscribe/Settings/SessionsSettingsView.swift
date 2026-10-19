@@ -6,6 +6,7 @@ import ScreenCaptureKit
 
 struct SessionsSettingsView: View {
     @EnvironmentObject var sessionManager: SessionManager
+    @EnvironmentObject var appState: AppState
     var onNavigateToModels: ((ModelMode) -> Void)? = nil
 
     let hasAnimated: Bool
@@ -18,15 +19,39 @@ struct SessionsSettingsView: View {
     @State private var showDeleteSelectedSessionsAlert = false
     @State private var showClearTranscriptionAlert = false
     @State private var screenRecordingPermission = false
+
+    /// Last TCC screen-recording preflight answer, kept across tab revisits so
+    /// the permission pill renders instantly without re-running the check.
+    @MainActor private static var cachedScreenRecordingPermission: Bool?
     @State private var isSelectingSessions = false
     @State private var selectedSessionIds: Set<UUID> = []
-    @State private var showAudioMixSheet = false
+    @State private var showAutomationSheet = false
+    @State private var showImportPage = false
     @State private var selectedDate: Date? = nil
     @State private var showDatePicker = false
+    @State private var visibleSessionCount = SessionsSettingsView.initialVisibleSessions
+    @State private var apiTranscriptionModels: [APITranscriptionModel] = APITranscriptionModelStore.load()
+    @State private var apiLanguageModels: [APILanguageModel] = APILanguageModelStore.load()
+    @State private var automationSelectedPresetIds: Set<String> = Set(
+        UserDefaults.standard.stringArray(forKey: SessionAutomationPreferences.summaryPresetIdsKey)
+            ?? [SessionSummaryPreset.meetingNotes.rawValue]
+    )
 
     @AppStorage("hideSessionInfoBanner") private var hideBanner = false
-    @AppStorage(SessionAudioMixPreferences.micTrimDBKey) private var sessionMicTrimDB = SessionAudioMixPreferences.defaultMicTrimDB
-    @AppStorage(SessionAudioMixPreferences.systemTrimDBKey) private var sessionSystemTrimDB = SessionAudioMixPreferences.defaultSystemTrimDB
+    @AppStorage(SessionAutomationPreferences.autoTranscribeKey) private var automationAutoTranscribe = false
+    @AppStorage(SessionAutomationPreferences.transcriptionSourceKey) private var automationTranscriptionSource = SessionAutomationSource.local.rawValue
+    @AppStorage(SessionAutomationPreferences.localTranscriptionModelKey) private var automationLocalTranscriptionModelId = "parakeet-v2"
+    @AppStorage(SessionAutomationPreferences.transcriptionProviderKey) private var automationTranscriptionProviderId = TranscriptionProviderDescriptor.openAI.id
+    @AppStorage(SessionAutomationPreferences.transcriptionModelKey) private var automationTranscriptionModelId = TranscriptionModelDescriptor.openAIModels[0].id
+    @AppStorage(SessionAutomationPreferences.localRamBudgetGBKey) private var automationLocalRamBudgetGB = 4.0
+    @AppStorage(SessionAutomationPreferences.publicBatchTargetKey) private var automationPublicBatchTarget = 0
+    @AppStorage(SessionAutomationPreferences.autoSummarizeKey) private var automationAutoSummarize = false
+    @AppStorage(SessionAutomationPreferences.summarySourceKey) private var automationSummarySource = SessionAutomationSource.local.rawValue
+    @AppStorage(SessionAutomationPreferences.localSummaryModelKey) private var automationLocalSummaryModelId = "gemma-4-e2b-it-4bit"
+    @AppStorage(SessionAutomationPreferences.summaryProviderKey) private var automationSummaryProviderId = TranscriptionProviderDescriptor.openAI.id
+    @AppStorage(SessionAutomationPreferences.summaryModelKey) private var automationSummaryModelId = APILanguageModelStore.defaultModels[0].modelId
+    @AppStorage(SessionAutomationPreferences.summaryLengthOptionKey) private var automationSummaryLengthOption = SummaryLengthOption.medium.rawValue
+    @AppStorage(SessionAutomationPreferences.summaryCustomWordsKey) private var automationSummaryCustomWords = SummaryLengthOption.custom.defaultWordTarget
 
     /// Animation state
     @State private var appeared: Bool
@@ -42,14 +67,30 @@ struct SessionsSettingsView: View {
 
     // MARK: - Computed
 
+    /// How many session cards render before the user asks for more. Each card carries a
+    /// material background and a hover/appear animation, so drawing every session at once
+    /// is what makes a large library crawl.
+    private static let initialVisibleSessions = 8
+    private static let visibleSessionsIncrement = 10
+
     private var filteredSessions: [Session] {
         guard let date = selectedDate else { return sessionManager.sessions }
         return sessionManager.sessions.filter { Calendar.current.isDate($0.createdAt, inSameDayAs: date) }
     }
 
-    /// Group sessions by date (newest first)
+    /// The slice actually rendered. `sessionManager.sessions` is already newest-first,
+    /// so the prefix is the most recent ones.
+    private var visibleSessions: [Session] {
+        Array(filteredSessions.prefix(visibleSessionCount))
+    }
+
+    private var hiddenSessionCount: Int {
+        max(0, filteredSessions.count - visibleSessionCount)
+    }
+
+    /// Group the visible slice by date (newest first)
     private var groupedSessions: [(date: Date, sessions: [Session])] {
-        let grouped = Dictionary(grouping: filteredSessions) { session in
+        let grouped = Dictionary(grouping: visibleSessions) { session in
             Calendar.current.startOfDay(for: session.createdAt)
         }
         return grouped
@@ -61,14 +102,73 @@ struct SessionsSettingsView: View {
         sessionManager.getTotalStorageSize()
     }
 
-    private var uniqueDates: [Date] {
-        let dates = Set(sessionManager.sessions.map { Calendar.current.startOfDay(for: $0.createdAt) })
-        return dates.sorted(by: >)
+    private var localSessionModels: [ModelInfoResponse] {
+        appState.availableModels.filter { $0.downloaded == true && $0.sessionCompatible }
+    }
+
+    private var selectedLocalSessionModel: ModelInfoResponse? {
+        localSessionModels.first { $0.id == automationLocalTranscriptionModelId }
+            ?? localSessionModels.first
+    }
+
+    private var publicSessionModels: [APITranscriptionModel] {
+        apiTranscriptionModels.filter {
+            APITranscriptionModelStore.isSupportedModel($0.modelId, providerId: $0.providerId)
+        }
+    }
+
+    private var selectedPublicSessionModel: APITranscriptionModel? {
+        publicSessionModels.first {
+            $0.providerId == automationTranscriptionProviderId &&
+                $0.modelId == automationTranscriptionModelId
+        } ?? publicSessionModels.first
+    }
+
+    private var summaryModels: [SummaryModelInfoResponse] {
+        appState.availableSummaryModels.filter(\.downloaded)
+    }
+
+    private var selectedLocalSummaryModel: SummaryModelInfoResponse? {
+        summaryModels.first { $0.id == automationLocalSummaryModelId }
+    }
+
+    private var selectedPublicSummaryModel: APILanguageModel? {
+        apiLanguageModels.first {
+            $0.providerId == automationSummaryProviderId &&
+                $0.modelId == automationSummaryModelId
+        } ?? apiLanguageModels.first
+    }
+
+    private var automationSummaryPresets: [SummaryPresetDefinition] {
+        appState.summaryPresetDefinitions.filter {
+            !$0.instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    private var automationSummaryLength: SummaryLengthOption {
+        get { SummaryLengthOption(rawValue: automationSummaryLengthOption) ?? .medium }
+        nonmutating set { automationSummaryLengthOption = newValue.rawValue }
+    }
+
+    private var automationTargetSummaryWords: Int {
+        automationSummaryLength == .custom
+            ? max(120, automationSummaryCustomWords)
+            : automationSummaryLength.defaultWordTarget
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            if let selectedId = selectedSessionId,
+            if showImportPage {
+                SessionImportView(
+                    onBack: { showImportPage = false },
+                    onImported: { sessionId in
+                        showImportPage = false
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            selectedSessionId = sessionId
+                        }
+                    }
+                )
+            } else if let selectedId = selectedSessionId,
                sessionManager.sessions.contains(where: { $0.id == selectedId }) {
                 SessionDetailView(sessionId: selectedId, onBack: {
                     selectedSessionId = nil
@@ -78,8 +178,21 @@ struct SessionsSettingsView: View {
             }
         }
         .task {
-            sessionManager.loadSessions()
-            screenRecordingPermission = await SystemAudioCapture.checkPermission()
+            // Cheap and signature-guarded — runs every appearance.
+            sessionManager.loadSessionsIfNeeded()
+
+            // TCC preflight once per settings-window session: seed the pill from
+            // the last known answer, and only re-run the check on the tab's first
+            // appearance after the window opens (`hasAnimated` is false exactly
+            // then). The pill's explicit request button still re-checks.
+            if let cached = Self.cachedScreenRecordingPermission {
+                screenRecordingPermission = cached
+            }
+            if !hasAnimated || Self.cachedScreenRecordingPermission == nil {
+                let granted = await SystemAudioCapture.checkPermission()
+                Self.cachedScreenRecordingPermission = granted
+                screenRecordingPermission = granted
+            }
         }
         .task(id: "stagger") {
             guard !hasAnimated else { return }
@@ -87,10 +200,14 @@ struct SessionsSettingsView: View {
             appeared = true
             onAnimated()
         }
-        .onChange(of: sessionManager.sessions) { _, sessions in
-            let validIds = Set(sessions.map(\.id))
-            selectedSessionIds = selectedSessionIds.intersection(validIds)
-            if sessions.isEmpty { isSelectingSessions = false }
+        // Compare identities, not whole sessions — `Session` is Equatable over its full
+        // transcription and summary text, so diffing the array itself is expensive.
+        .onChange(of: sessionManager.sessions.map(\.id)) { _, ids in
+            selectedSessionIds = selectedSessionIds.intersection(Set(ids))
+            if ids.isEmpty { isSelectingSessions = false }
+        }
+        .onChange(of: selectedDate) { _, _ in
+            visibleSessionCount = Self.initialVisibleSessions
         }
     }
 
@@ -120,7 +237,7 @@ struct SessionsSettingsView: View {
                 }
 
                 // Date filter chips
-                if !uniqueDates.isEmpty {
+                if !sessionManager.sessions.isEmpty {
                     dateFilterRow
                         .padding(.top, 12)
                         .staggerIn(index: 4, appeared: appeared)
@@ -157,13 +274,13 @@ struct SessionsSettingsView: View {
             .padding(.top, 8)
         }
         .scrollIndicators(.automatic)
-        .sheet(isPresented: $showAudioMixSheet) {
-            AudioMixSheetView(
-                micTrimDB: $sessionMicTrimDB,
-                systemTrimDB: $sessionSystemTrimDB,
-                latestSessionName: latestSessionWithAudio?.name,
-                latestAudioURL: latestSessionAudioURL
-            )
+        .sheet(isPresented: $showAutomationSheet) {
+            sessionAutomationSettingsSheet
+        }
+        .task {
+            apiTranscriptionModels = APITranscriptionModelStore.load()
+            apiLanguageModels = APILanguageModelStore.load()
+            normalizeAutomationSelections()
         }
     }
 
@@ -192,14 +309,16 @@ struct SessionsSettingsView: View {
 
                 Spacer()
 
-                // Audio mix button
+                // Import audio button
                 Button {
-                    showAudioMixSheet = true
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        showImportPage = true
+                    }
                 } label: {
                     HStack(spacing: 5) {
-                        Image(systemName: "slider.horizontal.3")
+                        Image(systemName: "square.and.arrow.down")
                             .font(.system(size: 10, weight: .medium))
-                        Text("Audio Mix")
+                        Text("Import")
                             .font(.system(size: 11, weight: .medium))
                     }
                     .foregroundStyle(.primary)
@@ -236,6 +355,51 @@ struct SessionsSettingsView: View {
         }
     }
 
+    private var automationDockControl: some View {
+        let activeCount = sessionManager.sessions.filter { $0.automation?.isActive == true }.count
+        let statusText = activeCount > 0 ? "\(activeCount) active" : (automationAutoTranscribe ? "On" : "Off")
+        let tint: Color = activeCount > 0 ? .orange : (automationAutoTranscribe ? .green : .secondary)
+
+        return HStack(spacing: 0) {
+            Button {
+                showAutomationSheet = true
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(tint)
+
+                    Text("Auto Process")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    Text(statusText)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(tint)
+                }
+                .padding(.leading, 10)
+                .padding(.trailing, 8)
+                .padding(.vertical, 5)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(width: 1, height: 20)
+
+            Toggle("", isOn: $automationAutoTranscribe)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
+                .padding(.horizontal, 7)
+        }
+        .background(.thinMaterial, in: Capsule())
+        .overlay(
+            Capsule()
+                .strokeBorder(tint.opacity(automationAutoTranscribe || activeCount > 0 ? 0.24 : 0.08), lineWidth: 0.6)
+        )
+    }
+
     // MARK: - Permission Pills
 
     private var permissionPills: some View {
@@ -251,7 +415,9 @@ struct SessionsSettingsView: View {
                     SystemAudioCapture.requestPermission()
                     Task {
                         try? await Task.sleep(for: .seconds(2))
-                        screenRecordingPermission = await SystemAudioCapture.checkPermission()
+                        let granted = await SystemAudioCapture.checkPermission()
+                        Self.cachedScreenRecordingPermission = granted
+                        screenRecordingPermission = granted
                     }
                 } : nil
             )
@@ -263,12 +429,12 @@ struct SessionsSettingsView: View {
                 .disabled(selectedSessionIds.isEmpty)
                 .alert("Delete Selected Sessions?", isPresented: $showDeleteSelectedSessionsAlert) {
                     Button("Cancel", role: .cancel) {}
-                    Button("Delete", role: .destructive) {
+                    Button("Delete \(selectedSessionIds.count)", role: .destructive) {
                         sessionManager.bulkDeleteSessions(ids: selectedSessionIds)
                         exitSelectionMode()
                     }
                 } message: {
-                    Text("Selected sessions and their data will be permanently deleted.")
+                    Text("\(selectedSessionIds.count) \(selectedSessionIds.count == 1 ? "session" : "sessions") — audio, transcriptions and summaries — will be permanently deleted. This cannot be undone.")
                 }
 
                 footerPill(label: "Clear Transcription", tint: .orange) {
@@ -277,16 +443,18 @@ struct SessionsSettingsView: View {
                 .disabled(selectedSessionIds.isEmpty)
                 .alert("Clear Transcription?", isPresented: $showClearTranscriptionAlert) {
                     Button("Cancel", role: .cancel) {}
-                    Button("Clear", role: .destructive) {
+                    Button("Clear \(selectedSessionIds.count)", role: .destructive) {
                         sessionManager.bulkResetTranscription(ids: selectedSessionIds)
                         exitSelectionMode()
                     }
                 } message: {
-                    Text("Transcriptions for selected sessions will be deleted. Audio files are kept.")
+                    Text("Transcriptions for \(selectedSessionIds.count) \(selectedSessionIds.count == 1 ? "session" : "sessions") will be deleted. Audio files are kept.")
                 }
             }
 
             Spacer()
+
+            automationDockControl
         }
     }
 
@@ -355,6 +523,559 @@ struct SessionsSettingsView: View {
         )
     }
 
+    // MARK: - Session Automation
+
+    private var sessionAutomationSettingsSheet: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(Color.accentColor.opacity(0.14))
+                        .frame(width: 42, height: 42)
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text("Session Auto Processing")
+                            .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        automationStatusPill
+                    }
+                    Text("Choose what happens after each new session recording ends.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Toggle("", isOn: $automationAutoTranscribe)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+            .padding(20)
+
+            Divider()
+
+            ScrollView {
+                sessionAutomationPanel
+                    .padding(20)
+            }
+            .scrollIndicators(.automatic)
+
+            Divider()
+
+            HStack {
+                Text(automationAutoTranscribe ? "New sessions will be processed automatically." : "Automation is off for new sessions.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+
+                Spacer()
+
+                Button("Done") {
+                    showAutomationSheet = false
+                }
+                .buttonStyle(.plain)
+                .modifier(SessionSheetActionPillStyle(tint: .accentColor, prominent: true))
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(20)
+        }
+        .frame(width: 680, height: automationAutoSummarize && automationAutoTranscribe ? 620 : 430)
+    }
+
+    private var sessionAutomationPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if automationAutoTranscribe {
+                VStack(alignment: .leading, spacing: 12) {
+                    automationTranscriptionControls
+
+                    Divider().opacity(0.2)
+
+                    HStack(alignment: .center, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Summarize after transcription")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("Runs only after the automatic transcript succeeds.")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $automationAutoSummarize)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+
+                    if automationAutoSummarize {
+                        automationSummaryControls
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("After session ends")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    Text("Turn on automation to transcribe new sessions automatically, then optionally generate summaries.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(Color.primary.opacity(0.045), in: .rect(cornerRadius: 12, style: .continuous))
+            }
+        }
+        .padding(14)
+        .background(.thinMaterial, in: .rect(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(automationAutoTranscribe ? 0.18 : 0.08), lineWidth: 0.5)
+        )
+    }
+
+    private var automationStatusPill: some View {
+        let activeCount = sessionManager.sessions.filter { $0.automation?.isActive == true }.count
+        let label: String = {
+            if activeCount > 0 { return "\(activeCount) active" }
+            return automationAutoTranscribe ? "Enabled" : "Off"
+        }()
+        let tint: Color = activeCount > 0 ? .orange : (automationAutoTranscribe ? .green : .secondary)
+
+        return HStack(spacing: 4) {
+            Circle()
+                .fill(tint)
+                .frame(width: 5, height: 5)
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(tint.opacity(0.12), in: Capsule())
+    }
+
+    private func automationSourcePills(selection: Binding<String>) -> some View {
+        HStack(spacing: 2) {
+            ForEach(SessionAutomationSource.allCases) { source in
+                let selected = selection.wrappedValue == source.rawValue
+                Button {
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        selection.wrappedValue = source.rawValue
+                    }
+                } label: {
+                    Text(source.displayName)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(selected ? .white : .secondary)
+                        .frame(width: source == .local ? 78 : 96, height: 26)
+                        .background(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+
+    private var publicTranscriptionModelMenu: some View {
+        Menu {
+            ForEach(publicSessionModels) { model in
+                Button("\(model.displayName) · \(model.providerName)") {
+                    automationTranscriptionProviderId = model.providerId
+                    automationTranscriptionModelId = model.modelId
+                }
+            }
+        } label: {
+            automationSelectPill(
+                title: selectedPublicSessionModel.map { "\($0.displayName) · \($0.providerName)" } ?? "Choose API transcription model",
+                icon: "waveform",
+                width: 330
+            )
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+    }
+
+    private var localTranscriptionModelMenu: some View {
+        Menu {
+            ForEach(localSessionModels) { model in
+                Button(model.displayName) {
+                    automationLocalTranscriptionModelId = model.id
+                }
+            }
+        } label: {
+            automationSelectPill(
+                title: selectedLocalSessionModel?.displayName ?? "Choose local transcription model",
+                icon: "externaldrive.fill",
+                width: 330
+            )
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+    }
+
+    private var publicSummaryModelMenu: some View {
+        Menu {
+            ForEach(apiLanguageModels) { model in
+                Button("\(model.displayName) · \(model.providerName)") {
+                    automationSummaryProviderId = model.providerId
+                    automationSummaryModelId = model.modelId
+                }
+            }
+        } label: {
+            automationSelectPill(
+                title: selectedPublicSummaryModel.map { "\($0.displayName) · \($0.providerName)" } ?? "Choose API summary model",
+                icon: "sparkles",
+                width: 330
+            )
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+    }
+
+    private var localSummaryModelMenu: some View {
+        Menu {
+            ForEach(summaryModels) { model in
+                Button(model.displayName) {
+                    automationLocalSummaryModelId = model.id
+                }
+            }
+        } label: {
+            automationSelectPill(
+                title: selectedLocalSummaryModel?.displayName ?? "Choose local summary model",
+                icon: "sparkles",
+                width: 330
+            )
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+    }
+
+    private func automationSelectPill(title: String, icon: String, width: CGFloat) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 11)
+        .frame(width: width, height: 30)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+        .contentShape(Capsule())
+    }
+
+    private func automationIntegerStepperPill(
+        label: String,
+        value: Binding<Int>,
+        range: ClosedRange<Int>,
+        step: Int,
+        zeroLabel: String?
+    ) -> some View {
+        let displayValue = zeroLabel != nil && value.wrappedValue == 0 ? zeroLabel! : "\(value.wrappedValue)"
+        return HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 48, alignment: .leading)
+
+            Button {
+                value.wrappedValue = max(range.lowerBound, value.wrappedValue - step)
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(value.wrappedValue <= range.lowerBound)
+
+            Text(displayValue)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.primary)
+                .frame(width: 42)
+
+            Button {
+                value.wrappedValue = min(range.upperBound, value.wrappedValue + step)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(value.wrappedValue >= range.upperBound)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 9)
+        .frame(height: 30)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+
+    private func automationDoubleStepperPill(
+        label: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        step: Double,
+        suffix: String
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 32, alignment: .leading)
+
+            Button {
+                value.wrappedValue = max(range.lowerBound, value.wrappedValue - step)
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(value.wrappedValue <= range.lowerBound)
+
+            Text("\(String(format: "%.1f", value.wrappedValue)) \(suffix)")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.primary)
+                .frame(width: 66)
+
+            Button {
+                value.wrappedValue = min(range.upperBound, value.wrappedValue + step)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(value.wrappedValue >= range.upperBound)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 9)
+        .frame(height: 30)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+
+    private var automationLengthPills: some View {
+        HStack(spacing: 2) {
+            ForEach(SummaryLengthOption.allCases) { option in
+                let selected = automationSummaryLength == option
+                Button {
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        automationSummaryLength = option
+                    }
+                } label: {
+                    Text(option.displayName)
+                        .font(.system(size: 10, weight: selected ? .semibold : .medium))
+                        .foregroundStyle(selected ? .white : .secondary)
+                        .frame(width: option == .custom ? 70 : 58, height: 26)
+                        .background(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+
+    private var automationTranscriptionControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            automationFieldLabel("TRANSCRIBE")
+
+            automationSourcePills(selection: Binding(
+                get: { automationTranscriptionSource },
+                set: { automationTranscriptionSource = $0 }
+            ))
+
+            if automationTranscriptionSource == SessionAutomationSource.public.rawValue {
+                if publicSessionModels.isEmpty {
+                    automationEmptyModelRow(
+                        title: "No public transcription model",
+                        actionTitle: "Open API Models",
+                        mode: .speechToText
+                    )
+                } else {
+                    HStack(spacing: 12) {
+                        publicTranscriptionModelMenu
+                        automationIntegerStepperPill(
+                            label: "Batches",
+                            value: $automationPublicBatchTarget,
+                            range: 0...30,
+                            step: 6,
+                            zeroLabel: "Auto"
+                        )
+                        Spacer()
+                    }
+                }
+            } else {
+                if localSessionModels.isEmpty {
+                    automationEmptyModelRow(
+                        title: "No downloaded session model",
+                        actionTitle: "Open Models",
+                        mode: .speechToText
+                    )
+                } else {
+                    HStack(spacing: 12) {
+                        localTranscriptionModelMenu
+                        automationDoubleStepperPill(
+                            label: "RAM",
+                            value: $automationLocalRamBudgetGB,
+                            range: 2...max(2, maxAutomationRamBudget),
+                            step: 0.5,
+                            suffix: "GB"
+                        )
+                        Spacer()
+                    }
+                }
+            }
+        }
+    }
+
+    private var automationSummaryControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            automationFieldLabel("SUMMARY")
+
+            automationSourcePills(selection: Binding(
+                get: { automationSummarySource },
+                set: { automationSummarySource = $0 }
+            ))
+
+            HStack(spacing: 12) {
+                if automationSummarySource == SessionAutomationSource.public.rawValue {
+                    if apiLanguageModels.isEmpty {
+                        automationEmptyModelRow(
+                            title: "No public language model",
+                            actionTitle: "Open API LLM",
+                            mode: .summarization
+                        )
+                    } else {
+                        publicSummaryModelMenu
+                    }
+                } else {
+                    if summaryModels.isEmpty {
+                        automationEmptyModelRow(
+                            title: "No local summary model",
+                            actionTitle: "Open Models",
+                            mode: .summarization
+                        )
+                    } else {
+                        localSummaryModelMenu
+                        automationInfoPill(icon: "externaldrive.fill", text: "Downloaded", tint: .secondary)
+                    }
+                }
+                Spacer()
+            }
+
+            HStack(spacing: 12) {
+                automationLengthPills
+
+                if automationSummaryLength == .custom {
+                    automationIntegerStepperPill(
+                        label: "Words",
+                        value: $automationSummaryCustomWords,
+                        range: 180...2200,
+                        step: 80,
+                        zeroLabel: nil
+                    )
+                } else {
+                    automationInfoPill(icon: "text.word.spacing", text: "~\(automationTargetSummaryWords) words", tint: .secondary)
+                }
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Presets")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                FlowLayout(spacing: 6, rowSpacing: 6) {
+                    ForEach(automationSummaryPresets) { preset in
+                        automationPresetChip(preset)
+                    }
+                }
+            }
+        }
+    }
+
+    private var maxAutomationRamBudget: Double {
+        let totalRAM = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+        return max(4.0, totalRAM - 4.0)
+    }
+
+    private func automationFieldLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold, design: .rounded))
+            .foregroundStyle(.tertiary)
+            .tracking(0.5)
+    }
+
+    private func automationEmptyModelRow(title: String, actionTitle: String, mode: ModelMode) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 10))
+                .foregroundStyle(.orange)
+            Text(title)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            Spacer()
+            if let onNavigateToModels {
+                Button(actionTitle) { onNavigateToModels(mode) }
+                    .font(.system(size: 10, weight: .medium))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+            }
+        }
+    }
+
+    private func automationInfoPill(icon: String, text: String, tint: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 8))
+            Text(text)
+                .font(.system(size: 9, weight: .medium))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(tint.opacity(0.1), in: Capsule())
+    }
+
+    private func automationPresetChip(_ preset: SummaryPresetDefinition) -> some View {
+        let selected = automationSelectedPresetIds.contains(preset.id)
+        return Button {
+            toggleAutomationPreset(preset.id)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: preset.symbolName)
+                    .font(.system(size: 9, weight: .medium))
+                Text(preset.displayName)
+                    .font(.system(size: 10, weight: selected ? .semibold : .medium))
+            }
+            .foregroundStyle(selected ? .white : .secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.primary.opacity(0.06)), in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - Date Filter
 
     private static let dateChipFormatter: DateFormatter = {
@@ -364,21 +1085,23 @@ struct SessionsSettingsView: View {
     }()
 
     private var dateFilterRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        // Counted once per render instead of re-filtering every session for every chip.
+        let dayCounts = sessionDateCounts
+        let dates = dayCounts.keys.sorted(by: >)
+
+        return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
                 // "All" chip
                 dateChip(label: "All", isSelected: selectedDate == nil) {
                     selectedDate = nil
                 }
 
-                ForEach(Array(uniqueDates.prefix(10)), id: \.self) { date in
+                ForEach(Array(dates.prefix(10)), id: \.self) { date in
                     let label = Calendar.current.isDateInToday(date) ? "Today"
                         : Calendar.current.isDateInYesterday(date) ? "Yesterday"
                         : Self.dateChipFormatter.string(from: date)
 
-                    let count = sessionManager.sessions.filter {
-                        Calendar.current.isDate($0.createdAt, inSameDayAs: date)
-                    }.count
+                    let count = dayCounts[date] ?? 0
 
                     dateChip(
                         label: "\(label) (\(count))",
@@ -452,7 +1175,7 @@ struct SessionsSettingsView: View {
     }()
 
     private var sessionGroups: some View {
-        VStack(spacing: 16) {
+        LazyVStack(spacing: 16) {
             ForEach(groupedSessions, id: \.date) { group in
                 VStack(alignment: .leading, spacing: 8) {
                     // Date group header
@@ -492,10 +1215,14 @@ struct SessionsSettingsView: View {
                                 }
                             }
                             .contextMenu {
-                                if session.hasTranscription, let text = session.transcriptionText {
+                                if session.hasTranscription {
                                     Button("Copy Transcription") {
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.setString(text, forType: .string)
+                                        // Transcript text loads on demand — this
+                                        // reads from cache or disk when clicked.
+                                        if let text = sessionManager.transcriptionText(for: session.id) {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(text, forType: .string)
+                                        }
                                     }
                                     Divider()
                                 }
@@ -517,8 +1244,43 @@ struct SessionsSettingsView: View {
                     }
                 }
             }
+
+            if hiddenSessionCount > 0 {
+                showMoreButton
+                    .padding(.top, 4)
+            }
         }
         .padding(.top, 12)
+    }
+
+    // MARK: - Show More
+
+    private var showMoreButton: some View {
+        VStack(spacing: 6) {
+            Button {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    visibleSessionCount += Self.visibleSessionsIncrement
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                    Text("Show More")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(.thinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+            }
+            .buttonStyle(.plain)
+
+            Text("\(visibleSessions.count) of \(filteredSessions.count) shown · \(hiddenSessionCount) more")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Empty / No Match
@@ -531,9 +1293,28 @@ struct SessionsSettingsView: View {
             Text("No sessions yet")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text("Record your first session from the menu bar.")
+            Text("Record your first session from the menu bar, or import an audio file.")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    showImportPage = true
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 10, weight: .medium))
+                    Text("Import Audio File")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Color.accentColor, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 4)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 60)
@@ -558,7 +1339,9 @@ struct SessionsSettingsView: View {
 
     private var footerActions: some View {
         HStack(spacing: 8) {
-            Text(isSelectingSessions ? "\(selectedSessionIds.count) of \(sessionManager.sessions.count) selected" : "")
+            Text(isSelectingSessions
+                 ? "\(selectedSessionIds.count) of \(filteredSessions.count) selected"
+                 : "\(visibleSessions.count) of \(filteredSessions.count) shown")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
 
@@ -584,22 +1367,13 @@ struct SessionsSettingsView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Audio Mix Helpers
-
-    private var latestSessionWithAudio: Session? {
-        sessionManager.sessions.first { $0.hasAudio }
-    }
-
-    private var latestSessionAudioURL: URL? {
-        guard let session = latestSessionWithAudio else { return nil }
-        let url = sessionManager.getAudioURL(for: session)
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
-    }
-
     // MARK: - Selection Helpers
 
+    /// Selection follows the date filter, not the whole library — otherwise "Select All"
+    /// while filtered to one day would quietly arm a delete for every session.
     private var allSessionsSelected: Bool {
-        !sessionManager.sessions.isEmpty && selectedSessionIds.count == sessionManager.sessions.count
+        let filteredIds = Set(filteredSessions.map(\.id))
+        return !filteredIds.isEmpty && filteredIds.isSubset(of: selectedSessionIds)
     }
 
     private func toggleSessionSelection(_ sessionId: UUID) {
@@ -614,7 +1388,7 @@ struct SessionsSettingsView: View {
         if allSessionsSelected {
             selectedSessionIds.removeAll()
         } else {
-            selectedSessionIds = Set(sessionManager.sessions.map(\.id))
+            selectedSessionIds = Set(filteredSessions.map(\.id))
         }
     }
 
@@ -622,190 +1396,159 @@ struct SessionsSettingsView: View {
         isSelectingSessions = false
         selectedSessionIds.removeAll()
     }
-}
 
-// MARK: - Audio Mix Sheet
+    // MARK: - Automation Helpers
 
-struct AudioMixSheetView: View {
-    @Binding var micTrimDB: Double
-    @Binding var systemTrimDB: Double
-    let latestSessionName: String?
-    let latestAudioURL: URL?
-    @Environment(\.dismiss) var dismiss
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack(spacing: 16) {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 36))
-                    .foregroundStyle(.orange.gradient)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Session Audio Mix")
-                        .font(.title2)
-                        .fontWeight(.semibold)
-                    Text("Adjust mic and desktop levels for session recordings")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-            }
-            .padding(20)
-
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    // Mic slider
-                    mixSlider(
-                        title: "Microphone Boost",
-                        icon: "mic.fill",
-                        value: $micTrimDB,
-                        range: SessionAudioMixPreferences.micTrimRange,
-                        valueStr: SessionAudioMixPreferences.displayString(for: micTrimDB),
-                        gainStr: SessionAudioMixPreferences.multiplierString(
-                            for: SessionAudioMixPreferences.effectiveMicGain(forTrimDB: micTrimDB)
-                        ),
-                        minLabel: "Less",
-                        maxLabel: "More",
-                        tint: .blue
-                    )
-
-                    // System slider
-                    mixSlider(
-                        title: "Desktop Audio",
-                        icon: "desktopcomputer",
-                        value: $systemTrimDB,
-                        range: SessionAudioMixPreferences.systemTrimRange,
-                        valueStr: SessionAudioMixPreferences.displayString(for: systemTrimDB),
-                        gainStr: SessionAudioMixPreferences.multiplierString(
-                            for: SessionAudioMixPreferences.effectiveSystemGain(forTrimDB: systemTrimDB)
-                        ),
-                        minLabel: "Quieter",
-                        maxLabel: "Louder",
-                        tint: .purple
-                    )
-
-                    Divider()
-
-                    // Quick check
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("QUICK CHECK")
-                            .font(.system(size: 10, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.tertiary)
-                            .tracking(0.6)
-
-                        if let audioURL = latestAudioURL, let name = latestSessionName {
-                            HStack(spacing: 8) {
-                                Button {
-                                    NSWorkspace.shared.open(audioURL)
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "play.fill")
-                                            .font(.system(size: 9))
-                                        Text("Play Latest")
-                                            .font(.system(size: 11, weight: .medium))
-                                    }
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 7)
-                                    .background(.orange, in: Capsule())
-                                }
-                                .buttonStyle(.plain)
-
-                                Button {
-                                    NSWorkspace.shared.activateFileViewerSelecting([audioURL])
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "folder")
-                                            .font(.system(size: 9))
-                                        Text("Show in Finder")
-                                            .font(.system(size: 11, weight: .medium))
-                                    }
-                                    .foregroundStyle(.primary)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 7)
-                                    .background(.quaternary, in: Capsule())
-                                }
-                                .buttonStyle(.plain)
-
-                                Spacer()
-                            }
-
-                            Text(name)
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
-                        } else {
-                            Text("Record a session to audition your mix here.")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-
-                    Text("These settings only affect session recordings. Basic recording is not affected.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.quaternary)
-                }
-                .padding(24)
-            }
-
-            Divider()
-
-            // Footer
-            HStack {
-                Button("Reset") {
-                    micTrimDB = SessionAudioMixPreferences.defaultMicTrimDB
-                    systemTrimDB = SessionAudioMixPreferences.defaultSystemTrimDB
-                }
-                .disabled(abs(micTrimDB) < 0.05 && abs(systemTrimDB) < 0.05)
-
-                Spacer()
-
-                Button("Done") { dismiss() }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-            }
-            .padding(20)
+    private func normalizeAutomationSelections() {
+        let firstLocalSessionModel = localSessionModels.first?.id
+        if let firstLocalSessionModel,
+           !localSessionModels.contains(where: { $0.id == automationLocalTranscriptionModelId }) {
+            automationLocalTranscriptionModelId = firstLocalSessionModel
         }
-        .frame(width: 500, height: 480)
+
+        if let publicModel = selectedPublicSessionModel {
+            automationTranscriptionProviderId = publicModel.providerId
+            automationTranscriptionModelId = publicModel.modelId
+        }
+
+        if let firstSummaryModel = summaryModels.first,
+           !summaryModels.contains(where: { $0.id == automationLocalSummaryModelId }) {
+            automationLocalSummaryModelId = firstSummaryModel.id
+        }
+
+        if let publicSummaryModel = selectedPublicSummaryModel {
+            automationSummaryProviderId = publicSummaryModel.providerId
+            automationSummaryModelId = publicSummaryModel.modelId
+        }
+
+        let validPresetIds = Set(automationSummaryPresets.map(\.id))
+        automationSelectedPresetIds = automationSelectedPresetIds.intersection(validPresetIds)
+        if automationSelectedPresetIds.isEmpty,
+           let fallbackPresetId = automationSummaryPresets.first?.id {
+            automationSelectedPresetIds = [fallbackPresetId]
+        }
+        persistAutomationPresetSelection()
     }
 
-    private func mixSlider(
-        title: String,
-        icon: String,
-        value: Binding<Double>,
-        range: ClosedRange<Double>,
-        valueStr: String,
-        gainStr: String,
-        minLabel: String,
-        maxLabel: String,
-        tint: Color
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: icon)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(tint)
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer()
-                Text(valueStr)
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                Text("· \(gainStr)")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-
-            Slider(
-                value: value,
-                in: range,
-                step: 0.5,
-                minimumValueLabel: Text(minLabel).font(.system(size: 9)).foregroundStyle(.tertiary),
-                maximumValueLabel: Text(maxLabel).font(.system(size: 9)).foregroundStyle(.tertiary)
-            ) { Text(title) }
-            .tint(tint)
+    private func toggleAutomationPreset(_ presetId: String) {
+        if automationSelectedPresetIds.contains(presetId) {
+            automationSelectedPresetIds.remove(presetId)
+        } else {
+            automationSelectedPresetIds.insert(presetId)
         }
+
+        if automationSelectedPresetIds.isEmpty {
+            automationSelectedPresetIds.insert(presetId)
+        }
+
+        persistAutomationPresetSelection()
+    }
+
+    private func persistAutomationPresetSelection() {
+        let orderedIds = automationSummaryPresets
+            .map(\.id)
+            .filter { automationSelectedPresetIds.contains($0) }
+        UserDefaults.standard.set(orderedIds, forKey: SessionAutomationPreferences.summaryPresetIdsKey)
+    }
+}
+
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+    var rowSpacing: CGFloat? = nil
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        let maxWidth = proposal.width ?? 320
+        let rows = layoutRows(for: subviews, maxWidth: maxWidth)
+        let verticalSpacing = rowSpacing ?? spacing
+        return CGSize(
+            width: maxWidth,
+            height: rows.reduce(CGFloat.zero) { $0 + $1.height } + CGFloat(max(rows.count - 1, 0)) * verticalSpacing
+        )
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let rows = layoutRows(for: subviews, maxWidth: bounds.width)
+        let verticalSpacing = rowSpacing ?? spacing
+        var y = bounds.minY
+
+        for row in rows {
+            var x = bounds.minX
+            for item in row.items {
+                item.subview.place(
+                    at: CGPoint(x: x, y: y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(item.size)
+                )
+                x += item.size.width + spacing
+            }
+            y += row.height + verticalSpacing
+        }
+    }
+
+    private func layoutRows(for subviews: Subviews, maxWidth: CGFloat) -> [FlowRow] {
+        var rows: [FlowRow] = []
+        var currentItems: [FlowItem] = []
+        var currentWidth: CGFloat = 0
+        var currentHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            let proposedWidth = currentItems.isEmpty ? size.width : currentWidth + spacing + size.width
+
+            if proposedWidth > maxWidth, !currentItems.isEmpty {
+                rows.append(FlowRow(items: currentItems, height: currentHeight))
+                currentItems = [FlowItem(subview: subview, size: size)]
+                currentWidth = size.width
+                currentHeight = size.height
+            } else {
+                currentItems.append(FlowItem(subview: subview, size: size))
+                currentWidth = proposedWidth
+                currentHeight = max(currentHeight, size.height)
+            }
+        }
+
+        if !currentItems.isEmpty {
+            rows.append(FlowRow(items: currentItems, height: currentHeight))
+        }
+
+        return rows
+    }
+
+    private struct FlowRow {
+        let items: [FlowItem]
+        let height: CGFloat
+    }
+
+    private struct FlowItem {
+        let subview: LayoutSubview
+        let size: CGSize
+    }
+}
+
+// MARK: - Session Sheet Styling
+
+private struct SessionSheetActionPillStyle: ViewModifier {
+    let tint: Color
+    let prominent: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(prominent ? .white : tint)
+            .padding(.horizontal, 12)
+            .frame(height: 28)
+            .background(prominent ? AnyShapeStyle(tint) : AnyShapeStyle(Color.primary.opacity(0.075)), in: Capsule())
+            .overlay(Capsule().strokeBorder(prominent ? tint.opacity(0.28) : .white.opacity(0.06), lineWidth: 0.6))
+            .contentShape(Capsule())
     }
 }
 

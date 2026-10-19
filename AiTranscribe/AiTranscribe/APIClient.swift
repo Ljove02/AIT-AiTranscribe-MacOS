@@ -9,7 +9,7 @@
  HTTP (HyperText Transfer Protocol) is how computers talk over the internet.
 
  Key concepts:
- - URL: The address (like http://127.0.0.1:8765/status)
+ - URL: The address (like http://127.0.0.1:8770/status)
  - Methods: GET (read), POST (create/action), PUT (update), DELETE (remove)
  - Headers: Metadata about the request
  - Body: The actual data being sent
@@ -70,6 +70,10 @@ enum APIError: Error, LocalizedError {
 }
 
 /// Client for communicating with the AiTranscribe Python backend
+enum BackendPort {
+    static let value = 8770
+}
+
 class APIClient {
 
     // =========================================================================
@@ -92,7 +96,7 @@ class APIClient {
     // INITIALIZATION
     // =========================================================================
 
-    init(host: String = "127.0.0.1", port: Int = 8765) {
+    init(host: String = "127.0.0.1", port: Int = BackendPort.value) {
         /*
          URL(string:) can fail, so it returns Optional.
          We use ! here because we know this URL is valid.
@@ -809,6 +813,76 @@ class APIClient {
         }
     }
 
+    func polishLocally(
+        inputText: String,
+        modelId: String,
+        presetId: String,
+        displayName: String,
+        systemPrompt: String,
+        maxOutputTokens: Int,
+        screenshotDataURL: String? = nil,
+        onEvent: @escaping (SessionSummaryEvent) -> Void
+    ) async throws {
+        let url = baseURL.appendingPathComponent("/polish/local")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 7200
+
+        var body: [String: Any] = [
+            "model_id": modelId,
+            "input_text": inputText,
+            "preset_id": presetId,
+            "display_name": displayName,
+            "system_prompt": systemPrompt,
+            "max_output_tokens": maxOutputTokens,
+        ]
+        if let screenshotDataURL {
+            body["screenshot_data_url"] = screenshotDataURL
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (asyncBytes, response) = try await session.bytes(for: request)
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200...299).contains(httpResponse.statusCode) {
+            let errorData = try await readErrorBody(from: asyncBytes)
+            let message = buildServerErrorMessage(
+                statusCode: httpResponse.statusCode,
+                data: errorData,
+                context: "/polish/local"
+            )
+            print("APIClient: \(message)")
+            throw APIError.serverError(message)
+        }
+        try checkResponse(response, context: "/polish/local")
+
+        var sawTerminalEvent = false
+        for try await line in asyncBytes.lines {
+            if line.hasPrefix("data: ") {
+                let jsonString = String(line.dropFirst(6))
+                if let data = jsonString.data(using: .utf8),
+                   let event = try? decoder.decode(SessionSummaryEvent.self, from: data) {
+                    if ["done", "error", "cancelled", "batch_complete"].contains(event.event) {
+                        sawTerminalEvent = true
+                    }
+                    await MainActor.run {
+                        onEvent(event)
+                    }
+                }
+            }
+        }
+
+        if !sawTerminalEvent {
+            throw NSError(
+                domain: "AiTranscribe.APIClient",
+                code: -103,
+                userInfo: [NSLocalizedDescriptionKey: "Local polish stream ended unexpectedly."]
+            )
+        }
+    }
+
     func cancelSessionSummary() async throws -> MessageResponse {
         return try await post("/session/cancel-summary")
     }
@@ -1051,6 +1125,7 @@ struct SummaryModelInfoResponse: Codable, Identifiable {
     let downloadSizeMB: Int
     let residentModelRamMB: Int
     let downloaded: Bool
+    let supportsVision: Bool
     let recommended: Bool
     let path: String?
     let modelUrl: String?
@@ -1063,6 +1138,7 @@ struct SummaryModelInfoResponse: Codable, Identifiable {
         case contextTokens = "context_tokens"
         case downloadSizeMB = "download_size_mb"
         case residentModelRamMB = "resident_model_ram_mb"
+        case supportsVision = "supports_vision"
         case modelUrl = "model_url"
         case kvBytesPerTokenDefault = "kv_bytes_per_token_default"
         case kvBytesPerTokenQuantized = "kv_bytes_per_token_quantized"

@@ -42,15 +42,87 @@ struct TransparentWindow: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
+// MARK: - Settings Window Focus
+
+/// Brings the Settings window to the front and makes it *key*.
+///
+/// This exists because a fixed `asyncAfter` hop is not enough. When the
+/// MenuBarExtra panel dismisses, macOS hands activation back to whatever app
+/// was frontmost before the menu opened — and that handoff can land after our
+/// delay, stealing key status right back. A non-key window renders every
+/// accent-tinted control (NSSwitch, NSPopUpButton) in gray, which is what the
+/// Settings toggles looked like.
+///
+/// `activate(ignoringOtherApps:)` is also deprecated on macOS 14+ and the
+/// system frequently declines the "ignoring other apps" part, so a single shot
+/// is not reliable either. Instead we poll: wait for the window to exist, ask
+/// for activation, then verify `isKeyWindow` and retry until it sticks.
+enum SettingsWindowFocus {
+    private static let retryInterval: TimeInterval = 0.05
+    private static let maxAttempts = 24 // ~1.2s of retries
+
+    static func focus() {
+        attempt(remaining: maxAttempts)
+    }
+
+    private static func attempt(remaining: Int) {
+        guard remaining > 0 else { return }
+
+        guard let window = settingsWindow() else {
+            // Window scene hasn't been instantiated yet — wait for it.
+            retry(remaining: remaining)
+            return
+        }
+
+        // Start with the modern cooperative API. If it hasn't taken by the
+        // halfway mark, fall back to the deprecated form, which still wins in
+        // some accessory-app cases.
+        activateApp(force: remaining <= maxAttempts / 2)
+        window.makeKeyAndOrderFront(nil)
+
+        // Verify on the next pass: activation is asynchronous, and the
+        // MenuBarExtra dismissal may still be in flight.
+        if !window.isKeyWindow || !NSApp.isActive {
+            retry(remaining: remaining)
+        }
+    }
+
+    private static func retry(remaining: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + retryInterval) {
+            attempt(remaining: remaining - 1)
+        }
+    }
+
+    private static func activateApp(force: Bool) {
+        if #available(macOS 14.0, *), !force {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    private static func settingsWindow() -> NSWindow? {
+        NSApp.windows.first { window in
+            guard window.isVisible || window.isMiniaturized || window.canBecomeKey else { return false }
+            return window.identifier?.rawValue.contains("settings") == true
+                || window.title.contains("Settings")
+        }
+    }
+}
+
 // MARK: - Settings View
 
 struct SettingsView: View {
     @State private var selectedSection: SettingsSection = .dashboard
     @State private var isSidebarExpanded: Bool = false
+    /// Tabs that have played their stagger-in this window session. Window-scoped
+    /// @State on purpose: each tab staggers once per settings window, revisits
+    /// render settled, and closing the window resets the set.
     @State private var animatedTabs: Set<SettingsSection> = []
     @State private var pendingHistoryEntryId: UUID? = nil
     @State private var pendingSessionId: UUID? = nil
     @State private var pendingModelMode: ModelMode = .speechToText
+    @StateObject private var dashboardStatsManager = DashboardStatsManager()
     @EnvironmentObject var backendManager: BackendManager
     @EnvironmentObject var updateChecker: UpdateChecker
 
@@ -110,19 +182,20 @@ struct SettingsView: View {
         switch selectedSection {
         case .dashboard:
             DashboardView(
+                statsManager: dashboardStatsManager,
                 hasAnimated: animatedTabs.contains(.dashboard),
                 onAnimated: { animatedTabs.insert(.dashboard) },
                 onNavigateToHistory: { entryId in
+                    // The destination tab is out of the hierarchy right now, so
+                    // it re-inits with this pending ID regardless — no need to
+                    // clear `animatedTabs` (which would replay the ~1s stagger).
                     pendingHistoryEntryId = entryId
-                    // Clear animation cache so the view reinits with the new ID
-                    animatedTabs.remove(.history)
                     withAnimation(.easeInOut(duration: 0.2)) {
                         selectedSection = .history
                     }
                 },
                 onNavigateToSessions: { sessionId in
                     pendingSessionId = sessionId
-                    animatedTabs.remove(.sessions)
                     withAnimation(.easeInOut(duration: 0.2)) {
                         selectedSection = .sessions
                     }
@@ -149,7 +222,6 @@ struct SettingsView: View {
                 onAnimated: { animatedTabs.insert(.sessions) },
                 onNavigateToModels: { mode in
                     pendingModelMode = mode
-                    animatedTabs.remove(.models)
                     withAnimation(.easeInOut(duration: 0.2)) {
                         selectedSection = .models
                     }
@@ -289,14 +361,35 @@ struct TranscriptionModeSwitch: View {
             Button {
                 showingModeInfo = true
             } label: {
-                Image(systemName: "info.circle")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 24, height: 24)
-                    .background(.quaternary, in: Circle())
+                ZStack {
+                    Circle()
+                        .fill(.quaternary)
+                        .frame(width: 24, height: 24)
+
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(width: 30, height: 30, alignment: .center)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("How Local/Public mode works")
+
+            if isLocalMode {
+                ZStack {
+                    Circle()
+                        .fill(.green.opacity(0.14))
+                        .frame(width: 24, height: 24)
+
+                    Image(systemName: "lock.shield.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.green)
+                }
+                .frame(width: 30, height: 30, alignment: .center)
+                .help("Local mode: audio and transcripts stay on this Mac.")
+                .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            }
         }
         .onAppear {
             guard !hasSeenTranscriptionModeInfo else { return }
@@ -375,7 +468,8 @@ struct TranscriptionModeInfoSheet: View {
                 Button("I Understand") {
                     onClose()
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .modifier(SettingsInfoActionPillStyle())
             }
         }
         .padding(24)
@@ -394,6 +488,19 @@ struct TranscriptionModeInfoSheet: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct SettingsInfoActionPillStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .frame(height: 30)
+            .background(Color.accentColor, in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.28), lineWidth: 0.6))
+            .contentShape(Capsule())
     }
 }
 

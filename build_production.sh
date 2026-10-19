@@ -21,7 +21,7 @@ set -e  # Exit on error
 # Get the directory where this script is located (works even when called from different directory)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$SCRIPT_DIR"
-VERSION="0.2.0"
+VERSION="0.3.0"
 APP_NAME="AiTranscribe"
 SKIP_BACKEND=false
 
@@ -214,7 +214,9 @@ print_header "Step 2: Building Xcode Project (Release)"
 cd AiTranscribe
 
 # Use a local build directory to avoid DerivedData cross-contamination
-BUILD_DIR="$PROJECT_ROOT/build/xcode"
+# Xcode's build database fails with disk I/O errors on the external volume
+# (APFS mounted noowners). Allow relocating derived data to local disk.
+BUILD_DIR="${AIT_BUILD_DIR:-$PROJECT_ROOT/build/xcode}"
 
 # Clean and build
 echo "Cleaning previous build..."

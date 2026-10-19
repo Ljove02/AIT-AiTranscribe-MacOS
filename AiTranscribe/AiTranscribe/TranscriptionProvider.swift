@@ -134,6 +134,12 @@ struct TranscriptionModelDescriptor: Identifiable, Codable, Equatable {
             source: .api
         ),
         TranscriptionModelDescriptor(
+            id: "gpt-4o-mini-transcribe-2025-12-15",
+            displayName: "GPT-4o Mini Transcribe",
+            providerId: TranscriptionProviderDescriptor.openAI.id,
+            source: .api
+        ),
+        TranscriptionModelDescriptor(
             id: "whisper-1",
             displayName: "Whisper API",
             providerId: TranscriptionProviderDescriptor.openAI.id,

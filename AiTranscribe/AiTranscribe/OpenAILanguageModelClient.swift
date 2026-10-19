@@ -84,17 +84,77 @@ private struct OpenAIResponsesRequest: Encodable {
     let model: String
     let input: [OpenAIResponsesInput]
     let maxOutputTokens: Int
+    let stream: Bool?
 
     enum CodingKeys: String, CodingKey {
         case model
         case input
         case maxOutputTokens = "max_output_tokens"
+        case stream
+    }
+
+    init(
+        model: String,
+        input: [OpenAIResponsesInput],
+        maxOutputTokens: Int,
+        stream: Bool? = nil
+    ) {
+        self.model = model
+        self.input = input
+        self.maxOutputTokens = maxOutputTokens
+        self.stream = stream
     }
 }
 
 private struct OpenAIResponsesInput: Encodable {
     let role: String
-    let content: String
+    let content: OpenAIResponsesInputContent
+
+    init(role: String, content: String) {
+        self.role = role
+        self.content = .text(content)
+    }
+
+    init(role: String, contentParts: [OpenAIResponsesContentPart]) {
+        self.role = role
+        self.content = .parts(contentParts)
+    }
+}
+
+private enum OpenAIResponsesInputContent: Encodable {
+    case text(String)
+    case parts([OpenAIResponsesContentPart])
+
+    func encode(to encoder: Encoder) throws {
+        switch self {
+        case .text(let text):
+            var container = encoder.singleValueContainer()
+            try container.encode(text)
+        case .parts(let parts):
+            var container = encoder.singleValueContainer()
+            try container.encode(parts)
+        }
+    }
+}
+
+private struct OpenAIResponsesContentPart: Encodable {
+    let type: String
+    let text: String?
+    let imageURL: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case text
+        case imageURL = "image_url"
+    }
+
+    static func inputText(_ text: String) -> OpenAIResponsesContentPart {
+        OpenAIResponsesContentPart(type: "input_text", text: text, imageURL: nil)
+    }
+
+    static func inputImage(_ imageURL: String) -> OpenAIResponsesContentPart {
+        OpenAIResponsesContentPart(type: "input_image", text: nil, imageURL: imageURL)
+    }
 }
 
 private struct OpenAIResponsesResponse: Decodable {
@@ -129,6 +189,13 @@ private struct OpenAIResponsesOutput: Decodable {
 private struct OpenAIResponsesContent: Decodable {
     let text: String?
     let type: String?
+}
+
+private struct OpenAIResponsesStreamEvent: Decodable {
+    let type: String?
+    let delta: String?
+    let response: OpenAIResponsesResponse?
+    let error: OpenAITextErrorBody?
 }
 
 private struct OpenAITextErrorEnvelope: Decodable {
@@ -183,7 +250,8 @@ extension OpenAILanguageModelClient {
         transcript: String,
         preset: PolishPreset,
         modelId: String,
-        apiKey: String
+        apiKey: String,
+        screenshotDataURL: String? = nil
     ) async throws -> OpenAILanguageModelResponse {
         let instruction = """
         You are polishing a voice transcript.
@@ -193,7 +261,14 @@ extension OpenAILanguageModelClient {
 
         Rules:
         - Preserve the speaker's intent and language.
+        - If clipboard text or active app context is provided, use it only as supporting context for the voice instruction.
+        - If a screenshot image is attached, use it only as supporting visual context for the voice instruction.
+        - If the instruction asks to include, rewrite, reply to, comment on, or preserve clipboard context, inline the relevant context exactly in the final answer.
+        - Never replace clipboard content with phrases like "as shown above" or "from the clipboard" when exact content is required.
         - Do not add facts that are not present.
+        - For formulas, equations, mathematical symbols, derivations, and matrices, always use LaTeX.
+        - Use $...$ for inline math and $$...$$ for display equations.
+        - Use LaTeX matrix environments such as \\begin{bmatrix} ... \\end{bmatrix} or \\begin{pmatrix} ... \\end{pmatrix} inside display math for matrices.
         - Return only the final polished text.
         """
         let userInput = """
@@ -206,32 +281,131 @@ extension OpenAILanguageModelClient {
             userInput: userInput,
             modelId: modelId,
             apiKey: apiKey,
-            maxOutputTokens: max(512, min(8_000, Int(Double(transcript.split(separator: " ").count) * 2.4)))
+            imageDataURL: screenshotDataURL,
+            maxOutputTokens: max(1_500, min(16_000, Int(Double(transcript.split(separator: " ").count) * 5.0) + 1_000))
         )
+    }
+
+    func polishTextStreamed(
+        transcript: String,
+        preset: PolishPreset,
+        modelId: String,
+        apiKey: String,
+        screenshotDataURL: String? = nil,
+        onDelta: @escaping (String) async -> Void
+    ) async throws -> OpenAILanguageModelResponse {
+        let instruction = """
+        You are polishing a voice transcript.
+
+        Polish instruction:
+        \(preset.trimmedPrompt)
+
+        Rules:
+        - Preserve the speaker's intent and language.
+        - If clipboard text or active app context is provided, use it only as supporting context for the voice instruction.
+        - If a screenshot image is attached, use it only as supporting visual context for the voice instruction.
+        - If the instruction asks to include, rewrite, reply to, comment on, or preserve clipboard context, inline the relevant context exactly in the final answer.
+        - Never replace clipboard content with phrases like "as shown above" or "from the clipboard" when exact content is required.
+        - Do not add facts that are not present.
+        - For formulas, equations, mathematical symbols, derivations, and matrices, always use LaTeX.
+        - Use $...$ for inline math and $$...$$ for display equations.
+        - Use LaTeX matrix environments such as \\begin{bmatrix} ... \\end{bmatrix} or \\begin{pmatrix} ... \\end{pmatrix} inside display math for matrices.
+        - Return only the final polished text.
+        """
+        let userInput = """
+        Transcript:
+
+        \(transcript)
+        """
+        return try await streamResponse(
+            developerInstruction: instruction,
+            userInput: userInput,
+            modelId: modelId,
+            apiKey: apiKey,
+            imageDataURL: screenshotDataURL,
+            maxOutputTokens: max(1_500, min(16_000, Int(Double(transcript.split(separator: " ").count) * 5.0) + 1_000)),
+            onDelta: onDelta
+        )
+    }
+
+    /// Generic single completion used by the multi-step Polish generator.
+    func generateText(
+        system: String,
+        user: String,
+        modelId: String,
+        apiKey: String,
+        maxOutputTokens: Int
+    ) async throws -> String {
+        try await generateResponse(
+            developerInstruction: system,
+            userInput: user,
+            modelId: modelId,
+            apiKey: apiKey,
+            maxOutputTokens: maxOutputTokens
+        ).text
     }
 
     func generatePolishPresetDraft(
         request: String,
         modelId: String,
         apiKey: String
-    ) async throws -> GeneratedPolishPresetDraft {
+    ) async throws -> GeneratedPolishGenerationResult {
         let response = try await generateResponse(
             developerInstruction: polishPresetGeneratorInstruction,
             userInput: request,
             modelId: modelId,
             apiKey: apiKey,
-            maxOutputTokens: 900
+            maxOutputTokens: 2_200
+        )
+        let jsonText = response.text
+            .replacingOccurrences(of: "```json", with: "")
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = jsonText.data(using: .utf8) else {
+            throw OpenAILanguageModelError.decodingFailed
+        }
+        if let clarification = try? JSONDecoder().decode(GeneratedPolishClarificationDraft.self, from: data),
+           !clarification.questions.isEmpty {
+            return .clarification(clarification)
+        }
+        if let draft = try? JSONDecoder().decode(GeneratedPolishPresetDraft.self, from: data),
+           !draft.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .preset(draft)
+        }
+        throw OpenAILanguageModelError.decodingFailed
+    }
+
+    func filterRoutableApplications(
+        applications: [PolishRoutableApplication],
+        modelId: String,
+        apiKey: String
+    ) async throws -> Set<String> {
+        let payload = applications.map { app in
+            [
+                "id": app.id,
+                "name": app.displayName,
+                "bundleIdentifier": app.bundleIdentifier ?? "",
+                "isRunning": app.isRunning ? "true" : "false"
+            ]
+        }
+        let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        let payloadText = String(data: payloadData, encoding: .utf8) ?? "[]"
+        let response = try await generateResponse(
+            developerInstruction: routableApplicationFilterInstruction,
+            userInput: payloadText,
+            modelId: modelId,
+            apiKey: apiKey,
+            maxOutputTokens: 2_000
         )
         let jsonText = response.text
             .replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard let data = jsonText.data(using: .utf8),
-              let draft = try? JSONDecoder().decode(GeneratedPolishPresetDraft.self, from: data),
-              !draft.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              let result = try? JSONDecoder().decode(PolishRouteApplicationFilterResult.self, from: data) else {
             throw OpenAILanguageModelError.decodingFailed
         }
-        return draft
+        return Set(result.hiddenApplicationIds)
     }
 
     private func generateResponse(
@@ -239,6 +413,7 @@ extension OpenAILanguageModelClient {
         userInput: String,
         modelId: String,
         apiKey: String,
+        imageDataURL: String? = nil,
         maxOutputTokens: Int
     ) async throws -> OpenAILanguageModelResponse {
         var request = URLRequest(url: endpoint)
@@ -247,11 +422,24 @@ extension OpenAILanguageModelClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 7200
 
+        let userContent: OpenAIResponsesInput
+        if let imageDataURL {
+            userContent = OpenAIResponsesInput(
+                role: "user",
+                contentParts: [
+                    .inputText(userInput),
+                    .inputImage(imageDataURL)
+                ]
+            )
+        } else {
+            userContent = OpenAIResponsesInput(role: "user", content: userInput)
+        }
+
         let body = OpenAIResponsesRequest(
             model: modelId,
             input: [
                 OpenAIResponsesInput(role: "developer", content: developerInstruction),
-                OpenAIResponsesInput(role: "user", content: userInput)
+                userContent
             ],
             maxOutputTokens: maxOutputTokens
         )
@@ -283,4 +471,116 @@ extension OpenAILanguageModelClient {
             throw OpenAILanguageModelError.decodingFailed
         }
     }
+
+    private func streamResponse(
+        developerInstruction: String,
+        userInput: String,
+        modelId: String,
+        apiKey: String,
+        imageDataURL: String? = nil,
+        maxOutputTokens: Int,
+        onDelta: @escaping (String) async -> Void
+    ) async throws -> OpenAILanguageModelResponse {
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 7200
+
+        let userContent: OpenAIResponsesInput
+        if let imageDataURL {
+            userContent = OpenAIResponsesInput(
+                role: "user",
+                contentParts: [
+                    .inputText(userInput),
+                    .inputImage(imageDataURL)
+                ]
+            )
+        } else {
+            userContent = OpenAIResponsesInput(role: "user", content: userInput)
+        }
+
+        let body = OpenAIResponsesRequest(
+            model: modelId,
+            input: [
+                OpenAIResponsesInput(role: "developer", content: developerInstruction),
+                userContent
+            ],
+            maxOutputTokens: maxOutputTokens,
+            stream: true
+        )
+        request.httpBody = try JSONEncoder().encode(body)
+
+        let startedAt = Date()
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw OpenAILanguageModelError.invalidResponse
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            var errorData = Data()
+            for try await byte in bytes {
+                errorData.append(byte)
+            }
+            let message = decodeErrorMessage(from: errorData)
+            throw OpenAILanguageModelError.apiError(statusCode: httpResponse.statusCode, message: message)
+        }
+
+        let decoder = JSONDecoder()
+        var accumulatedText = ""
+        var completedText: String?
+        var usage: OpenAIResponsesUsage?
+
+        for try await line in bytes.lines {
+            guard let payload = Self.ssePayload(from: line) else { continue }
+            if payload == "[DONE]" { break }
+            guard let data = payload.data(using: .utf8) else { continue }
+            guard let event = try? decoder.decode(OpenAIResponsesStreamEvent.self, from: data) else {
+                continue
+            }
+            if let error = event.error {
+                throw OpenAILanguageModelError.apiError(statusCode: httpResponse.statusCode, message: error.message)
+            }
+            if event.type == "response.output_text.delta", let delta = event.delta, !delta.isEmpty {
+                accumulatedText += delta
+                await onDelta(delta)
+            }
+            if let response = event.response {
+                let responseText = response.outputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !responseText.isEmpty {
+                    completedText = responseText
+                }
+                usage = response.usage ?? usage
+            }
+        }
+
+        let text = (completedText ?? accumulatedText).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw OpenAILanguageModelError.emptyOutput }
+        return OpenAILanguageModelResponse(
+            text: text,
+            processingTimeSeconds: Date().timeIntervalSince(startedAt),
+            inputTokens: usage?.inputTokens,
+            outputTokens: usage?.outputTokens
+        )
+    }
+
+    private static func ssePayload(from line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("data:") else { return nil }
+        return String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
+
+// Internal (not private): the Routes screen's local-mode AI Clean reuses this
+// same instruction through the local backend.
+let routableApplicationFilterInstruction = """
+You are cleaning a macOS application picker for a user-facing routing feature.
+
+The user wants to route dictation output by real apps they intentionally use, such as Codex, Claude, ChatGPT, Terminal, Zed, Obsidian, Notes, Mail, Slack, Discord, Linear, GitHub Desktop, browsers, editors, and other obvious front-facing products.
+
+Hide helper processes, renderers, updaters, launchers, accessibility helpers, graphics/web containers, login items, plugins, extensions, daemons, background services, crash reporters, and anything named like a helper for another app.
+
+Return JSON only:
+{
+  "hiddenApplicationIds": ["id-to-hide"]
+}
+"""

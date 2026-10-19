@@ -46,12 +46,12 @@ cd "$BACKEND_DIR"
 # Check for development mode
 if [ "$1" == "--dev" ]; then
     echo "Starting in DEVELOPMENT mode (auto-reload enabled)..."
-    echo "API docs: http://127.0.0.1:8765/docs"
+    echo "API docs: http://127.0.0.1:8770/docs"
     echo ""
-    uvicorn server:app --host 127.0.0.1 --port 8765 --reload
+    uvicorn server:app --host 127.0.0.1 --port 8770 --reload
 else
     echo "Starting server..."
-    echo "API docs: http://127.0.0.1:8765/docs"
+    echo "API docs: http://127.0.0.1:8770/docs"
     echo ""
     python server.py
 fi

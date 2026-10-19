@@ -70,6 +70,12 @@ logs/
 *.temp
 .cache/
 temp/
+tmp/
+output/
+.codebase-memory/
 
 # Dev notes
 TODO-*.md
+
+# CPU trace output
+perf_traces/

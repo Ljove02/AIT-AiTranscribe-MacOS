@@ -9,7 +9,21 @@ struct APILanguageModel: Identifiable, Codable, Equatable {
     let inputCostPerMillionTokensUSD: Double?
     let outputCostPerMillionTokensUSD: Double?
     let openRouterProviderOnly: [String]?
+    let supportsVision: Bool
     let createdAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case providerId
+        case providerName
+        case modelId
+        case displayName
+        case inputCostPerMillionTokensUSD
+        case outputCostPerMillionTokensUSD
+        case openRouterProviderOnly
+        case supportsVision
+        case createdAt
+    }
 
     init(
         id: UUID = UUID(),
@@ -20,6 +34,7 @@ struct APILanguageModel: Identifiable, Codable, Equatable {
         inputCostPerMillionTokensUSD: Double? = nil,
         outputCostPerMillionTokensUSD: Double? = nil,
         openRouterProviderOnly: [String]? = nil,
+        supportsVision: Bool = false,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -30,7 +45,22 @@ struct APILanguageModel: Identifiable, Codable, Equatable {
         self.inputCostPerMillionTokensUSD = inputCostPerMillionTokensUSD
         self.outputCostPerMillionTokensUSD = outputCostPerMillionTokensUSD
         self.openRouterProviderOnly = openRouterProviderOnly
+        self.supportsVision = supportsVision
         self.createdAt = createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        providerId = try container.decode(String.self, forKey: .providerId)
+        providerName = try container.decode(String.self, forKey: .providerName)
+        modelId = try container.decode(String.self, forKey: .modelId)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        inputCostPerMillionTokensUSD = try container.decodeIfPresent(Double.self, forKey: .inputCostPerMillionTokensUSD)
+        outputCostPerMillionTokensUSD = try container.decodeIfPresent(Double.self, forKey: .outputCostPerMillionTokensUSD)
+        openRouterProviderOnly = try container.decodeIfPresent([String].self, forKey: .openRouterProviderOnly)
+        supportsVision = try container.decodeIfPresent(Bool.self, forKey: .supportsVision) ?? false
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
     }
 
     func estimatedCost(inputTokens: Int?, outputTokens: Int?) -> Double? {
@@ -44,17 +74,40 @@ struct APILanguageModel: Identifiable, Codable, Equatable {
 enum APILanguageModelStore {
     private static let storageKey = "apiLanguageModels"
 
+    /// Decoded-models cache: load() gets called from SwiftUI body evaluations,
+    /// and JSON-decoding the list on each one is wasted work. save() is the
+    /// only writer, so it keeps the cache coherent.
+    private static let cacheLock = NSLock()
+    private static var cachedModels: [APILanguageModel]?
+
     static func load() -> [APILanguageModel] {
-        guard let data = UserDefaults.standard.data(forKey: storageKey),
-              let models = try? JSONDecoder().decode([APILanguageModel].self, from: data) else {
-            return defaultModels
+        cacheLock.lock()
+        if let cachedModels {
+            cacheLock.unlock()
+            return cachedModels
         }
+        cacheLock.unlock()
+
+        let models: [APILanguageModel]
+        if let data = UserDefaults.standard.data(forKey: storageKey),
+           let decoded = try? JSONDecoder().decode([APILanguageModel].self, from: data) {
+            models = decoded
+        } else {
+            models = defaultModels
+        }
+
+        cacheLock.lock()
+        cachedModels = models
+        cacheLock.unlock()
         return models
     }
 
     static func save(_ models: [APILanguageModel]) {
         guard let data = try? JSONEncoder().encode(models) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
+        cacheLock.lock()
+        cachedModels = models
+        cacheLock.unlock()
     }
 
     static func upsert(_ model: APILanguageModel) -> [APILanguageModel] {

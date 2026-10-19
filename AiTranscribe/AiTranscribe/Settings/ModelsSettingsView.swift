@@ -221,14 +221,23 @@ struct ModelsSettingsView: View {
             apiModels = APITranscriptionModelStore.load()
             apiLanguageModels = APILanguageModelStore.load()
             reconcilePublicSelections()
-            Task { await appState.fetchAvailableModels() }
-            Task { await appState.fetchSummaryModels() }
-            Task { await appState.fetchSummaryRuntimeStatus() }
-            Task {
-                // checkNemoStatus calls refreshNemoVenvState internally
-                // and updates nemoAvailable + nemoVenvExists
-                await appState.checkNemoStatus()
-                // Only clear checking state AFTER the backend responded
+            // Fetch once per settings-window session: `hasAnimated` is false only
+            // on the tab's first appearance after the window opens. Revisits reuse
+            // the appState results; the header refresh button, the server-connect
+            // onChange below, and setup completions still refetch explicitly.
+            if !hasAnimated {
+                Task { await appState.fetchAvailableModels() }
+                Task { await appState.fetchSummaryModels() }
+                Task { await appState.fetchSummaryRuntimeStatus() }
+                Task {
+                    // checkNemoStatus calls refreshNemoVenvState internally
+                    // and updates nemoAvailable + nemoVenvExists
+                    await appState.checkNemoStatus()
+                    // Only clear checking state AFTER the backend responded
+                    isCheckingNemoStatus = false
+                }
+            } else {
+                // Status was already checked this session — appState still holds it.
                 isCheckingNemoStatus = false
             }
         }
@@ -1106,6 +1115,9 @@ struct APILanguageModelCardView: View {
                    !providerOnly.isEmpty {
                     badge("Only \(providerOnly.joined(separator: ","))", color: .purple)
                 }
+                if model.supportsVision {
+                    badge("Vision", color: .cyan)
+                }
                 if let input = model.inputCostPerMillionTokensUSD,
                    let output = model.outputCostPerMillionTokensUSD {
                     badge(String(format: "$%.2f/$%.2f", input, output), color: .mint)
@@ -1267,13 +1279,14 @@ struct AddAPIModelSheet: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 formRow(label: "Provider") {
-                    Picker("Provider", selection: $providerId) {
-                        Text("OpenAI API").tag(TranscriptionProviderDescriptor.openAI.id)
-                        Text("OpenRouter").tag(TranscriptionProviderDescriptor.openRouter.id)
-                        Text("ElevenLabs").tag(TranscriptionProviderDescriptor.elevenLabs.id)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
+                    ModelSheetProviderPills(
+                        options: [
+                            (TranscriptionProviderDescriptor.openAI.id, "OpenAI API"),
+                            (TranscriptionProviderDescriptor.openRouter.id, "OpenRouter"),
+                            (TranscriptionProviderDescriptor.elevenLabs.id, "ElevenLabs")
+                        ],
+                        selection: $providerId
+                    )
                     .onChange(of: providerId) { _, newProviderId in
                         statusMessage = nil
                         statusIsError = false
@@ -1286,13 +1299,12 @@ struct AddAPIModelSheet: View {
 
                 formRow(label: "Display name") {
                     TextField(defaultDisplayName(for: providerId), text: $displayName)
-                        .textFieldStyle(.roundedBorder)
+                        .modelSheetField()
                 }
 
                 formRow(label: "Model ID") {
                     TextField(modelPlaceholder, text: $modelId)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
+                        .modelSheetField(mono: true)
                 }
 
                 if !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1311,14 +1323,13 @@ struct AddAPIModelSheet: View {
 
                 formRow(label: "Audio cost / minute") {
                     TextField(audioCostPlaceholder, text: $audioCostPerMinute)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
+                        .modelSheetField(mono: true)
                 }
 
                 formRow(label: "API key") {
                     VStack(alignment: .leading, spacing: 6) {
                         SecureField(keyPlaceholder, text: $apiKeyInput)
-                            .textFieldStyle(.roundedBorder)
+                            .modelSheetField(mono: true)
                         savedKeyIndicator(providerId: providerId, isOverriding: !apiKeyInput.isEmpty)
                     }
                 }
@@ -1343,35 +1354,39 @@ struct AddAPIModelSheet: View {
                     .foregroundStyle(statusIsError ? .red : .secondary)
             }
 
-            HStack {
+            HStack(spacing: 10) {
                 Button("Cancel") {
                     dismiss()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .modelSheetActionPill(tint: .primary)
 
                 Spacer()
 
-                Button {
+                Button("Save") {
                     saveModel()
-                } label: {
-                    Text("Save")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .modelSheetActionPill(tint: .accentColor)
                 .disabled(!canSave || isTesting)
+                .opacity(!canSave || isTesting ? 0.45 : 1)
 
                 Button {
                     Task { await testAndSaveModel() }
                 } label: {
                     if isTesting {
                         ProgressView()
-                            .scaleEffect(0.7)
-                            .frame(width: 72)
+                            .controlSize(.small)
+                            .tint(.white)
+                            .frame(width: 68)
                     } else {
                         Text("Test & Save")
                     }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .modelSheetActionPill(tint: .accentColor, prominent: true)
                 .disabled(!canSave || isTesting)
+                .opacity(!canSave && !isTesting ? 0.45 : 1)
             }
         }
         .padding(24)
@@ -1583,6 +1598,7 @@ struct AddAPILanguageModelSheet: View {
     @State private var openRouterProviderOnly = ""
     @State private var inputCostPerMillionTokens = ""
     @State private var outputCostPerMillionTokens = ""
+    @State private var supportsVision = false
     @State private var apiKeyInput = ""
     @State private var statusMessage: String?
     @State private var statusIsError = false
@@ -1609,6 +1625,7 @@ struct AddAPILanguageModelSheet: View {
         _openRouterProviderOnly = State(initialValue: model?.openRouterProviderOnly?.joined(separator: ", ") ?? "")
         _inputCostPerMillionTokens = State(initialValue: model?.inputCostPerMillionTokensUSD.map { String(format: "%.6g", $0) } ?? "")
         _outputCostPerMillionTokens = State(initialValue: model?.outputCostPerMillionTokensUSD.map { String(format: "%.6g", $0) } ?? "")
+        _supportsVision = State(initialValue: model?.supportsVision ?? false)
     }
 
     var body: some View {
@@ -1623,12 +1640,13 @@ struct AddAPILanguageModelSheet: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 formRow(label: "Provider") {
-                    Picker("Provider", selection: $providerId) {
-                        Text("OpenAI API").tag(TranscriptionProviderDescriptor.openAI.id)
-                        Text("OpenRouter").tag(TranscriptionProviderDescriptor.openRouter.id)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
+                    ModelSheetProviderPills(
+                        options: [
+                            (TranscriptionProviderDescriptor.openAI.id, "OpenAI API"),
+                            (TranscriptionProviderDescriptor.openRouter.id, "OpenRouter")
+                        ],
+                        selection: $providerId
+                    )
                     .onChange(of: providerId) { _, newProviderId in
                         statusMessage = nil
                         statusIsError = false
@@ -1641,41 +1659,48 @@ struct AddAPILanguageModelSheet: View {
 
                 formRow(label: "Display name") {
                     TextField(defaultDisplayName(for: providerId), text: $displayName)
-                        .textFieldStyle(.roundedBorder)
+                        .modelSheetField()
                 }
 
                 formRow(label: "Model ID") {
                     TextField(defaultModelId(for: providerId), text: $modelId)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
+                        .modelSheetField(mono: true)
                 }
 
                 if providerId == TranscriptionProviderDescriptor.openRouter.id {
                     formRow(label: "Only provider") {
                         TextField("cerebras", text: $openRouterProviderOnly)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12, design: .monospaced))
+                            .modelSheetField(mono: true)
                     }
                 }
 
                 HStack(spacing: 10) {
                     formRow(label: "Input $ / 1M tokens") {
                         TextField("1.25", text: $inputCostPerMillionTokens)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12, design: .monospaced))
+                            .modelSheetField(mono: true)
                     }
 
                     formRow(label: "Output $ / 1M tokens") {
                         TextField("5.00", text: $outputCostPerMillionTokens)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12, design: .monospaced))
+                            .modelSheetField(mono: true)
                     }
                 }
+
+                Toggle(isOn: $supportsVision) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Vision model")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("Required for Polish screenshot context. Enable only if this LLM accepts images.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
 
                 formRow(label: "API key") {
                     VStack(alignment: .leading, spacing: 6) {
                         SecureField(keyPlaceholder, text: $apiKeyInput)
-                            .textFieldStyle(.roundedBorder)
+                            .modelSheetField(mono: true)
                         savedKeyIndicator(providerId: providerId, isOverriding: !apiKeyInput.isEmpty)
                     }
                 }
@@ -1696,45 +1721,86 @@ struct AddAPILanguageModelSheet: View {
             .padding(12)
             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
+            providerRoadmapCallout
+
             if let statusMessage {
                 Text(statusMessage)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(statusIsError ? .red : .secondary)
             }
 
-            HStack {
+            HStack(spacing: 10) {
                 Button("Cancel") {
                     dismiss()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .modelSheetActionPill(tint: .primary)
 
                 Spacer()
 
-                Button {
+                Button("Save") {
                     saveModel()
-                } label: {
-                    Text("Save")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .modelSheetActionPill(tint: .accentColor)
                 .disabled(!canSave || isTesting)
+                .opacity(!canSave || isTesting ? 0.45 : 1)
 
                 Button {
                     Task { await testAndSaveModel() }
                 } label: {
                     if isTesting {
                         ProgressView()
-                            .scaleEffect(0.7)
-                            .frame(width: 72)
+                            .controlSize(.small)
+                            .tint(.white)
+                            .frame(width: 68)
                     } else {
                         Text("Test & Save")
                     }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .modelSheetActionPill(tint: .accentColor, prominent: true)
                 .disabled(!canSave || isTesting)
+                .opacity(!canSave && !isTesting ? 0.45 : 1)
             }
         }
         .padding(24)
         .frame(width: 480)
+    }
+
+    private var providerRoadmapCallout: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.blue)
+                .frame(width: 18)
+                .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Provider support")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+
+                Text("Direct LLM providers are currently OpenAI and OpenRouter. Claude, Gemini direct API, Groq, Mistral, and other native providers are planned; for now, use OpenRouter when that provider/model is available there.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button {
+                    openProviderRequestIssue()
+                } label: {
+                    Label("Request a provider", systemImage: "arrow.up.right.square")
+                        .font(.system(size: 10.5, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.blue)
+            }
+        }
+        .padding(12)
+        .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.blue.opacity(0.16), lineWidth: 1)
+        )
     }
 
     private func formRow<Content: View>(label: String, @ViewBuilder content: () -> Content) -> some View {
@@ -1797,6 +1863,7 @@ struct AddAPILanguageModelSheet: View {
             inputCostPerMillionTokensUSD: Double(inputCostPerMillionTokens.trimmingCharacters(in: .whitespacesAndNewlines)),
             outputCostPerMillionTokensUSD: Double(outputCostPerMillionTokens.trimmingCharacters(in: .whitespacesAndNewlines)),
             openRouterProviderOnly: providerId == TranscriptionProviderDescriptor.openRouter.id ? parsedOpenRouterProviderOnly() : nil,
+            supportsVision: supportsVision,
             createdAt: model?.createdAt ?? Date()
         )
     }
@@ -1849,6 +1916,29 @@ struct AddAPILanguageModelSheet: View {
                 }
                 .foregroundStyle(isOverriding ? .orange : .secondary)
             }
+        }
+    }
+
+    private func openProviderRequestIssue() {
+        var components = URLComponents(string: "https://github.com/Ljove02/AIT-AiTranscribe-MacOS/issues/new")
+        components?.queryItems = [
+            URLQueryItem(name: "title", value: "Provider request: "),
+            URLQueryItem(name: "body", value: """
+            Requested provider:
+
+            Provider API docs:
+
+            Needed for:
+            - LLM text generation
+            - Streaming
+            - Vision / screenshot context
+            - Speech-to-text
+
+            Notes:
+            """)
+        ]
+        if let url = components?.url {
+            NSWorkspace.shared.open(url)
         }
     }
 }
@@ -2392,5 +2482,84 @@ struct LanguageGridView: View {
         }
         .padding(10)
         .background(.thinMaterial, in: .rect(cornerRadius: 8, style: .continuous))
+    }
+}
+
+// MARK: - Model Sheet Shared Styling
+
+struct ModelSheetProviderPills: View {
+    let options: [(id: String, title: String)]
+    @Binding var selection: String
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options, id: \.id) { option in
+                let selected = selection == option.id
+                Button {
+                    // No withAnimation here: provider changes restructure the whole
+                    // sheet (fields, callouts, height), and animating that transaction
+                    // makes the entire layout visibly recalculate.
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        selection = option.id
+                    }
+                } label: {
+                    Text(option.title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(selected ? .white : .secondary)
+                        .padding(.horizontal, 14)
+                        .frame(height: 26)
+                        .background(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(Color.primary.opacity(0.075), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+    }
+}
+
+struct ModelSheetFieldStyle: ViewModifier {
+    var mono = false
+
+    func body(content: Content) -> some View {
+        content
+            .textFieldStyle(.plain)
+            .font(mono ? .system(size: 12, design: .monospaced) : .system(size: 12, weight: .medium))
+            .padding(.horizontal, 11)
+            .frame(height: 34)
+            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(.white.opacity(0.07), lineWidth: 0.5)
+            )
+    }
+}
+
+struct ModelSheetActionPillStyle: ViewModifier {
+    let tint: Color
+    let prominent: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(prominent ? Color.white : tint)
+            .padding(.horizontal, 14)
+            .frame(height: 30)
+            .background(prominent ? AnyShapeStyle(tint) : AnyShapeStyle(Color.primary.opacity(0.075)), in: Capsule())
+            .overlay(Capsule().strokeBorder(prominent ? tint.opacity(0.28) : .white.opacity(0.07), lineWidth: 0.6))
+            .contentShape(Capsule())
+    }
+}
+
+extension View {
+    func modelSheetField(mono: Bool = false) -> some View {
+        modifier(ModelSheetFieldStyle(mono: mono))
+    }
+
+    func modelSheetActionPill(tint: Color, prominent: Bool = false) -> some View {
+        modifier(ModelSheetActionPillStyle(tint: tint, prominent: prominent))
     }
 }

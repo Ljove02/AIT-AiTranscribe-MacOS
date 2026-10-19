@@ -82,7 +82,7 @@ struct SettingsSidebar: View {
 
             // Version badge
             if isExpanded {
-                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.2")")
+                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.3")")
                     .font(.system(size: 10, weight: .medium, design: .rounded))
                     .foregroundColor(.white.opacity(0.45))
                     .padding(.vertical, 3)
@@ -91,7 +91,7 @@ struct SettingsSidebar: View {
                     .padding(.bottom, 14)
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
             } else {
-                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.2")")
+                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.3")")
                     .font(.system(size: 8, weight: .medium, design: .rounded))
                     .foregroundStyle(.white.opacity(0.25))
                     .padding(.bottom, 14)
@@ -191,8 +191,10 @@ struct SidebarItem: View {
 
 // MARK: - Shared Icon Loading Helper
 
-/// Attempts to load the app icon from the bundle resources
-func loadAppIconFromBundle() -> NSImage? {
+/// Decoded once, lazily, on first use — the sidebar header calls
+/// `loadAppIconFromBundle()` on every render (including hover passes), and the
+/// bundle path lookup + PNG decode was wasted work after the first time.
+private let cachedAppIconFromBundle: NSImage? = {
     let iconNames = [
         "Icon-iOS-Default-256x256@1x",
         "Icon-iOS-Default-128x128@1x",
@@ -213,4 +215,9 @@ func loadAppIconFromBundle() -> NSImage? {
     }
 
     return nil
+}()
+
+/// Attempts to load the app icon from the bundle resources
+func loadAppIconFromBundle() -> NSImage? {
+    cachedAppIconFromBundle
 }

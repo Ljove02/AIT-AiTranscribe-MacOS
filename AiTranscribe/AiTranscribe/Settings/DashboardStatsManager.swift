@@ -12,8 +12,20 @@
 import Foundation
 import Combine
 
+nonisolated struct DashboardActivityDay: Equatable, Identifiable, Sendable {
+    let date: Date
+    let key: String
+    let transcriptionCount: Int
+    let wordCount: Int
+    let durationSeconds: Double
+    let displayDate: String
+
+    var id: String { key }
+    var hasActivity: Bool { transcriptionCount > 0 }
+}
+
 /// All the stats the dashboard needs, computed once and cached.
-struct DashboardStats: Equatable {
+nonisolated struct DashboardStats: Equatable, Sendable {
     // Hero numbers
     var totalTranscriptions: Int = 0
     var totalWords: Int = 0
@@ -30,6 +42,8 @@ struct DashboardStats: Equatable {
     var currentStreak: Int = 0
     var busiestDay: (date: String, count: Int)?
     var monthlyBreakdown: [(month: String, count: Int)] = []
+    var activityDays: [DashboardActivityDay] = []
+    var activityMaxCount: Int = 0
 
     // Charts
     var dayOfWeekCounts: [(day: String, count: Int)] = []  // Mon-Sun
@@ -128,6 +142,7 @@ final class DashboardStatsManager: ObservableObject {
 
     private nonisolated static let apiCostResetTimestampKey = "dashboardAPICostResetTimestamp"
     private nonisolated static let apiCostPricingMigrationKey = "dashboardAPICostPricingMigration20260622"
+    private nonisolated static let activityWeekCount = 52
 
     private nonisolated static func defaultAPICostResetDate() -> Date? {
         let defaults = UserDefaults.standard
@@ -197,59 +212,25 @@ final class DashboardStatsManager: ObservableObject {
         let calendar = Calendar.current
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd"
-
-        let dates = entries.map { dateFormatter.string(from: $0.timestamp) }
-        let uniqueDates = Set(dates).sorted()
-        s.totalActiveDays = uniqueDates.count
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
 
         if let firstEntry = entries.min(by: { $0.timestamp < $1.timestamp }) {
             s.usingSinceDate = firstEntry.timestamp
         }
 
-        // Busiest day
-        var dayCounts: [String: Int] = [:]
-        for d in dates { dayCounts[d, default: 0] += 1 }
-        if let busiest = dayCounts.max(by: { $0.value < $1.value }) {
-            s.busiestDay = (busiest.key, busiest.value)
-        }
-
-        // Streak calculation
-        let dateObjects = uniqueDates.compactMap { dateFormatter.date(from: $0) }
-        if dateObjects.count > 1 {
-            var maxStreak = 1
-            var currentStreak = 1
-
-            for i in 1..<dateObjects.count {
-                let diff = calendar.dateComponents([.day], from: dateObjects[i-1], to: dateObjects[i]).day ?? 0
-                if diff == 1 {
-                    currentStreak += 1
-                    maxStreak = max(maxStreak, currentStreak)
-                } else {
-                    currentStreak = 1
-                }
+        let activity = buildActivityDays(from: entries, calendar: calendar, dateFormatter: dateFormatter)
+        s.activityDays = activity.days
+        s.activityMaxCount = activity.maxCount
+        s.totalActiveDays = activity.activeKeys.count
+        s.longestStreak = longestStreak(from: activity.activeDates, calendar: calendar)
+        s.currentStreak = currentStreak(from: activity.activeKeys, calendar: calendar, dateFormatter: dateFormatter)
+        if let busiest = activity.dayCounts.max(by: {
+            if $0.value.transcriptionCount == $1.value.transcriptionCount {
+                return $0.value.date < $1.value.date
             }
-            s.longestStreak = maxStreak
-
-            // Current streak (from today backwards)
-            let today = dateFormatter.string(from: Date())
-            let yesterday = dateFormatter.string(from: calendar.date(byAdding: .day, value: -1, to: Date()) ?? Date())
-
-            if uniqueDates.last == today || uniqueDates.last == yesterday {
-                var streak = 1
-                let reversed = dateObjects.reversed().map { $0 }
-                for i in 1..<reversed.count {
-                    let diff = calendar.dateComponents([.day], from: reversed[i], to: reversed[i-1]).day ?? 0
-                    if diff == 1 {
-                        streak += 1
-                    } else {
-                        break
-                    }
-                }
-                s.currentStreak = streak
-            }
-        } else if dateObjects.count == 1 {
-            s.longestStreak = 1
-            s.currentStreak = 1
+            return $0.value.transcriptionCount < $1.value.transcriptionCount
+        }) {
+            s.busiestDay = (busiest.key, busiest.value.transcriptionCount)
         }
 
         // Monthly breakdown (last 4 months)
@@ -372,5 +353,121 @@ final class DashboardStatsManager: ObservableObject {
         ]
 
         return s
+    }
+
+    private nonisolated static func buildActivityDays(
+        from entries: [TranscriptionEntry],
+        calendar: Calendar,
+        dateFormatter: DateFormatter
+    ) -> (
+        days: [DashboardActivityDay],
+        maxCount: Int,
+        activeKeys: Set<String>,
+        activeDates: [Date],
+        dayCounts: [String: (date: Date, transcriptionCount: Int, wordCount: Int, durationSeconds: Double)]
+    ) {
+        var dayCounts: [String: (date: Date, transcriptionCount: Int, wordCount: Int, durationSeconds: Double)] = [:]
+        let displayFormatter = DateFormatter()
+        displayFormatter.dateFormat = "MMM d, yyyy"
+        displayFormatter.locale = Locale(identifier: "en_US_POSIX")
+
+        for entry in entries {
+            let day = calendar.startOfDay(for: entry.timestamp)
+            let key = dateFormatter.string(from: day)
+            var aggregate = dayCounts[key] ?? (day, 0, 0, 0)
+            aggregate.transcriptionCount += 1
+            aggregate.wordCount += entry.wordCount
+            aggregate.durationSeconds += entry.duration
+            dayCounts[key] = aggregate
+        }
+
+        let today = calendar.startOfDay(for: Date())
+        let weekdayIndex = (calendar.component(.weekday, from: today) + 5) % 7
+        let currentWeekStart = calendar.date(byAdding: .day, value: -weekdayIndex, to: today) ?? today
+        let firstGridDay = calendar.date(
+            byAdding: .day,
+            value: -(activityWeekCount - 1) * 7,
+            to: currentWeekStart
+        ) ?? currentWeekStart
+
+        let gridDayCount = activityWeekCount * 7
+        let days = (0..<gridDayCount).compactMap { offset -> DashboardActivityDay? in
+            guard let date = calendar.date(byAdding: .day, value: offset, to: firstGridDay) else {
+                return nil
+            }
+            let key = dateFormatter.string(from: date)
+            let aggregate = dayCounts[key]
+            return DashboardActivityDay(
+                date: date,
+                key: key,
+                transcriptionCount: aggregate?.transcriptionCount ?? 0,
+                wordCount: aggregate?.wordCount ?? 0,
+                durationSeconds: aggregate?.durationSeconds ?? 0,
+                displayDate: displayFormatter.string(from: date)
+            )
+        }
+
+        let activeKeys = Set(dayCounts.keys)
+        let activeDates = dayCounts.values
+            .map(\.date)
+            .sorted()
+
+        return (
+            days,
+            days.map(\.transcriptionCount).max() ?? 0,
+            activeKeys,
+            activeDates,
+            dayCounts
+        )
+    }
+
+    private nonisolated static func longestStreak(from activeDates: [Date], calendar: Calendar) -> Int {
+        guard !activeDates.isEmpty else { return 0 }
+        guard activeDates.count > 1 else { return 1 }
+
+        var longest = 1
+        var running = 1
+
+        for index in 1..<activeDates.count {
+            let diff = calendar.dateComponents([.day], from: activeDates[index - 1], to: activeDates[index]).day ?? 0
+            if diff == 1 {
+                running += 1
+                longest = max(longest, running)
+            } else if diff > 1 {
+                running = 1
+            }
+        }
+
+        return longest
+    }
+
+    private nonisolated static func currentStreak(
+        from activeKeys: Set<String>,
+        calendar: Calendar,
+        dateFormatter: DateFormatter
+    ) -> Int {
+        var date = calendar.startOfDay(for: Date())
+        var key = dateFormatter.string(from: date)
+
+        if !activeKeys.contains(key),
+           let yesterday = calendar.date(byAdding: .day, value: -1, to: date) {
+            date = yesterday
+            key = dateFormatter.string(from: date)
+        }
+
+        guard activeKeys.contains(key) else { return 0 }
+
+        var streak = 0
+        var cursor = date
+
+        while activeKeys.contains(dateFormatter.string(from: cursor)) {
+            streak += 1
+            guard let previous = calendar.date(byAdding: .day, value: -1, to: cursor) else {
+                break
+            }
+            cursor = previous
+        }
+
+        return streak
     }
 }

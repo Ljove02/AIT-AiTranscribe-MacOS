@@ -22,6 +22,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Wire session manager to app state for mutual exclusion
         sessionManager.appState = appState
 
+        // Hotkeys are registered here rather than from the menu bar view.
+        // MenuBarExtra builds its content lazily, so a .task attached to it
+        // does not run until the menu is opened for the first time, which left
+        // the shortcuts dead until the user clicked the icon.
+        HotkeyManager.shared.setup(appState: appState, sessionManager: sessionManager)
+
         // Load saved sessions
         sessionManager.loadSessions()
 
@@ -50,16 +56,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Gracefully stop session recording before app quits
+    /// Gracefully stop session recording and flush pending history writes
+    /// before app quits — history saves persist on a background chain, so an
+    /// immediate terminate could drop the most recent entry.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let sessionManager = SessionManager.shared
         guard sessionManager.isSessionRecording else {
-            return .terminateNow
+            Task { @MainActor in
+                await AppState.shared.flushHistoryWrites()
+                NSApplication.shared.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
         }
 
         // Stop session recording before quitting
         Task { @MainActor in
             await sessionManager.stopSessionRecording()
+            await AppState.shared.flushHistoryWrites()
             try? await Task.sleep(for: .milliseconds(500))
             NSApplication.shared.reply(toApplicationShouldTerminate: true)
         }

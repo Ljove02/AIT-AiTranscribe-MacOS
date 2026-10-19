@@ -2,16 +2,23 @@ import SwiftUI
 import AppKit
 import Combine
 
-final class OnboardingWindowController: NSObject {
+final class OnboardingWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var hostingController: NSHostingController<AnyView>?
 
     private var appState: AppState?
     private var backendManager: BackendManager?
 
+    /// The activation policy the app had before onboarding forced `.regular`.
+    /// AiTranscribe ships as LSUIElement (`.accessory`); the onboarding window
+    /// needs `.regular` to reliably take focus, but leaving it there for the
+    /// rest of the session gives a menu-bar app a stray Dock icon and changes
+    /// how key-window handoff behaves everywhere else.
+    private var policyBeforeOnboarding: NSApplication.ActivationPolicy?
+
     var isVisible: Bool = false
 
-    func show(appState: AppState, backendManager: BackendManager) {
+    func show(appState: AppState, backendManager: BackendManager, previewMode: Bool = false) {
         self.appState = appState
         self.backendManager = backendManager
 
@@ -21,7 +28,7 @@ final class OnboardingWindowController: NSObject {
             return
         }
 
-        let onboardingView = OnboardingContainerView()
+        let onboardingView = OnboardingContainerView(previewMode: previewMode)
             .environmentObject(appState)
             .environmentObject(backendManager)
 
@@ -29,10 +36,10 @@ final class OnboardingWindowController: NSObject {
 
         guard let hostingController = hostingController else { return }
 
-        hostingController.view.frame = NSRect(x: 0, y: 0, width: 800, height: 750)
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 900, height: 720)
 
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 800, height: 750),
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 720),
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -40,16 +47,23 @@ final class OnboardingWindowController: NSObject {
 
         guard let window = window else { return }
 
-        window.title = "Welcome to AIT"
-        window.titleVisibility = .visible
-        window.titlebarAppearsTransparent = false
+        window.identifier = NSUserInterfaceItemIdentifier(previewMode ? "onboarding-preview" : "onboarding")
+        window.title = previewMode ? "AiTranscribe Introduction Preview" : "Welcome to AIT"
+        window.delegate = self
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.toolbar = nil
         window.isMovableByWindowBackground = true
         window.center()
         window.level = .modalPanel
-        window.isOpaque = true
-        window.backgroundColor = NSColor.windowBackgroundColor
+        window.isOpaque = false
+        window.backgroundColor = .clear
         window.hasShadow = true
         window.isReleasedWhenClosed = false
+        window.standardWindowButton(.closeButton)?.isHidden = true
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        window.standardWindowButton(.zoomButton)?.isHidden = true
 
         window.contentView?.addSubview(hostingController.view)
         hostingController.view.translatesAutoresizingMaskIntoConstraints = false
@@ -60,13 +74,23 @@ final class OnboardingWindowController: NSObject {
             hostingController.view.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor)
         ])
 
-        NSApp.setActivationPolicy(.regular)
+        if NSApp.activationPolicy() != .regular {
+            policyBeforeOnboarding = NSApp.activationPolicy()
+            NSApp.setActivationPolicy(.regular)
+        }
         window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
 
         NSApp.activate(ignoringOtherApps: true)
 
         isVisible = true
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        window = nil
+        hostingController = nil
+        isVisible = false
+        restoreActivationPolicy()
     }
 
     func close() {
@@ -78,6 +102,15 @@ final class OnboardingWindowController: NSObject {
         hostingController = nil
 
         isVisible = false
+        restoreActivationPolicy()
+    }
+
+    /// Puts the app back to the policy it had before onboarding. Idempotent —
+    /// `close()` and `windowWillClose(_:)` can both run for a single dismissal.
+    private func restoreActivationPolicy() {
+        guard let policy = policyBeforeOnboarding else { return }
+        policyBeforeOnboarding = nil
+        NSApp.setActivationPolicy(policy)
     }
 
     func checkIfCompleted() -> Bool {

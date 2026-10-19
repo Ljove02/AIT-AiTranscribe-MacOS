@@ -26,84 +26,57 @@ struct WelcomeOnboardingView: View {
     private let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        VStack(spacing: 30) {
-            Spacer()
-            
-            // App Icon
-            // Load from bundle resources if "Logo" asset is not available
-            Group {
-                if let nsImage = NSImage(named: "Logo") ?? loadIconFromBundle() {
-                    Image(nsImage: nsImage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 128, height: 128)
-                        .shadow(color: .black.opacity(0.2), radius: 20, x: 0, y: 10)
-                } else {
-                    // Fallback if icon not found
-                    Image(systemName: "mic.circle.fill")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 128, height: 128)
-                        .foregroundStyle(.blue.gradient)
-                        .shadow(color: .black.opacity(0.2), radius: 20, x: 0, y: 10)
-                }
-            }
-            
-            // Title
-            Text("Welcome to AIT")
-                .font(.system(size: 36, weight: .bold))
-            
-            // Subtitle
-            Text("Your AI-powered transcription assistant for macOS")
-                .font(.title3)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-            
-            // Description - centralized features
-            VStack(spacing: 12) {
-                CentralizedFeatureRow(icon: "mic.fill", text: "Transcribe audio with AI models")
-                CentralizedFeatureRow(icon: "bolt.fill", text: "Automate workflows with keyboard shortcuts")
-                CentralizedFeatureRow(icon: "chart.line.uptrend.xyaxis", text: "Boost productivity with real-time transcription")
-            }
-            .padding(.horizontal, 40)
-            
-            Spacer()
-            Spacer() // Extra spacer to push button down consistently
-            
-            // Get Started Button (always shown — backend starts in background)
-            VStack(spacing: 8) {
-                Button(action: onNext) {
-                    HStack {
-                        Text("Get Started")
-                            .font(.title3.weight(.semibold))
-                        Image(systemName: "arrow.right")
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .padding(.horizontal, 60)
+        VStack(alignment: .center, spacing: 0) {
+            Spacer(minLength: 26)
 
-                // Show backend status beneath the button
-                if isWaitingForBackend {
-                    HStack(spacing: 6) {
-                        ProgressView()
-                            .scaleEffect(0.6)
-                        Text("Backend starting in background\(String(repeating: ".", count: dotCount))")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                } else {
-                    Text("First time? Let's set up your app.")
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
+            VStack(alignment: .center, spacing: 28) {
+                appIcon
+
+                VStack(alignment: .center, spacing: 14) {
+                    Text("AITRANSCRIBE")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .tracking(1.7)
+                        .foregroundStyle(.secondary)
+
+                    Text("Set up voice capture.")
+                        .font(.system(size: 43, weight: .bold, design: .rounded))
+                        .tracking(-1.3)
+                        .lineSpacing(-2)
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text("Choose local privacy, public speed, global shortcuts, and the output tools that turn voice into something useful.")
+                        .font(.system(size: 16, weight: .medium))
+                        .lineSpacing(3)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 600, alignment: .center)
                 }
 
-                Spacer().frame(height: 20)
+                capabilityChips
+
+                welcomeHighlights
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+
+            Spacer()
+
+            HStack(alignment: .center) {
+                backendStatus
+
+                Spacer()
+
+                OnboardingPrimaryActionButton(
+                    title: "Get Started",
+                    systemImage: "arrow.right",
+                    action: onNext
+                )
             }
         }
-        .padding()
+        .padding(.horizontal, 42)
+        .padding(.top, 44)
+        .padding(.bottom, 34)
         .onReceive(timer) { _ in
             dotCount = (dotCount + 1) % 4
             // Update backend readiness (non-blocking)
@@ -111,6 +84,100 @@ struct WelcomeOnboardingView: View {
                 isWaitingForBackend = false
             }
         }
+    }
+
+    private var capabilityChips: some View {
+        HStack(spacing: 8) {
+            WelcomeChip(icon: "waveform", text: "Transcribe")
+            WelcomeChip(icon: "sparkles", text: "Polish")
+            WelcomeChip(icon: "rectangle.on.rectangle", text: "Sessions")
+            WelcomeChip(icon: "chart.xyaxis.line", text: "Usage")
+        }
+    }
+
+    private var welcomeHighlights: some View {
+        HStack(alignment: .top, spacing: 28) {
+            WelcomeHighlight(icon: "lock.shield", text: "Run private models on this Mac")
+            WelcomeHighlight(icon: "globe", text: "Use APIs when speed matters")
+            WelcomeHighlight(icon: "keyboard", text: "Start capture from anywhere")
+        }
+        .frame(maxWidth: 650)
+    }
+
+    private var appIcon: some View {
+        Group {
+            if let nsImage = NSImage(named: "Logo") ?? loadIconFromBundle() {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Image(systemName: "mic.circle.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(.blue.gradient)
+            }
+        }
+        .frame(width: 94, height: 94)
+        .shadow(color: .black.opacity(0.2), radius: 20, x: 0, y: 10)
+    }
+
+    private var backendStatus: some View {
+        HStack(spacing: 8) {
+            if isWaitingForBackend {
+                ProgressView()
+                    .scaleEffect(0.62)
+                Text("Backend starting in background\(String(repeating: ".", count: dotCount))")
+            } else {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text("Ready for setup")
+            }
+        }
+        .font(.caption.weight(.medium))
+        .foregroundColor(.secondary)
+    }
+}
+
+private struct WelcomeHighlight: View {
+    let icon: String
+    let text: String
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.blue)
+
+            Text(text)
+                .font(.system(size: 12, weight: .semibold))
+                .lineSpacing(2)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct WelcomeChip: View {
+    let icon: String
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .bold))
+            Text(text)
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+        }
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.white.opacity(0.07), in: Capsule())
+        .overlay(
+            Capsule()
+                .strokeBorder(.white.opacity(0.10), lineWidth: 1)
+        )
     }
 }
 
@@ -152,6 +219,33 @@ struct CentralizedFeatureRow: View {
                 .foregroundColor(.primary)
         }
         .frame(maxWidth: .infinity) // Center the content
+    }
+}
+
+private struct WelcomeFeatureCard: View {
+    let icon: String
+    let title: String
+    let text: String
+
+    var body: some View {
+        OnboardingGlassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.blue)
+                    .frame(width: 44, height: 44)
+                    .background(.blue.opacity(0.16), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                Text(title)
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+
+                Text(text)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, minHeight: 160, alignment: .topLeading)
+        }
     }
 }
 

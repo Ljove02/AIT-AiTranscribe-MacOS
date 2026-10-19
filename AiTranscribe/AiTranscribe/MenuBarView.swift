@@ -7,6 +7,7 @@
  Inspired by Osados-style compact utility panels.
  */
 
+import AppKit
 import SwiftUI
 import CoreAudio
 
@@ -22,6 +23,7 @@ struct MenuBarView: View {
     @State private var isHoveredQuit = false
     @State private var isHistoryExpanded = false
     @State private var copiedHistoryEntryId: UUID?
+    @AppStorage("selectedTranscriptionProviderId") private var selectedTranscriptionProviderId = TranscriptionProviderDescriptor.localBackend.id
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,6 +33,10 @@ struct MenuBarView: View {
             // ── Status Strip ──
             statusStrip
                 .padding(.top, 8)
+
+            // ── Active Model ──
+            modelRow
+                .padding(.top, 6)
 
             // ── Main Controls ──
             controlsSection
@@ -68,13 +74,8 @@ struct MenuBarView: View {
                 HStack(spacing: 6) {
                     Text("AiTranscribe")
                         .font(.system(size: 14, weight: .semibold, design: .rounded))
-
-                    Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.5")")
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(.white.opacity(0.06), in: Capsule())
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
 
                 HStack(spacing: 4) {
@@ -95,19 +96,19 @@ struct MenuBarView: View {
     }
 
     private var headerActions: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 6) {
             Button {
                 openAndFocusSettings()
             } label: {
                 Image(systemName: "gear")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(isHoveredSettings ? .primary : .secondary)
-                    .frame(width: 24, height: 24)
+                    .frame(width: 28, height: 28)
                     .background(
                         isHoveredSettings
                             ? AnyShapeStyle(.white.opacity(0.08))
                             : AnyShapeStyle(.clear),
-                        in: .rect(cornerRadius: 6, style: .continuous)
+                        in: .rect(cornerRadius: 8, style: .continuous)
                     )
             }
             .buttonStyle(.plain)
@@ -120,14 +121,14 @@ struct MenuBarView: View {
                 NSApplication.shared.terminate(nil)
             } label: {
                 Image(systemName: "power")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(isHoveredQuit ? .red : .secondary)
-                    .frame(width: 24, height: 24)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(isHoveredQuit ? .white : .red)
+                    .frame(width: 28, height: 28)
                     .background(
                         isHoveredQuit
-                            ? AnyShapeStyle(.red.opacity(0.1))
-                            : AnyShapeStyle(.clear),
-                        in: .rect(cornerRadius: 6, style: .continuous)
+                            ? AnyShapeStyle(.red.opacity(0.82))
+                            : AnyShapeStyle(.red.opacity(0.10)),
+                        in: .rect(cornerRadius: 8, style: .continuous)
                     )
             }
             .buttonStyle(.plain)
@@ -149,7 +150,102 @@ struct MenuBarView: View {
             )
 
             Spacer()
+
+            menuModeSwitch
         }
+    }
+
+    /// The active transcription model on its own full-width row, so real model
+    /// names are readable inside the 280pt panel.
+    private var modelRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "cpu")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            Text("Model")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.tertiary)
+                .tracking(0.6)
+
+            Spacer(minLength: 8)
+
+            Text(appState.activeTranscriptionModelName)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
+        )
+        .help(appState.activeTranscriptionModelName)
+    }
+
+    private var menuModeSwitch: some View {
+        HStack(spacing: 2) {
+            providerModeButton(
+                title: "Local",
+                isSelected: isLocalProviderMode,
+                tint: .green
+            ) {
+                selectedTranscriptionProviderId = TranscriptionProviderDescriptor.localBackend.id
+            }
+
+            providerModeButton(
+                title: "Public",
+                isSelected: !isLocalProviderMode,
+                tint: .blue
+            ) {
+                if selectedTranscriptionProviderId == TranscriptionProviderDescriptor.localBackend.id {
+                    selectedTranscriptionProviderId = APITranscriptionModelStore.load().first?.providerId
+                        ?? TranscriptionProviderDescriptor.openAI.id
+                }
+            }
+        }
+        .padding(2)
+        .background(.white.opacity(0.06), in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+        .opacity(providerModeSwitchDisabled ? 0.48 : 1)
+        .disabled(providerModeSwitchDisabled)
+        .help(providerModeSwitchDisabled ? "Finish the current recording before switching mode" : "Switch transcription mode")
+    }
+
+    private func providerModeButton(
+        title: String,
+        isSelected: Bool,
+        tint: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            withAnimation(.spring(duration: 0.24, bounce: 0.14)) {
+                action()
+            }
+        } label: {
+            Text(title)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(isSelected ? .white : .secondary)
+                .padding(.horizontal, 7)
+                .frame(height: 20)
+                .background(isSelected ? tint : .clear, in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var isLocalProviderMode: Bool {
+        selectedTranscriptionProviderId == TranscriptionProviderDescriptor.localBackend.id
+    }
+
+    private var providerModeSwitchDisabled: Bool {
+        appState.isRecording ||
+        appState.isQuickRecordingTransitioning ||
+        appState.isQuickTranscriptionInFlight ||
+        sessionManager.isSessionRecording
     }
 
     // MARK: - Controls Section
@@ -190,11 +286,7 @@ struct MenuBarView: View {
 
                 Spacer()
 
-                if appState.recordingDuration > 0 {
-                    Text(formatDuration(appState.recordingDuration))
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
+                RecordingDurationLabel(activity: appState.recordingActivity)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -249,6 +341,10 @@ struct MenuBarView: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .strokeBorder(.orange.opacity(0.15), lineWidth: 0.5)
             )
+
+            // Levels live here rather than in Settings: this is the only
+            // surface reachable without leaving the call.
+            SessionMixerView(recorder: sessionManager.recorder)
 
             MenuBarButton(
                 label: "Stop Session",
@@ -366,10 +462,20 @@ struct MenuBarView: View {
     // MARK: - Recent History
 
     private var visiblePolishPresets: [PolishPreset] {
-        guard hasAnyConfiguredLanguageModelKey else {
+        guard hasUsablePolishModel else {
             return []
         }
         return appState.polishPresets.filter { $0.isEnabled && $0.showInMenu }
+    }
+
+    private var hasUsablePolishModel: Bool {
+        selectedTranscriptionProviderId == TranscriptionProviderDescriptor.localBackend.id
+            ? hasDownloadedLocalLanguageModel
+            : hasAnyConfiguredLanguageModelKey
+    }
+
+    private var hasDownloadedLocalLanguageModel: Bool {
+        appState.availableSummaryModels.contains(where: \.downloaded)
     }
 
     private var hasAnyConfiguredLanguageModelKey: Bool {
@@ -580,23 +686,9 @@ struct MenuBarView: View {
         }
     }
 
-    private func formatDuration(_ seconds: Double) -> String {
-        let mins = Int(seconds) / 60
-        let secs = Int(seconds) % 60
-        return String(format: "%d:%02d", mins, secs)
-    }
-
     private func openAndFocusSettings() {
         openWindow(id: "settings")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            NSApp.activate(ignoringOtherApps: true)
-            for window in NSApp.windows {
-                if window.title.contains("Settings") || window.identifier?.rawValue.contains("settings") == true {
-                    window.makeKeyAndOrderFront(nil)
-                    break
-                }
-            }
-        }
+        SettingsWindowFocus.focus()
     }
 
     private func showIntroductionScreen() {
@@ -620,6 +712,29 @@ struct MenuBarView: View {
         }
     }
 
+}
+
+// MARK: - Recording Duration Label
+
+/// The only view observing RecordingActivityModel's 10 Hz updates, so the
+/// rest of the menu (and every other AppState observer) stays untouched
+/// while recording.
+private struct RecordingDurationLabel: View {
+    @ObservedObject var activity: RecordingActivityModel
+
+    var body: some View {
+        if activity.duration > 0 {
+            Text(Self.format(activity.duration))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private static func format(_ seconds: Double) -> String {
+        let mins = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        return String(format: "%d:%02d", mins, secs)
+    }
 }
 
 // MARK: - Status Chip

@@ -2,170 +2,197 @@
  ReadyOnboardingView.swift
  =========================
 
- Final onboarding screen - celebrate completion and explain next steps.
- 
- Features:
- - Celebration message
- - Checklist of completed setup
- - Next steps guidance
- - Open AIT button (goes to Dashboard)
+ Final onboarding screen - confirms setup and launches the app.
  */
 
 import SwiftUI
 
 struct ReadyOnboardingView: View {
     let onFinish: () -> Void
-    
+
     @EnvironmentObject var appState: AppState
     @AppStorage("toggleRecordingShortcut") private var toggleShortcut = "⌃P"
-    
+    @State private var isLaunching = false
+    @State private var checkmarkPulse = false
+
     var body: some View {
-        VStack(spacing: 0) {
-            // Add top spacing to match other screens
-            Spacer()
-                .frame(height: 40)
-            
-            // Content area
-            VStack(spacing: 30) {
-                // Celebration Icon
-                ZStack {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [.green.opacity(0.2), .blue.opacity(0.2)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 140, height: 140)
-                        .blur(radius: 20)
-                    
-                    Text("🎉")
-                        .font(.system(size: 80))
-                }
-                
-                // Title
-                Text("You're Ready!")
-                    .font(.system(size: 36, weight: .bold))
-                
-                // Subtitle
-                Text("AIT is configured and ready to use")
-                    .font(.title3)
-                    .foregroundColor(.secondary)
-                
-                // Checklist
+        VStack(alignment: .leading, spacing: 0) {
+            Spacer(minLength: 24)
+
+            HStack(alignment: .center, spacing: 30) {
+                readyMark
+
                 VStack(alignment: .leading, spacing: 12) {
-                    ChecklistItem(
-                        icon: "checkmark.circle.fill",
-                        text: "Microphone configured",
-                        isComplete: true
-                    )
-                    
-                    ChecklistItem(
-                        icon: downloadedModelsCount > 0 ? "checkmark.circle.fill" : "circle",
-                        text: "\(downloadedModelsCount) model\(downloadedModelsCount == 1 ? "" : "s") downloaded",
-                        isComplete: downloadedModelsCount > 0
-                    )
-                    
-                    ChecklistItem(
-                        icon: "checkmark.circle.fill",
-                        text: "Shortcuts configured",
-                        isComplete: true
-                    )
+                    Text("Here we go.")
+                        .font(.system(size: 54, weight: .bold, design: .rounded))
+                        .tracking(-1)
+                        .foregroundStyle(.primary)
+
+                    Text("AIT is ready to capture, transcribe, and turn audio into useful output.")
+                        .font(.system(size: 17, weight: .medium))
+                        .lineSpacing(3)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: 560, alignment: .leading)
                 }
-                .padding(.horizontal, 80)
-                .padding(.vertical, 20)
-                .background(Color.gray.opacity(0.05))
-                .cornerRadius(12)
-                
-                // What's Next
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("What's next:")
-                        .font(.headline)
-                    
-                    VStack(alignment: .leading, spacing: 8) {
-                        NextStepRow(icon: "keyboard", text: "Press \(toggleShortcut) to start recording")
-                        NextStepRow(icon: "menubar.rectangle", text: "Access AIT from the menu bar")
-                        NextStepRow(icon: "gear", text: "Configure more settings in Preferences")
-                    }
-                }
-                .padding(.horizontal, 60)
             }
-            
+
+            Spacer(minLength: 46)
+
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Configured")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .tracking(1.4)
+                    .textCase(.uppercase)
+                    .foregroundStyle(.secondary)
+
+                HStack(alignment: .top, spacing: 26) {
+                    ReadyMetric(
+                        icon: "mic.fill",
+                        value: "Mic",
+                        label: "Permission ready",
+                        tint: .green
+                    )
+
+                    ReadyMetric(
+                        icon: "cube.fill",
+                        value: "\(downloadedModelsCount)",
+                        label: "Local model\(downloadedModelsCount == 1 ? "" : "s")",
+                        tint: downloadedModelsCount > 0 ? .green : .secondary
+                    )
+
+                    ReadyMetric(
+                        icon: "globe",
+                        value: "\(configuredAPIProviderCount)",
+                        label: "API provider\(configuredAPIProviderCount == 1 ? "" : "s")",
+                        tint: configuredAPIProviderCount > 0 ? .blue : .secondary
+                    )
+
+                    ReadyMetric(
+                        icon: "keyboard",
+                        value: toggleShortcut,
+                        label: "Record shortcut",
+                        tint: .blue
+                    )
+                }
+            }
+
             Spacer()
-            
-            // Open AIT Button - FIXED POSITION
-            VStack {
-                Button(action: onFinish) {
-                    HStack {
-                        Text("🚀 Open AIT Now")
-                            .font(.title2.weight(.semibold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
+
+            HStack(alignment: .firstTextBaseline) {
+                Text(launchHint)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button(action: launch) {
+                    Label("Open AIT", systemImage: "arrow.right.circle.fill")
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .frame(minWidth: 190)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .padding(.horizontal, 60)
+                .disabled(isLaunching)
             }
-            .frame(height: 80)
-            .padding(.bottom, 30)
         }
-        .padding()
+        .padding(34)
     }
-    
-    // MARK: - Helpers
-    
+
+    private var readyMark: some View {
+        ZStack {
+            Circle()
+                .fill(.green.opacity(0.12))
+                .frame(width: 118, height: 118)
+
+            Circle()
+                .strokeBorder(.green.opacity(0.34), lineWidth: 1)
+                .frame(width: 118, height: 118)
+
+            Circle()
+                .strokeBorder(.green.opacity(0.18), lineWidth: 1)
+                .frame(width: 152, height: 152)
+
+            Image(systemName: "checkmark")
+                .font(.system(size: 42, weight: .bold))
+                .foregroundStyle(.green)
+                .scaleEffect(checkmarkPulse ? 1.22 : 1)
+                .animation(.spring(duration: 0.18, bounce: 0.28), value: checkmarkPulse)
+        }
+    }
+
+    private func launch() {
+        guard !isLaunching else { return }
+        isLaunching = true
+
+        withAnimation(.spring(duration: 0.18, bounce: 0.28)) {
+            checkmarkPulse = true
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+            withAnimation(.spring(duration: 0.18, bounce: 0.2)) {
+                checkmarkPulse = false
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.36) {
+            onFinish()
+        }
+    }
+
     private var downloadedModelsCount: Int {
-        appState.availableModels.filter { $0.downloaded }.count
+        appState.availableModels.filter(\.downloaded).count
     }
-}
 
-// MARK: - Checklist Item
+    private var configuredAPIProviderCount: Int {
+        Set(
+            APITranscriptionModelStore.load()
+                .filter { APIKeychainStore.hasAPIKey(providerId: $0.providerId) }
+                .map(\.providerId)
+        ).count
+    }
 
-struct ChecklistItem: View {
-    let icon: String
-    let text: String
-    let isComplete: Bool
-    
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundColor(isComplete ? .green : .gray)
-                .frame(width: 24)
-            
-            Text(text)
-                .font(.body)
-                .foregroundColor(isComplete ? .primary : .secondary)
+    private var launchHint: String {
+        if downloadedModelsCount > 0 && configuredAPIProviderCount > 0 {
+            return "Use Local for privacy or Public for speed from the menu bar."
         }
-    }
-}
-
-// MARK: - Next Step Row
-
-struct NextStepRow: View {
-    let icon: String
-    let text: String
-    
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.body)
-                .foregroundColor(.accentColor)
-                .frame(width: 20)
-            
-            Text(text)
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+        if downloadedModelsCount > 0 {
+            return "Your local setup is ready; public providers can be added later."
         }
+        if configuredAPIProviderCount > 0 {
+            return "Your public transcription setup is ready; local models can be added later."
+        }
+        return "You can add models and providers later from Settings."
     }
 }
 
-// MARK: - Preview
+private struct ReadyMetric: View {
+    let icon: String
+    let value: String
+    let label: String
+    let tint: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(tint)
+                .frame(width: 26, height: 26)
+                .background(tint.opacity(0.14), in: Circle())
+
+            Text(value)
+                .font(.system(size: 25, weight: .bold, design: .rounded))
+                .foregroundStyle(.primary)
+
+            Text(label)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 142, alignment: .leading)
+    }
+}
 
 #Preview {
     ReadyOnboardingView(onFinish: {})
         .environmentObject(AppState())
-        .frame(width: 800, height: 750)
+        .frame(width: 900, height: 720)
 }

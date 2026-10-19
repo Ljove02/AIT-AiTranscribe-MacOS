@@ -29,11 +29,15 @@ import AVFoundation
 
 @main
 struct AiTranscribeApp: App {
-    /// Use shared singletons so AppDelegate can access them at launch
+    /// Use shared singletons so AppDelegate can access them at launch.
+    /// Only appState and sessionManager are observed — the scene body reads
+    /// their published state for the menu bar label. backendManager and
+    /// updateChecker are just passed along, so their publishes should not
+    /// re-evaluate the whole scene.
     @ObservedObject private var appState = AppState.shared
     @ObservedObject private var sessionManager = SessionManager.shared
-    @ObservedObject private var backendManager = BackendManager.shared
-    @ObservedObject private var updateChecker = UpdateChecker.shared
+    private let backendManager = BackendManager.shared
+    private let updateChecker = UpdateChecker.shared
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     @State private var hotkeysRegistered = false
@@ -53,10 +57,8 @@ struct AiTranscribeApp: App {
                 .environmentObject(backendManager)
                 .environmentObject(sessionManager)
                 .task {
-                    if !hotkeysRegistered {
-                        HotkeyManager.shared.setup(appState: appState, sessionManager: sessionManager)
-                        hotkeysRegistered = true
-                    }
+                    // Hotkeys start in AppDelegate, at launch. This runs only
+                    // when the menu is first opened.
                     requestMicrophonePermissionAtLaunch()
                 }
                 .onChange(of: appState.isRecording) { _, _ in }

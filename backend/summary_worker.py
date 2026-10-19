@@ -33,6 +33,7 @@ def main():
     parser.add_argument("--kv-group-size", type=int, default=64)
     parser.add_argument("--quantized-kv-start", type=int, default=0)
     parser.add_argument("--word-count", type=int, default=0)
+    parser.add_argument("--image-file", default=None)
     args = parser.parse_args()
 
     transcription_path = Path(args.transcription_file)
@@ -50,6 +51,7 @@ def main():
         total_presets=len(preset_requests),
         model_path=args.model_path,
         word_count=args.word_count,
+        has_image=bool(args.image_file),
     )
     emit("loading_model")
 
@@ -80,7 +82,13 @@ def main():
                 target_words=int(preset["target_words"]),
                 display_name=preset.get("display_name"),
             )
-            formatted_prompt = apply_chat_template(processor, config, prompt, num_images=0)
+            image_input = args.image_file if args.image_file else None
+            formatted_prompt = apply_chat_template(
+                processor,
+                config,
+                prompt,
+                num_images=1 if image_input else 0,
+            )
 
             emit(
                 "preset_started",
@@ -113,7 +121,7 @@ def main():
                 model,
                 processor,
                 formatted_prompt,
-                [],
+                image=image_input,
                 max_tokens=int(preset["max_output_tokens"]),
                 verbose=False,
                 kv_bits=(args.kv_bits if args.kv_bits > 0 else None),

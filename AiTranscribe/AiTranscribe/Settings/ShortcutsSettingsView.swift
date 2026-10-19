@@ -7,6 +7,8 @@ struct ShortcutsSettingsView: View {
     let hasAnimated: Bool
     let onAnimated: () -> Void
 
+    @EnvironmentObject private var appState: AppState
+
     // Recording shortcuts
     @AppStorage("toggleRecordingShortcut") private var toggleShortcut = "⌃P"
     @AppStorage("cancelRecordingShortcut") private var cancelShortcut = "⌃K"
@@ -19,6 +21,9 @@ struct ShortcutsSettingsView: View {
     @State private var isRecordingCancelShortcut = false
     @State private var isRecordingSessionToggle = false
     @State private var isRecordingSessionStop = false
+
+    /// The Polish preset (if any) whose pill is currently capturing keys
+    @State private var recordingPolishPresetId: String?
 
     /// Animation state
     @State private var appeared: Bool
@@ -38,7 +43,7 @@ struct ShortcutsSettingsView: View {
                         Text("Shortcuts")
                             .font(.system(size: 22, weight: .bold, design: .rounded))
 
-                        Text("4 shortcuts")
+                        Text("\(shortcutCount) shortcuts")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -105,8 +110,23 @@ struct ShortcutsSettingsView: View {
                 }
                 .staggerIn(index: 3, appeared: appeared)
 
+                // ── Polish Shortcuts ─────────────────────────────
+                if !polishShortcutPresets.isEmpty {
+                    SettingsDivider()
+                        .staggerIn(index: 4, appeared: appeared)
+
+                    Group {
+                        SettingsSectionHeader(title: "Polishes")
+
+                        ForEach(polishShortcutPresets) { preset in
+                            polishShortcutRow(preset)
+                        }
+                    }
+                    .staggerIn(index: 5, appeared: appeared)
+                }
+
                 SettingsDivider()
-                    .staggerIn(index: 4, appeared: appeared)
+                    .staggerIn(index: polishShortcutPresets.isEmpty ? 4 : 6, appeared: appeared)
 
                 // ── Hint ─────────────────────────────────────────
                 Group {
@@ -132,7 +152,7 @@ struct ShortcutsSettingsView: View {
                     .padding(.horizontal, 14)
                     .background(.thinMaterial, in: .rect(cornerRadius: 10, style: .continuous))
                 }
-                .staggerIn(index: 5, appeared: appeared)
+                .staggerIn(index: polishShortcutPresets.isEmpty ? 5 : 7, appeared: appeared)
 
                 Spacer(minLength: 20)
             }
@@ -146,6 +166,122 @@ struct ShortcutsSettingsView: View {
             appeared = true
             onAnimated()
         }
+    }
+
+    // MARK: - Polish shortcuts
+
+    /// Only Polishes that already carry a shortcut are listed — no empty
+    /// "assign one" rows. Disabled presets stay listed (dimmed) so every
+    /// stored key combination is accounted for.
+    private var polishShortcutPresets: [PolishPreset] {
+        appState.polishPresets.filter { normalizedPolishShortcut($0.shortcut ?? "") != nil }
+    }
+
+    private var shortcutCount: Int {
+        4 + polishShortcutPresets.count
+    }
+
+    private func polishShortcutRow(_ preset: PolishPreset) -> some View {
+        let losesConflict = shortcutLosesConflict(preset)
+        return HStack(alignment: .center, spacing: 16) {
+            Image(systemName: preset.symbolName)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 28)
+                .background(.white.opacity(0.06), in: .rect(cornerRadius: 8, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(preset.displayName)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.primary)
+
+                if !preset.isEnabled {
+                    Text("Disabled — this hotkey is inactive.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else if losesConflict {
+                    Text("Key combination already in use — this hotkey won't trigger.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                } else {
+                    Text("Global hotkey for this Polish.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+
+            if preset.isEnabled && losesConflict {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.orange)
+                    .help("Another shortcut registered this key combination first.")
+            }
+
+            ShortcutPill(
+                shortcut: polishShortcutBinding(for: preset),
+                isRecording: Binding(
+                    get: { recordingPolishPresetId == preset.id },
+                    set: { recordingPolishPresetId = $0 ? preset.id : nil }
+                )
+            )
+            .help("Shortcut for this Polish")
+
+            Button {
+                polishShortcutBinding(for: preset).wrappedValue = ""
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+                    .background(Color.primary.opacity(0.045), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Clear shortcut")
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .background(.thinMaterial, in: .rect(cornerRadius: 10, style: .continuous))
+        .padding(.vertical, 2)
+        .opacity(preset.isEnabled ? 1 : 0.55)
+    }
+
+    /// No `onChanged` on the pill: `appState.upsertPolishPreset` already calls
+    /// `HotkeyManager.shared.refreshHotkeys()`, so wiring one here would
+    /// unregister and re-register every hotkey twice per change.
+    private func polishShortcutBinding(for preset: PolishPreset) -> Binding<String> {
+        Binding(
+            get: {
+                appState.polishPresets.first(where: { $0.id == preset.id })?.shortcut ?? ""
+            },
+            set: { newValue in
+                guard var updated = appState.polishPresets.first(where: { $0.id == preset.id }) else { return }
+                updated.shortcut = normalizedPolishShortcut(newValue)
+                appState.upsertPolishPreset(updated)
+            }
+        )
+    }
+
+    /// Display-only duplicate flag; registration behavior is unchanged.
+    /// HotkeyManager registers the four recording/session hotkeys first, then
+    /// enabled Polishes in list order — the first registration of a key
+    /// combination wins and later ones fail silently, so a Polish always loses
+    /// to a system shortcut and a later Polish loses to an earlier enabled one.
+    private func shortcutLosesConflict(_ preset: PolishPreset) -> Bool {
+        guard let shortcut = normalizedPolishShortcut(preset.shortcut ?? "") else { return false }
+
+        let systemShortcuts = [toggleShortcut, cancelShortcut, sessionToggleShortcut, sessionStopShortcut]
+            .compactMap { normalizedPolishShortcut($0) }
+        if systemShortcuts.contains(shortcut) { return true }
+
+        for other in appState.polishPresets {
+            if other.id == preset.id { return false }
+            guard other.isEnabled,
+                  let otherShortcut = normalizedPolishShortcut(other.shortcut ?? "") else { continue }
+            if otherShortcut == shortcut { return true }
+        }
+        return false
     }
 }
 
@@ -176,20 +312,26 @@ struct ShortcutPill: View {
                 } else {
                     // Render each key symbol as a separate mini-key cap
                     let keys = parseShortcutDisplay(shortcut)
-                    ForEach(Array(keys.enumerated()), id: \.offset) { _, key in
-                        Text(key)
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.primary.opacity(0.85))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(
-                                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                    .fill(.white.opacity(0.06))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                            .strokeBorder(.white.opacity(0.1), lineWidth: 0.5)
-                                    )
-                            )
+                    if keys.isEmpty {
+                        Label("Shortcut", systemImage: "keyboard")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(keys.enumerated()), id: \.offset) { _, key in
+                            Text(key)
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.primary.opacity(0.85))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                        .fill(.white.opacity(0.06))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                                .strokeBorder(.white.opacity(0.1), lineWidth: 0.5)
+                                        )
+                                )
+                        }
                     }
                 }
             }

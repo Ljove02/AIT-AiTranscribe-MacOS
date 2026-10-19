@@ -1,0 +1,20 @@
+# codebase-memory-mcp project-specific exclusions.
+# Keep the graph focused on source, scripts, and docs instead of generated assets.
+
+build/
+dist/
+temp/
+venv
+.venv/
+.cache/
+.codebase-memory/
+
+*.dmg
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.mov
+*.mp4
+*.zip
+*.tar.gz
