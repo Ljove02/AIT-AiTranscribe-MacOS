@@ -21,7 +21,7 @@ set -e  # Exit on error
 # Get the directory where this script is located (works even when called from different directory)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$SCRIPT_DIR"
-VERSION="0.2.0"
+VERSION="0.3.0"
 APP_NAME="AiTranscribe"
 SKIP_BACKEND=false
 

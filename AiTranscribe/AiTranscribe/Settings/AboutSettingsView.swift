@@ -14,7 +14,7 @@ struct AboutView: View {
     @State private var iconHovered = false
 
     private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.2.0"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.3.0"
     }
 
     init(hasAnimated: Bool, onAnimated: @escaping () -> Void) {

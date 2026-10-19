@@ -82,7 +82,7 @@ struct SettingsSidebar: View {
 
             // Version badge
             if isExpanded {
-                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.2")")
+                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.3")")
                     .font(.system(size: 10, weight: .medium, design: .rounded))
                     .foregroundColor(.white.opacity(0.45))
                     .padding(.vertical, 3)
@@ -91,7 +91,7 @@ struct SettingsSidebar: View {
                     .padding(.bottom, 14)
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
             } else {
-                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.2")")
+                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.3")")
                     .font(.system(size: 8, weight: .medium, design: .rounded))
                     .foregroundStyle(.white.opacity(0.25))
                     .padding(.bottom, 14)

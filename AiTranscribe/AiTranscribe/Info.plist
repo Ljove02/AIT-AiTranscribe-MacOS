@@ -13,7 +13,7 @@
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.2</string>
+	<string>0.3.0</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleExecutable</key>
@@ -22,8 +22,6 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>AiTranscribe needs microphone access to record audio for transcription.</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>AiTranscribe can check the active browser tab when precise meeting detection is enabled, so it can detect Google Meet calls and copy the meeting link.</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>LSArchitecturePriority</key>

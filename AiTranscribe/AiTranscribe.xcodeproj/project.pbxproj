@@ -587,13 +587,12 @@
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSAppleEventsUsageDescription = "AiTranscribe can check the active browser tab when precise meeting detection is enabled, so it can detect Google Meet calls and copy the meeting link.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "AiTranscribe needs microphone access to record audio for AI transcription.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.3.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.aitranscribe.AiTranscribe;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -637,13 +636,12 @@
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSAppleEventsUsageDescription = "AiTranscribe can check the active browser tab when precise meeting detection is enabled, so it can detect Google Meet calls and copy the meeting link.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "AiTranscribe needs microphone access to record audio for AI transcription.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.3.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.aitranscribe.AiTranscribe;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
